@@ -30,23 +30,38 @@ class SandboxManager:
     def __init__(self, runner: SandboxRunner) -> None:
         self._runner = runner
         self._handles: dict[str, SandboxHandle] = {}
+        self._creating: dict[str, asyncio.Future[SandboxHandle]] = {}
         self._manager_lock = asyncio.Lock()
 
     async def get_or_create(self, worldline_id: str) -> SandboxHandle:
+        creator = False
         async with self._manager_lock:
             handle = self._handles.get(worldline_id)
             if handle is not None:
                 return handle
 
-        sandbox_id = await self._runner.start(worldline_id)
-        async with self._manager_lock:
-            existing = self._handles.get(worldline_id)
-            if existing is not None:
-                await self._runner.stop(sandbox_id)
-                return existing
-        handle = SandboxHandle(worldline_id=worldline_id, sandbox_id=sandbox_id)
-        self._handles[worldline_id] = handle
-        return handle
+            creating = self._creating.get(worldline_id)
+            if creating is None:
+                creating = asyncio.get_running_loop().create_future()
+                self._creating[worldline_id] = creating
+                creator = True
+
+        if not creator:
+            return await creating
+
+        try:
+            sandbox_id = await self._runner.start(worldline_id)
+            handle = SandboxHandle(worldline_id=worldline_id, sandbox_id=sandbox_id)
+            async with self._manager_lock:
+                self._handles[worldline_id] = handle
+                self._creating.pop(worldline_id, None)
+            creating.set_result(handle)
+            return handle
+        except Exception as exc:
+            async with self._manager_lock:
+                self._creating.pop(worldline_id, None)
+            creating.set_exception(exc)
+            raise
 
     async def execute(
         self,
@@ -87,6 +102,12 @@ class SandboxManager:
         async with self._manager_lock:
             handles = list(self._handles.values())
             self._handles.clear()
+            creating = list(self._creating.values())
+            self._creating.clear()
+
+        for future in creating:
+            if not future.done():
+                future.cancel()
 
         for handle in handles:
             await self._runner.stop(handle.sandbox_id)

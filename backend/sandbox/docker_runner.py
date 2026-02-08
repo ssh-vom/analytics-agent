@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 try:
     from backend import meta
@@ -31,26 +32,35 @@ class DockerSandboxRunner:
 
     async def execute(
         self,
+        sandbox_id: str,
         worldline_id: str,
         code: str,
         timeout_s: int,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self._execute_sync,
+            sandbox_id,
             worldline_id,
             code,
             timeout_s,
         )
 
+    async def start(self, worldline_id: str) -> str:
+        return await asyncio.to_thread(self._start_sync, worldline_id)
+
+    async def stop(self, sandbox_id: str) -> None:
+        await asyncio.to_thread(self._stop_sync, sandbox_id)
+
     def _workspace_dir(self, worldline_id: str) -> Path:
         return meta.DB_DIR / "worldlines" / worldline_id / "workspace"
 
-    def _build_command(self, workspace: Path, timeout_s: int) -> list[str]:
-        del timeout_s  # timeout is enforced by subprocess.run timeout.
+    def _build_start_command(self, sandbox_id: str, workspace: Path) -> list[str]:
         return [
             "docker",
             "run",
-            "--rm",
+            "-d",
+            "--name",
+            sandbox_id,
             "--network",
             "none",
             "--cap-drop",
@@ -77,6 +87,15 @@ class DockerSandboxRunner:
             "-w",
             "/workspace",
             self.image,
+            "sleep",
+            "infinity",
+        ]
+
+    def _build_exec_command(self, sandbox_id: str) -> list[str]:
+        return [
+            "docker",
+            "exec",
+            sandbox_id,
             "python",
             "/workspace/.runner_input.py",
         ]
@@ -111,8 +130,43 @@ class DockerSandboxRunner:
             )
         return artifacts
 
+    def _start_sync(self, worldline_id: str) -> str:
+        if shutil.which("docker") is None:
+            raise RuntimeError("docker CLI not found on PATH")
+
+        workspace = self._workspace_dir(worldline_id)
+        artifacts_dir = workspace / "artifacts"
+        workspace.mkdir(parents=True, exist_ok=True)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_worldline = "".join(ch for ch in worldline_id if ch.isalnum()) or "worldline"
+        sandbox_id = f"textql_{safe_worldline[-20:]}_{uuid4().hex[:8]}"
+
+        start_cmd = self._build_start_command(sandbox_id=sandbox_id, workspace=workspace)
+        proc = subprocess.run(
+            start_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(detail or "failed to start sandbox container")
+        return sandbox_id
+
+    def _stop_sync(self, sandbox_id: str) -> None:
+        if shutil.which("docker") is None:
+            return
+        subprocess.run(
+            ["docker", "rm", "-f", sandbox_id],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def _execute_sync(
         self,
+        sandbox_id: str,
         worldline_id: str,
         code: str,
         timeout_s: int,
@@ -132,7 +186,7 @@ class DockerSandboxRunner:
         script_path = workspace / ".runner_input.py"
         script_path.write_text(code, encoding="utf-8")
 
-        cmd = self._build_command(workspace=workspace, timeout_s=timeout_s)
+        cmd = self._build_exec_command(sandbox_id=sandbox_id)
         try:
             if shutil.which("docker") is None:
                 return {

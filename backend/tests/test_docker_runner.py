@@ -23,10 +23,10 @@ class DockerRunnerTests(unittest.TestCase):
     def _run(self, coro):
         return asyncio.run(coro)
 
-    def test_build_command_has_security_flags(self) -> None:
+    def test_build_start_command_has_security_flags(self) -> None:
         runner = DockerSandboxRunner()
         workspace = Path("/tmp/workspace")
-        cmd = runner._build_command(workspace, timeout_s=30)
+        cmd = runner._build_start_command("sb_1", workspace)
 
         self.assertIn("--network", cmd)
         self.assertEqual(cmd[cmd.index("--network") + 1], "none")
@@ -42,6 +42,9 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--user") + 1], "1000:1000")
         self.assertIn("-w", cmd)
         self.assertEqual(cmd[cmd.index("-w") + 1], "/workspace")
+        self.assertIn("--name", cmd)
+        self.assertEqual(cmd[cmd.index("--name") + 1], "sb_1")
+        self.assertIn("-d", cmd)
 
     def test_execute_success_returns_stdout_and_artifacts(self) -> None:
         runner = DockerSandboxRunner()
@@ -56,7 +59,14 @@ class DockerRunnerTests(unittest.TestCase):
         with patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"), patch(
             "sandbox.docker_runner.subprocess.run", side_effect=fake_run
         ):
-            out = self._run(runner.execute("w_success", "print('ok')", timeout_s=5))
+            out = self._run(
+                runner.execute(
+                    sandbox_id="sb_w_success",
+                    worldline_id="w_success",
+                    code="print('ok')",
+                    timeout_s=5,
+                )
+            )
 
         self.assertEqual(out["stdout"], "ok\n")
         self.assertEqual(out["error"], None)
@@ -74,7 +84,14 @@ class DockerRunnerTests(unittest.TestCase):
                 stderr="boom",
             ),
         ):
-            out = self._run(runner.execute("w_nonzero", "print('x')", timeout_s=5))
+            out = self._run(
+                runner.execute(
+                    sandbox_id="sb_w_nonzero",
+                    worldline_id="w_nonzero",
+                    code="print('x')",
+                    timeout_s=5,
+                )
+            )
 
         self.assertEqual(out["stdout"], "")
         self.assertEqual(out["stderr"], "boom")
@@ -91,7 +108,14 @@ class DockerRunnerTests(unittest.TestCase):
         with patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"), patch(
             "sandbox.docker_runner.subprocess.run", side_effect=timeout_exc
         ):
-            out = self._run(runner.execute("w_timeout", "print('x')", timeout_s=5))
+            out = self._run(
+                runner.execute(
+                    sandbox_id="sb_w_timeout",
+                    worldline_id="w_timeout",
+                    code="print('x')",
+                    timeout_s=5,
+                )
+            )
 
         self.assertIn("timed out", out["error"])
         self.assertEqual(out["stdout"], "partial out")
@@ -100,11 +124,24 @@ class DockerRunnerTests(unittest.TestCase):
     def test_execute_without_docker_cli_returns_error(self) -> None:
         runner = DockerSandboxRunner()
         with patch("sandbox.docker_runner.shutil.which", return_value=None):
-            out = self._run(runner.execute("w_no_docker", "print('x')", timeout_s=5))
+            out = self._run(
+                runner.execute(
+                    sandbox_id="sb_w_no_docker",
+                    worldline_id="w_no_docker",
+                    code="print('x')",
+                    timeout_s=5,
+                )
+            )
 
         self.assertEqual(out["stdout"], "")
         self.assertEqual(out["stderr"], "")
         self.assertIn("docker CLI not found", out["error"])
+
+    def test_start_without_docker_cli_raises(self) -> None:
+        runner = DockerSandboxRunner()
+        with patch("sandbox.docker_runner.shutil.which", return_value=None):
+            with self.assertRaises(RuntimeError):
+                self._run(runner.start("w_no_docker"))
 
 
 if __name__ == "__main__":
