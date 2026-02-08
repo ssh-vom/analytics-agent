@@ -6,13 +6,13 @@ from fastapi import APIRouter
 router = APIRouter(prefix="/api", tags=["worldlines"])
 
 
-class CreateWordlineRequest(BaseModel):
+class CreateWorldlineRequest(BaseModel):
     thread_id: str
     name: str | None = None
 
 
 @router.post("/worldlines")
-async def create_worldline(body: CreateWordlineRequest):
+async def create_worldline(body: CreateWorldlineRequest):
     worldline_id = new_id("worldline")
     thread_id = body.thread_id
     parent_worldline_id = None
