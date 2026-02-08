@@ -9,12 +9,19 @@ try:
         get_conn,
         get_worldline_row,
         set_worldline_head,
+        new_id,
     )
     from backend.sandbox.docker_runner import DockerSandboxRunner
     from backend.sandbox.manager import SandboxManager
 except ModuleNotFoundError:
     from duckdb_manager import execute_read_query
-    from meta import append_event, get_conn, get_worldline_row, set_worldline_head
+    from meta import (
+        append_event,
+        get_conn,
+        get_worldline_row,
+        set_worldline_head,
+        new_id,
+    )
     from sandbox.docker_runner import DockerSandboxRunner
     from sandbox.manager import SandboxManager
 
@@ -108,22 +115,70 @@ async def run_python(body: PythonToolRequest):
             {"code": body.code, "timeout": body.timeout},
         )
         try:
-            result = await _sandbox_manager.execute(
+            raw_result = await _sandbox_manager.execute(
                 worldline_id=body.worldline_id,
                 code=body.code,
                 timeout_s=body.timeout,
             )
-            result["execution_ms"] = int((time.perf_counter() - started) * 1000)
+            api_artifacts = []
+            db_artifacts = []
+            for artifact in raw_result.get("artifacts", []):
+                artifact_id = new_id("artifact")
+                api_artifacts.append(
+                    {
+                        "type": artifact.get("type", "file"),
+                        "name": artifact.get("name", "artifact"),
+                        "artifact_id": artifact_id,
+                    }
+                )
+
+                db_artifacts.append(
+                    {
+                        "id": artifact_id,
+                        "type": artifact.get("type", "file"),
+                        "name": artifact.get("name", "artifact"),
+                        "path": artifact.get("path", ""),
+                    }
+                )
+
+            api_result = {
+                "stdout": raw_result.get("stdout", ""),
+                "stderr": raw_result.get("stderr", ""),
+                "error": raw_result.get("error"),
+                "artifacts": api_artifacts,
+                "previews": raw_result.get("previews", {"dataframes": []}),
+                "execution_ms": int((time.perf_counter() - started) * 1000),
+            }
+
             result_event_id = append_event(
                 conn,
                 body.worldline_id,
                 call_event_id,
                 "tool_result_python",
-                result,
+                api_result,
             )
+            for artifact in db_artifacts:
+                if not artifact["path"]:
+                    continue
+
+                _ = conn.execute(
+                    """
+                        INSERT INTO artifacts (id, worldline_id, event_id, type, name, path)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                    (
+                        artifact["id"],
+                        body.worldline_id,
+                        result_event_id,
+                        artifact["type"],
+                        artifact["name"],
+                        artifact["path"],
+                    ),
+                )
+
             set_worldline_head(conn, body.worldline_id, result_event_id)
             conn.commit()
-            return result
+            return api_result
         except Exception as exc:
             result_event_id = append_event(
                 conn,
