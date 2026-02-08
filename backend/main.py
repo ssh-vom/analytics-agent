@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     from artifacts import router as artifacts_router
 
 REAPER_INTERVAL_SECONDS = int(os.getenv("SANDBOX_REAPER_INTERVAL_SECONDS", "60"))
-IDLE_TTLE_SECONDS = int(os.getenv("SANDBOX_IDLE_TTL_SECONDS", "900"))
+IDLE_TTL_SECONDS = int(os.getenv("SANDBOX_IDLE_TTL_SECONDS", "900"))
 
 app = FastAPI(title="Agent Core Backend")
 
@@ -32,12 +32,12 @@ async def _sandbox_reaper_loop(stop_event: asyncio.Event) -> None:
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=REAPER_INTERVAL_SECONDS)
-        except asyncio.TimeoutErorr:
+        except asyncio.TimeoutError:
             continue
 
 
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
     init_meta_db()
     stop_event = asyncio.Event()
     app.state.sandbox_reaper_stop_event = stop_event
