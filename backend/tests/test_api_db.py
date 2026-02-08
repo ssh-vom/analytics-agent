@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fastapi import HTTPException
+
 import meta
 import threads
 import worldlines
@@ -160,6 +162,40 @@ class Stage1ApiDbTests(unittest.TestCase):
         self.assertEqual([event["id"] for event in response["events"]], ["event_1", "event_2"])
         self.assertIsNone(response["next_cursor"])
         self.assertEqual(response["events"][0]["payload"], json.loads('{"text":"q1"}'))
+
+    def test_get_thread_worldlines_pagination(self) -> None:
+        thread_id = self._create_thread()
+        worldline_a = self._create_worldline(thread_id, "main")
+        worldline_b = self._create_worldline(thread_id, "branch-a")
+
+        first_page = self._run(
+            threads.get_thread_worldlines(thread_id=thread_id, limit=1, cursor=None)
+        )
+        self.assertEqual(len(first_page["worldlines"]), 1)
+        self.assertIsNotNone(first_page["next_cursor"])
+
+        second_page = self._run(
+            threads.get_thread_worldlines(
+                thread_id=thread_id, limit=10, cursor=first_page["next_cursor"]
+            )
+        )
+        self.assertEqual(len(second_page["worldlines"]), 1)
+        self.assertIsNone(second_page["next_cursor"])
+
+        fetched_ids = {
+            first_page["worldlines"][0]["id"],
+            second_page["worldlines"][0]["id"],
+        }
+        self.assertEqual(fetched_ids, {worldline_a, worldline_b})
+
+    def test_get_thread_worldlines_not_found(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(
+                threads.get_thread_worldlines(
+                    thread_id="thread_missing", limit=50, cursor=None
+                )
+            )
+        self.assertEqual(ctx.exception.status_code, 404)
 
 
 if __name__ == "__main__":
