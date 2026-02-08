@@ -62,12 +62,28 @@ class PythonToolTests(unittest.TestCase):
     def test_python_tool_success_returns_result_and_appends_events(self) -> None:
         thread_id = self._create_thread()
         worldline_id = self._create_worldline(thread_id)
+        artifact_path = (
+            meta.DB_DIR
+            / "worldlines"
+            / worldline_id
+            / "workspace"
+            / "artifacts"
+            / "result.md"
+        )
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text("ok", encoding="utf-8")
         fake_manager = FakeSandboxManager(
             result={
                 "stdout": "hello\n",
                 "stderr": "",
                 "error": None,
-                "artifacts": [],
+                "artifacts": [
+                    {
+                        "type": "md",
+                        "name": "result.md",
+                        "path": str(artifact_path),
+                    }
+                ],
                 "previews": {"dataframes": []},
             }
         )
@@ -87,6 +103,11 @@ class PythonToolTests(unittest.TestCase):
         self.assertEqual(result["stdout"], "hello\n")
         self.assertEqual(result["error"], None)
         self.assertIn("execution_ms", result)
+        self.assertEqual(len(result["artifacts"]), 1)
+        self.assertEqual(result["artifacts"][0]["type"], "md")
+        self.assertEqual(result["artifacts"][0]["name"], "result.md")
+        self.assertIn("artifact_id", result["artifacts"][0])
+        self.assertNotIn("path", result["artifacts"][0])
 
         with meta.get_conn() as conn:
             event_rows = conn.execute(
@@ -102,6 +123,15 @@ class PythonToolTests(unittest.TestCase):
                 "SELECT head_event_id FROM worldlines WHERE id = ?",
                 (worldline_id,),
             ).fetchone()
+            artifact_rows = conn.execute(
+                """
+                SELECT id, worldline_id, event_id, type, name, path
+                FROM artifacts
+                WHERE worldline_id = ?
+                ORDER BY rowid
+                """,
+                (worldline_id,),
+            ).fetchall()
 
         self.assertEqual(
             [row["type"] for row in event_rows],
@@ -112,6 +142,13 @@ class PythonToolTests(unittest.TestCase):
             {"code": "print('hello')", "timeout": 15},
         )
         self.assertEqual(worldline_row["head_event_id"], event_rows[-1]["id"])
+        self.assertEqual(len(artifact_rows), 1)
+        self.assertEqual(artifact_rows[0]["id"], result["artifacts"][0]["artifact_id"])
+        self.assertEqual(artifact_rows[0]["worldline_id"], worldline_id)
+        self.assertEqual(artifact_rows[0]["event_id"], event_rows[-1]["id"])
+        self.assertEqual(artifact_rows[0]["type"], "md")
+        self.assertEqual(artifact_rows[0]["name"], "result.md")
+        self.assertEqual(artifact_rows[0]["path"], str(artifact_path))
 
     def test_python_tool_worldline_not_found(self) -> None:
         fake_manager = FakeSandboxManager()

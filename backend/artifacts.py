@@ -1,7 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pathlib import Path
-from meta import get_conn
+
+try:
+    from backend.meta import get_conn
+except ModuleNotFoundError:
+    from meta import get_conn
 
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
