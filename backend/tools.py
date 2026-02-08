@@ -1,8 +1,13 @@
 import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from duckdb_manager import execute_read_query
-from meta import get_conn, get_worldline_row, append_event, set_worldline_head
+
+try:
+    from backend.duckdb_manager import execute_read_query
+    from backend.meta import append_event, get_conn, get_worldline_row, set_worldline_head
+except ModuleNotFoundError:
+    from duckdb_manager import execute_read_query
+    from meta import append_event, get_conn, get_worldline_row, set_worldline_head
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 

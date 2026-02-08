@@ -1,12 +1,14 @@
-from pathlib import Path
 import duckdb
-from meta import DB_DIR
+from pathlib import Path
 
-WORLDLINES_DIR = DB_DIR / "worldlines"
+try:
+    from backend import meta
+except ModuleNotFoundError:
+    import meta
 
 
 def worldline_db_path(worldline_id: str) -> Path:
-    return WORLDLINES_DIR / worldline_id / "state.duckdb"
+    return meta.DB_DIR / "worldlines" / worldline_id / "state.duckdb"
 
 
 def ensure_worldline_db(worldline_id: str) -> Path:

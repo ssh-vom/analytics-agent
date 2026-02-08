@@ -1,6 +1,10 @@
-from pydantic.main import BaseModel
-from meta import new_id, get_conn
 from fastapi import APIRouter
+from pydantic import BaseModel
+
+try:
+    from backend.meta import get_conn, new_id
+except ModuleNotFoundError:
+    from meta import get_conn, new_id
 
 
 router = APIRouter(prefix="/api", tags=["threads"])

@@ -1,7 +1,11 @@
 import json
 from fastapi import APIRouter, HTTPException, Query
-from meta import get_conn, new_id
 from pydantic import BaseModel
+
+try:
+    from backend.meta import get_conn, new_id
+except ModuleNotFoundError:
+    from meta import get_conn, new_id
 
 
 router = APIRouter(prefix="/api", tags=["worldlines"])
@@ -26,6 +30,13 @@ async def create_worldline(body: CreateWorldlineRequest):
     head_event_id = None
     name = body.name if body and body.name else "main"
     with get_conn() as conn:
+        thread_row = conn.execute(
+            "SELECT id FROM threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+        if thread_row is None:
+            raise HTTPException(status_code=404, detail="thread not found")
+
         _ = conn.execute(
             "INSERT INTO worldlines (id, thread_id, parent_worldline_id, forked_from_event_id, head_event_id, name) VALUES (?, ?, ?, ?, ?, ?)",
             (
@@ -55,7 +66,7 @@ async def branch_worldline(worldline_id: str, body: BranchWorldlineRequest):
             raise HTTPException(status_code=404, detail="source worldline not found")
 
         source_event = conn.execute(
-            "SELECT id, worldline_id FROM events where id = ?",
+            "SELECT id, worldline_id FROM events WHERE id = ?",
             (body.from_event_id,),
         ).fetchone()
         if source_event is None:
