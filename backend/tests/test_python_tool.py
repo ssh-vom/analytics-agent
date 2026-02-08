@@ -212,6 +212,200 @@ class PythonToolTests(unittest.TestCase):
         )
         self.assertEqual(worldline_row["head_event_id"], event_rows[-1]["id"])
 
+    def test_python_tool_replays_prior_successful_code(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_call_ok",
+                    worldline_id,
+                    None,
+                    "tool_call_python",
+                    json.dumps({"code": "x = 41", "timeout": 10}),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_result_ok",
+                    worldline_id,
+                    "event_call_ok",
+                    "tool_result_python",
+                    json.dumps({"stdout": "", "stderr": "", "error": None}),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_call_fail",
+                    worldline_id,
+                    "event_result_ok",
+                    "tool_call_python",
+                    json.dumps({"code": "x = 0", "timeout": 10}),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_result_fail",
+                    worldline_id,
+                    "event_call_fail",
+                    "tool_result_python",
+                    json.dumps({"stdout": "", "stderr": "boom", "error": "boom"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_result_fail", worldline_id),
+            )
+            conn.commit()
+
+        fake_manager = FakeSandboxManager(
+            result={
+                "stdout": "42\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [],
+                "previews": {"dataframes": []},
+            }
+        )
+
+        with patch.object(tools, "_sandbox_manager", fake_manager):
+            result = self._run(
+                tools.run_python(
+                    tools.PythonToolRequest(
+                        worldline_id=worldline_id,
+                        code="print(x + 1)",
+                        timeout=10,
+                    )
+                )
+            )
+
+        self.assertEqual(result["error"], None)
+        self.assertEqual(len(fake_manager.calls), 1)
+        executed_code = fake_manager.calls[0][1]
+        self.assertIn("x = 41", executed_code)
+        self.assertIn("print(x + 1)", executed_code)
+        self.assertNotIn("x = 0", executed_code)
+
+    def test_python_tool_replay_on_branch_uses_fork_point_history(self) -> None:
+        thread_id = self._create_thread()
+        source_worldline_id = self._create_worldline(thread_id, "main")
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_call_pre_fork",
+                    source_worldline_id,
+                    None,
+                    "tool_call_python",
+                    json.dumps({"code": "x = 10", "timeout": 10}),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_result_pre_fork",
+                    source_worldline_id,
+                    "event_call_pre_fork",
+                    "tool_result_python",
+                    json.dumps({"stdout": "", "stderr": "", "error": None}),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_call_post_fork_source_only",
+                    source_worldline_id,
+                    "event_result_pre_fork",
+                    "tool_call_python",
+                    json.dumps({"code": "x = 999", "timeout": 10}),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_result_post_fork_source_only",
+                    source_worldline_id,
+                    "event_call_post_fork_source_only",
+                    "tool_result_python",
+                    json.dumps({"stdout": "", "stderr": "", "error": None}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_result_post_fork_source_only", source_worldline_id),
+            )
+            conn.commit()
+
+        branch_response = self._run(
+            worldlines.branch_worldline(
+                source_worldline_id,
+                worldlines.BranchWorldlineRequest(
+                    from_event_id="event_result_pre_fork",
+                    name="branch-a",
+                ),
+            )
+        )
+        branched_worldline_id = branch_response["new_worldline_id"]
+
+        fake_manager = FakeSandboxManager(
+            result={
+                "stdout": "11\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [],
+                "previews": {"dataframes": []},
+            }
+        )
+
+        with patch.object(tools, "_sandbox_manager", fake_manager):
+            result = self._run(
+                tools.run_python(
+                    tools.PythonToolRequest(
+                        worldline_id=branched_worldline_id,
+                        code="print(x + 1)",
+                        timeout=10,
+                    )
+                )
+            )
+
+        self.assertEqual(result["error"], None)
+        self.assertEqual(len(fake_manager.calls), 1)
+        call_worldline_id, executed_code, _ = fake_manager.calls[0]
+        self.assertEqual(call_worldline_id, branched_worldline_id)
+        self.assertIn("x = 10", executed_code)
+        self.assertIn("print(x + 1)", executed_code)
+        self.assertNotIn("x = 999", executed_code)
+
 
 if __name__ == "__main__":
     unittest.main()

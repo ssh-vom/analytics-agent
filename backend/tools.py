@@ -1,4 +1,5 @@
 import time
+import json
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -103,6 +104,76 @@ class PythonToolRequest(BaseModel):
     timeout: int = Field(default=30, ge=1, le=120)
 
 
+def _load_event_chain(conn, head_event_id: str | None) -> list[dict]:
+    if head_event_id is None:
+        return []
+
+    rows = conn.execute(
+        """
+        WITH RECURSIVE chain AS (
+            SELECT id, parent_event_id, type, payload_json, created_at, 0 AS depth
+            FROM events
+            WHERE id = ?
+            UNION ALL
+            SELECT e.id, e.parent_event_id, e.type, e.payload_json, e.created_at, chain.depth + 1
+            FROM events e
+            JOIN chain ON chain.parent_event_id = e.id
+        )
+        SELECT id, parent_event_id, type, payload_json, created_at, depth
+        FROM chain
+        ORDER BY depth DESC
+        """,
+        (head_event_id,),
+    ).fetchall()
+
+    events: list[dict] = []
+    for row in rows:
+        events.append(
+            {
+                "id": row["id"],
+                "parent_event_id": row["parent_event_id"],
+                "type": row["type"],
+                "payload": json.loads(row["payload_json"]),
+                "created_at": row["created_at"],
+            }
+        )
+    return events
+
+
+def _extract_successful_python_codes(events: list[dict]) -> list[str]:
+    by_id = {event["id"]: event for event in events}
+    codes: list[str] = []
+
+    for event in events:
+        if event["type"] != "tool_result_python":
+            continue
+
+        payload = event.get("payload", {})
+        if payload.get("error"):
+            continue
+
+        call_event = by_id.get(event["parent_event_id"])
+        if not call_event or call_event["type"] != "tool_call_python":
+            continue
+
+        code = call_event.get("payload", {}).get("code")
+        if code:
+            codes.append(code)
+
+    return codes
+
+
+def _build_replay_code(prior_codes: list[str], current_code: str) -> str:
+    if not prior_codes:
+        return current_code
+
+    chunks: list[str] = []
+    for idx, code in enumerate(prior_codes, start=1):
+        chunks.append(f"# replay_step_{idx}\n{code}")
+    chunks.append(f"# current_step\n{current_code}")
+    return "\n\n".join(chunks)
+
+
 @router.post("/python")
 async def run_python(body: PythonToolRequest):
     started = time.perf_counter()
@@ -111,6 +182,10 @@ async def run_python(body: PythonToolRequest):
         if worldline is None:
             raise HTTPException(status_code=404, detail="worldline not found")
         parent_event_id = worldline["head_event_id"]
+        prior_events = _load_event_chain(conn, parent_event_id)
+        prior_python_codes = _extract_successful_python_codes(prior_events)
+        execution_code = _build_replay_code(prior_python_codes, body.code)
+
         call_event_id = append_event(
             conn,
             body.worldline_id,
@@ -121,7 +196,7 @@ async def run_python(body: PythonToolRequest):
         try:
             raw_result = await _sandbox_manager.execute(
                 worldline_id=body.worldline_id,
-                code=body.code,
+                code=execution_code,
                 timeout_s=body.timeout,
             )
             api_artifacts = []
