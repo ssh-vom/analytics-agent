@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -94,3 +95,37 @@ def init_meta_db() -> None:
         for statement in SCHEMA_STATEMENTS:
             _ = conn.execute(statement)  # discard cursor
         conn.commit()
+
+
+def get_worldline_row(conn: sqlite3.Connection, worldline_id: str):
+    return conn.execute(
+        "SELECT id, head_event_id FROM worldlines WHERE id = ?",
+        (worldline_id,),
+    ).fetchone()
+
+
+def append_event(
+    conn: sqlite3.Connection,
+    worldline_id: str,
+    parent_event_id: str | None,
+    event_type: str,
+    payload: dict,
+) -> str:
+    event_id = new_id("event")
+    _ = conn.execute(
+        """
+        INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (event_id, worldline_id, parent_event_id, event_type, json.dumps(payload)),
+    )
+    return event_id
+
+
+def set_worldline_head(
+    conn: sqlite3.Connection, worldline_id: str, event_id: str
+) -> None:
+    _ = conn.execute(
+        "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+        (event_id, worldline_id),
+    )
