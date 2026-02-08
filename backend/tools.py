@@ -48,6 +48,10 @@ def validate_read_only_sql(sql: str) -> None:
         )
 
 
+def get_sandbox_manager() -> SandboxManager:
+    return _sandbox_manager
+
+
 @router.post("/sql")
 async def run_sql(body: SqlToolRequest):
     validate_read_only_sql(body.sql)
