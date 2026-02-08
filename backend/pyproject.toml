@@ -1,0 +1,7 @@
+[project]
+name = "Analytics Agent"
+version = "0.1.0"
+description = "An agent aimed to analyze datasets by calling python and SQL tooling"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
