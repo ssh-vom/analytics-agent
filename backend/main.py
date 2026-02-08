@@ -1,6 +1,14 @@
-def main():
-    print("Hello from backend!")
+from fastapi import FastAPI
+from meta import init_meta_db
+
+app = FastAPI(title="Agent Core Backend")
 
 
-if __name__ == "__main__":
-    main()
+@app.on_event("startup")
+def startup() -> None:
+    init_meta_db()
+
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
