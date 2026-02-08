@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,6 +117,13 @@ class DockerSandboxRunner:
         code: str,
         timeout_s: int,
     ) -> dict[str, Any]:
+        def _to_text(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return str(value)
+
         workspace = self._workspace_dir(worldline_id)
         artifacts_dir = workspace / "artifacts"
         workspace.mkdir(parents=True, exist_ok=True)
@@ -126,40 +134,50 @@ class DockerSandboxRunner:
 
         cmd = self._build_command(workspace=workspace, timeout_s=timeout_s)
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
+            if shutil.which("docker") is None:
+                return {
+                    "stdout": "",
+                    "stderr": "",
+                    "error": "docker CLI not found on PATH",
+                    "artifacts": self._scan_artifacts(workspace),
+                    "previews": {"dataframes": []},
+                }
+
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_s,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                return {
+                    "stdout": _to_text(exc.stdout),
+                    "stderr": _to_text(exc.stderr),
+                    "error": f"Python execution timed out after {timeout_s} seconds",
+                    "artifacts": self._scan_artifacts(workspace),
+                    "previews": {"dataframes": []},
+                }
+            except Exception as exc:
+                return {
+                    "stdout": "",
+                    "stderr": "",
+                    "error": str(exc),
+                    "artifacts": self._scan_artifacts(workspace),
+                    "previews": {"dataframes": []},
+                }
+
+            error = None
+            if proc.returncode != 0:
+                error = (proc.stderr or "").strip() or f"Process exited with code {proc.returncode}"
+
             return {
-                "stdout": "",
-                "stderr": "",
-                "error": f"Python execution timed out after {timeout_s} seconds",
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "error": error,
                 "artifacts": self._scan_artifacts(workspace),
                 "previews": {"dataframes": []},
             }
-        except Exception as exc:
-            return {
-                "stdout": "",
-                "stderr": "",
-                "error": str(exc),
-                "artifacts": self._scan_artifacts(workspace),
-                "previews": {"dataframes": []},
-            }
-
-        error = None
-        if proc.returncode != 0:
-            error = (
-                proc.stderr or ""
-            ).strip() or f"Process exited with code {proc.returncode}"
-
-        return {
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-            "error": error,
-            "artifacts": self._scan_artifacts(workspace),
-            "previews": {"dataframes": []},
-        }
+        finally:
+            script_path.unlink(missing_ok=True)
