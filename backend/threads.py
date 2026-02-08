@@ -15,7 +15,7 @@ async def create_thread(body: CreateThreadRequest | None = None):
     thread_id = new_id("thread")
     title = body.title if body and body.title else "New Base Thread"
     with get_conn() as conn:
-        conn.execute(
+        _ = conn.execute(
             "INSERT INTO threads (id, title) VALUES (?, ?)", (thread_id, title)
         )
         conn.commit()
