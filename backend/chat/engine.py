@@ -8,7 +8,14 @@ from typing import Any, Awaitable, Callable
 from fastapi import HTTPException
 
 try:
-    from backend.chat.llm_client import ChatMessage, LlmClient, ToolCall, ToolDefinition
+    from backend.chat.llm_client import (
+        ChatMessage,
+        LlmClient,
+        LlmResponse,
+        StreamChunk,
+        ToolCall,
+        ToolDefinition,
+    )
     from backend.meta import (
         append_event,
         get_conn,
@@ -24,7 +31,14 @@ try:
     from backend.worldlines import get_worldline_events
     from backend.worldline_service import BranchOptions, WorldlineService
 except ModuleNotFoundError:
-    from chat.llm_client import ChatMessage, LlmClient, ToolCall, ToolDefinition
+    from chat.llm_client import (
+        ChatMessage,
+        LlmClient,
+        LlmResponse,
+        StreamChunk,
+        ToolCall,
+        ToolDefinition,
+    )
     from meta import append_event, get_conn, get_worldline_row, set_worldline_head
     from tools import (
         PythonToolRequest,
@@ -107,20 +121,34 @@ class ChatEngine:
         }
 
         for _ in range(self.max_iterations):
-            response = await self.llm_client.generate(
-                messages=messages,
-                tools=self._tool_definitions(
-                    include_python=not python_succeeded_in_turn
-                ),
-                max_output_tokens=self.max_output_tokens,
-            )
-
-            if response.text and not response.tool_calls and on_delta is not None:
-                await self._emit_assistant_text_deltas(
+            # ----- LLM call: stream when on_delta is available, else batch -----
+            if on_delta is not None:
+                response = await self._stream_llm_response(
                     worldline_id=active_worldline_id,
-                    text=response.text,
+                    messages=messages,
+                    tools=self._tool_definitions(
+                        include_python=not python_succeeded_in_turn
+                    ),
                     on_delta=on_delta,
                 )
+            else:
+                response = await self.llm_client.generate(
+                    messages=messages,
+                    tools=self._tool_definitions(
+                        include_python=not python_succeeded_in_turn
+                    ),
+                    max_output_tokens=self.max_output_tokens,
+                )
+
+            # ----- Emit assistant_plan if text accompanies tool calls ----------
+            if response.text and response.tool_calls:
+                plan_event = self._append_worldline_event(
+                    worldline_id=active_worldline_id,
+                    event_type="assistant_plan",
+                    payload={"text": response.text},
+                )
+                if on_event is not None:
+                    await on_event(active_worldline_id, plan_event)
 
             if response.text:
                 messages.append(ChatMessage(role="assistant", content=response.text))
@@ -161,12 +189,8 @@ class ChatEngine:
                         repeated_call_detected = True
                         break
 
-                    if on_delta is not None:
-                        await self._emit_tool_call_deltas(
-                            worldline_id=active_worldline_id,
-                            tool_call=tool_call,
-                            on_delta=on_delta,
-                        )
+                    # Note: tool call deltas were already streamed in _stream_llm_response.
+                    # For the non-streaming path (on_delta is None), no deltas are emitted.
 
                     tool_result, switched_worldline_id = await self._execute_tool_call(
                         worldline_id=active_worldline_id,
@@ -233,6 +257,151 @@ class ChatEngine:
             events,
         )
 
+    # ---- real-time streaming bridge -----------------------------------------
+
+    async def _stream_llm_response(
+        self,
+        *,
+        worldline_id: str,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition],
+        on_delta: Callable[[str, dict[str, Any]], Awaitable[None]],
+    ) -> LlmResponse:
+        """Consume ``generate_stream()`` from the adapter, emit deltas in
+        real-time, and return the accumulated ``LlmResponse``.
+
+        This replaces the old simulated-streaming approach.
+
+        Delta protocol emitted to ``on_delta``:
+          - ``{"type": "assistant_text", "delta": "..."}``
+          - ``{"type": "assistant_text", "done": True}``
+          - ``{"type": "tool_call_sql"|"tool_call_python", "call_id": "...", "delta": "..."}``
+          - ``{"type": "tool_call_sql"|"tool_call_python", "call_id": "...", "done": True}``
+        """
+        text_buffer: list[str] = []
+        # Per-tool-call accumulators:  call_id -> {name, args_json_parts}
+        tool_call_accum: dict[str, dict[str, Any]] = {}
+        # Track whether we've emitted text and whether we've sent the text-done signal
+        emitted_text = False
+
+        stream = self.llm_client.generate_stream(
+            messages=messages,
+            tools=tools,
+            max_output_tokens=self.max_output_tokens,
+        )
+
+        async for chunk in stream:
+            if chunk.type == "text":
+                delta_text = chunk.text or ""
+                if delta_text:
+                    text_buffer.append(delta_text)
+                    emitted_text = True
+                    await on_delta(
+                        worldline_id,
+                        {"type": "assistant_text", "delta": delta_text},
+                    )
+                continue
+
+            if chunk.type == "tool_call_start":
+                call_id = chunk.tool_call_id or f"call_{len(tool_call_accum) + 1}"
+                tool_name = chunk.tool_name or ""
+                tool_call_accum[call_id] = {
+                    "name": tool_name,
+                    "args_parts": [],
+                }
+
+                # If we were streaming text and a tool call starts, close the
+                # text stream (text will become an assistant_plan event).
+                if emitted_text:
+                    await on_delta(
+                        worldline_id,
+                        {"type": "assistant_text", "done": True},
+                    )
+                    emitted_text = False
+                continue
+
+            if chunk.type == "tool_call_delta":
+                call_id = chunk.tool_call_id or ""
+                args_delta = chunk.arguments_delta or ""
+                if call_id in tool_call_accum:
+                    tool_call_accum[call_id]["args_parts"].append(args_delta)
+
+                # Determine the delta event type from the tool name
+                accum = tool_call_accum.get(call_id)
+                tool_name = accum["name"] if accum else ""
+                delta_type = self._tool_name_to_delta_type(tool_name)
+
+                if delta_type and args_delta:
+                    # For SQL/Python, we need to parse the arguments delta and
+                    # extract the code/sql content.  The raw args_delta is a
+                    # fragment of JSON, so we cannot parse it incrementally.
+                    # Instead, we forward the raw JSON fragment.  The engine
+                    # will do a final parse when the call is done.
+                    # However, for a better UX we try to extract code tokens.
+                    await on_delta(
+                        worldline_id,
+                        {
+                            "type": delta_type,
+                            "call_id": call_id,
+                            "delta": args_delta,
+                        },
+                    )
+                continue
+
+            if chunk.type == "tool_call_done":
+                call_id = chunk.tool_call_id or ""
+                accum = tool_call_accum.get(call_id)
+                tool_name = accum["name"] if accum else ""
+                delta_type = self._tool_name_to_delta_type(tool_name)
+                if delta_type:
+                    await on_delta(
+                        worldline_id,
+                        {
+                            "type": delta_type,
+                            "call_id": call_id,
+                            "done": True,
+                        },
+                    )
+                continue
+
+        # If text was streamed but no tool_call_start closed it, close now.
+        if emitted_text:
+            await on_delta(
+                worldline_id,
+                {"type": "assistant_text", "done": True},
+            )
+
+        # ----- Assemble the final LlmResponse from accumulated buffers -----
+        full_text = "".join(text_buffer).strip() or None
+
+        tool_calls: list[ToolCall] = []
+        for call_id, accum in tool_call_accum.items():
+            raw_json = "".join(accum["args_parts"])
+            try:
+                arguments = json.loads(raw_json) if raw_json else {}
+            except json.JSONDecodeError:
+                arguments = {"_raw": raw_json}
+            tool_calls.append(
+                ToolCall(
+                    id=call_id,
+                    name=accum["name"],
+                    arguments=arguments,
+                )
+            )
+
+        return LlmResponse(text=full_text, tool_calls=tool_calls)
+
+    @staticmethod
+    def _tool_name_to_delta_type(tool_name: str) -> str | None:
+        """Map an LLM tool name to the SSE delta type for streaming."""
+        if tool_name == "run_sql":
+            return "tool_call_sql"
+        if tool_name == "run_python":
+            return "tool_call_python"
+        return None
+
+    # ---- tool definitions ---------------------------------------------------
+
     def _tool_definitions(self, *, include_python: bool = True) -> list[ToolDefinition]:
         tools: list[ToolDefinition] = [
             ToolDefinition(
@@ -265,6 +434,8 @@ class ChatEngine:
                 ),
             )
         return tools
+
+    # ---- tool execution -----------------------------------------------------
 
     async def _execute_tool_call(
         self,
@@ -370,6 +541,8 @@ class ChatEngine:
 
         return {"error": f"unknown tool '{name}'"}, None
 
+    # ---- message building ---------------------------------------------------
+
     async def _build_llm_messages(self, worldline_id: str) -> list[ChatMessage]:
         timeline = await get_worldline_events(
             worldline_id=worldline_id,
@@ -389,7 +562,7 @@ class ChatEngine:
                     messages.append(ChatMessage(role="user", content=str(text)))
                 continue
 
-            if event_type == "assistant_message":
+            if event_type in {"assistant_message", "assistant_plan"}:
                 text = payload.get("text")
                 if text:
                     messages.append(ChatMessage(role="assistant", content=str(text)))
@@ -408,6 +581,8 @@ class ChatEngine:
 
         return messages
 
+    # ---- helpers ------------------------------------------------------------
+
     def _tool_signature(self, *, worldline_id: str, tool_call: ToolCall) -> str:
         return json.dumps(
             {
@@ -419,123 +594,6 @@ class ChatEngine:
             sort_keys=True,
             default=str,
         )
-
-    async def _emit_assistant_text_deltas(
-        self,
-        *,
-        worldline_id: str,
-        text: str,
-        on_delta: Callable[[str, dict[str, Any]], Awaitable[None]],
-    ) -> None:
-        if not text:
-            return
-
-        for chunk in self._chunk_text(text):
-            await on_delta(
-                worldline_id,
-                {
-                    "type": "assistant_text",
-                    "delta": chunk,
-                },
-            )
-            await asyncio.sleep(0)
-
-        await on_delta(
-            worldline_id,
-            {
-                "type": "assistant_text",
-                "done": True,
-            },
-        )
-
-    async def _emit_tool_call_deltas(
-        self,
-        *,
-        worldline_id: str,
-        tool_call: ToolCall,
-        on_delta: Callable[[str, dict[str, Any]], Awaitable[None]],
-    ) -> None:
-        tool_name = (tool_call.name or "").strip()
-        arguments = tool_call.arguments or {}
-        call_id = tool_call.id or None
-
-        if tool_name == "run_sql":
-            sql = arguments.get("sql")
-            if isinstance(sql, str) and sql:
-                for chunk in self._chunk_code(sql):
-                    await on_delta(
-                        worldline_id,
-                        {
-                            "type": "tool_call_sql",
-                            "call_id": call_id,
-                            "delta": chunk,
-                        },
-                    )
-                    await asyncio.sleep(0)
-            await on_delta(
-                worldline_id,
-                {
-                    "type": "tool_call_sql",
-                    "call_id": call_id,
-                    "done": True,
-                },
-            )
-            return
-
-        if tool_name == "run_python":
-            code = arguments.get("code")
-            if isinstance(code, str) and code:
-                for chunk in self._chunk_code(code):
-                    await on_delta(
-                        worldline_id,
-                        {
-                            "type": "tool_call_python",
-                            "call_id": call_id,
-                            "delta": chunk,
-                        },
-                    )
-                    await asyncio.sleep(0)
-            await on_delta(
-                worldline_id,
-                {
-                    "type": "tool_call_python",
-                    "call_id": call_id,
-                    "done": True,
-                },
-            )
-
-    def _chunk_text(self, text: str, *, max_chunk_chars: int = 28) -> list[str]:
-        chunks: list[str] = []
-        remaining = text
-        while remaining:
-            if len(remaining) <= max_chunk_chars:
-                chunks.append(remaining)
-                break
-
-            split_at = remaining.rfind(" ", 0, max_chunk_chars + 1)
-            if split_at <= 0:
-                split_at = max_chunk_chars
-            else:
-                split_at += 1
-
-            chunks.append(remaining[:split_at])
-            remaining = remaining[split_at:]
-        return chunks
-
-    def _chunk_code(self, code: str, *, max_partial_chars: int = 120) -> list[str]:
-        chunks: list[str] = []
-        current: list[str] = []
-
-        for ch in code:
-            current.append(ch)
-            if ch == "\n" or len(current) >= max_partial_chars:
-                chunks.append("".join(current))
-                current = []
-
-        if current:
-            chunks.append("".join(current))
-
-        return chunks
 
     def _append_worldline_event(
         self,

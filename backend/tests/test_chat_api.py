@@ -9,11 +9,13 @@ import chat_api
 import meta
 import threads
 import worldlines
-from chat.llm_client import LlmResponse, ToolCall
+from chat.llm_client import LlmResponse, StreamChunk, ToolCall
 from fastapi.responses import StreamingResponse
 
 
 class FakeLlmClient:
+    """Test double that supports both ``generate()`` and ``generate_stream()``."""
+
     def __init__(self, responses: list[LlmResponse]) -> None:
         self._responses = list(responses)
         self.calls = 0
@@ -23,6 +25,42 @@ class FakeLlmClient:
         if not self._responses:
             raise AssertionError("No fake responses left for LLM generate()")
         return self._responses.pop(0)
+
+    async def generate_stream(self, **kwargs):
+        """Yield ``StreamChunk`` objects that reconstruct the next response.
+
+        This simulates a real streaming adapter by breaking the pre-built
+        ``LlmResponse`` into the chunk protocol the engine expects:
+          - text -> individual character StreamChunks (type="text")
+          - tool_calls -> start / delta (full args JSON) / done sequence
+        """
+        self.calls += 1
+        if not self._responses:
+            raise AssertionError("No fake responses left for LLM generate_stream()")
+        response = self._responses.pop(0)
+
+        # Stream text tokens (one per char for fine-grained fidelity)
+        if response.text:
+            for ch in response.text:
+                yield StreamChunk(type="text", text=ch)
+
+        # Stream tool calls
+        for tc in response.tool_calls:
+            yield StreamChunk(
+                type="tool_call_start",
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+            )
+            args_json = json.dumps(tc.arguments, ensure_ascii=True)
+            yield StreamChunk(
+                type="tool_call_delta",
+                tool_call_id=tc.id,
+                arguments_delta=args_json,
+            )
+            yield StreamChunk(
+                type="tool_call_done",
+                tool_call_id=tc.id,
+            )
 
 
 class ChatApiTests(unittest.TestCase):
@@ -76,6 +114,8 @@ class ChatApiTests(unittest.TestCase):
             )
         )
         return response["worldline_id"]
+
+    # ---- non-streaming endpoint tests (unchanged logic) ---------------------
 
     def test_chat_appends_user_and_assistant_events(self) -> None:
         thread_id = self._create_thread()
@@ -467,6 +507,8 @@ class ChatApiTests(unittest.TestCase):
             "Now continuing in the branched worldline.",
         )
 
+    # ---- SSE streaming endpoint tests (updated for real streaming) ----------
+
     def test_chat_stream_returns_sse_event_frames(self) -> None:
         thread_id = self._create_thread()
         worldline_id = self._create_worldline(thread_id)
@@ -548,6 +590,12 @@ class ChatApiTests(unittest.TestCase):
         self.assertTrue(payloads[-1]["done"])
 
     def test_chat_stream_emits_tool_call_deltas(self) -> None:
+        """Verify that tool-call argument deltas are streamed as SSE frames.
+
+        With real streaming, the delta content is raw JSON argument fragments
+        (not pre-extracted code), so we verify the deltas reconstruct to the
+        full arguments JSON.
+        """
         thread_id = self._create_thread()
         worldline_id = self._create_worldline(thread_id)
         fake_client = FakeLlmClient(
@@ -587,16 +635,132 @@ class ChatApiTests(unittest.TestCase):
             for payload in payloads
             if "delta" in payload and payload["delta"]["type"] == "tool_call_sql"
         ]
+        # There should be at least one delta with content and one with done=True
         self.assertTrue(any(delta.get("delta") for delta in sql_deltas))
         self.assertTrue(any(delta.get("done") for delta in sql_deltas))
-        sql_text_chunks = [
+
+        # The concatenated delta text should be valid JSON that reconstructs
+        # the original arguments.
+        raw_chunks = [
             delta["delta"]
             for delta in sql_deltas
             if isinstance(delta.get("delta"), str)
         ]
+        reconstructed = json.loads("".join(raw_chunks))
         self.assertEqual(
-            sql_text_chunks, ["SELECT 123 AS value\n", "FROM (SELECT 1) t"]
+            reconstructed,
+            {"sql": "SELECT 123 AS value\nFROM (SELECT 1) t", "limit": 5},
         )
+
+    # ---- new test: assistant_plan when text accompanies tool calls -----------
+
+    def test_chat_stream_emits_assistant_plan_when_text_with_tool_calls(self) -> None:
+        """When the LLM returns text AND tool calls, the text should be
+        persisted as an ``assistant_plan`` event (not lost).
+        """
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text="Let me run a query to check.",
+                    tool_calls=[
+                        ToolCall(
+                            id="call_plan_sql",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 42 AS answer", "limit": 1},
+                        )
+                    ],
+                ),
+                LlmResponse(text="The answer is 42.", tool_calls=[]),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            # Test via the non-streaming endpoint (assistant_plan is persisted)
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="what is the answer?",
+                        provider="openai",
+                    )
+                )
+            )
+
+        event_types = [event["type"] for event in result["events"]]
+        self.assertEqual(
+            event_types,
+            [
+                "user_message",
+                "assistant_plan",
+                "tool_call_sql",
+                "tool_result_sql",
+                "assistant_message",
+            ],
+        )
+        plan_event = next(e for e in result["events"] if e["type"] == "assistant_plan")
+        self.assertEqual(
+            plan_event["payload"]["text"],
+            "Let me run a query to check.",
+        )
+        self.assertEqual(
+            result["events"][-1]["payload"]["text"],
+            "The answer is 42.",
+        )
+
+    def test_chat_stream_emits_assistant_plan_via_sse(self) -> None:
+        """Via the SSE endpoint, assistant_plan should appear as both:
+        - streaming text deltas (assistant_text)
+        - a persisted event (assistant_plan)
+        """
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text="Thinking aloud here.",
+                    tool_calls=[
+                        ToolCall(
+                            id="call_plan_sse",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1", "limit": 1},
+                        )
+                    ],
+                ),
+                LlmResponse(text="All done.", tool_calls=[]),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            response = self._run(
+                chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="think and act",
+                        provider="openai",
+                    )
+                )
+            )
+            raw_stream = self._run(self._consume_stream(response))
+            payloads = self._extract_sse_payloads(raw_stream)
+
+        # Check that we got assistant_text deltas (the thinking text streamed)
+        text_deltas = [
+            p["delta"]
+            for p in payloads
+            if "delta" in p and p["delta"]["type"] == "assistant_text"
+        ]
+        self.assertTrue(len(text_deltas) > 0, "Expected assistant_text deltas")
+
+        # Check that we got an assistant_plan persisted event
+        event_types = [p["event"]["type"] for p in payloads if "event" in p]
+        self.assertIn("assistant_plan", event_types)
+        self.assertIn("tool_call_sql", event_types)
+        self.assertIn("assistant_message", event_types)
+
+        # The final payload should be done
+        self.assertTrue(payloads[-1]["done"])
 
 
 if __name__ == "__main__":

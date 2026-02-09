@@ -2,6 +2,7 @@ from .llm_client import (
     ChatMessage,
     LlmClient,
     LlmResponse,
+    StreamChunk,
     ToolCall,
     ToolDefinition,
 )
@@ -11,6 +12,7 @@ __all__ = [
     "ChatMessage",
     "LlmClient",
     "LlmResponse",
+    "StreamChunk",
     "ToolCall",
     "ToolDefinition",
     "build_llm_client",

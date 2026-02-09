@@ -2,13 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
 try:
-    from backend.chat.llm_client import ChatMessage, LlmResponse, ToolCall, ToolDefinition
+    from backend.chat.llm_client import (
+        ChatMessage,
+        LlmResponse,
+        StreamChunk,
+        ToolCall,
+        ToolDefinition,
+    )
 except ModuleNotFoundError:
-    from chat.llm_client import ChatMessage, LlmResponse, ToolCall, ToolDefinition
+    from chat.llm_client import (
+        ChatMessage,
+        LlmResponse,
+        StreamChunk,
+        ToolCall,
+        ToolDefinition,
+    )
 
 
 @dataclass(frozen=True)
@@ -18,6 +31,8 @@ class OpenRouterAdapter:
     base_url: str = "https://openrouter.ai/api/v1"
     app_name: str = "TextQL"
     http_referer: str | None = None
+
+    # ---- non-streaming (unchanged) ------------------------------------------
 
     async def generate(
         self,
@@ -82,6 +97,116 @@ class OpenRouterAdapter:
         )
         return self._parse_response(response)
 
+    # ---- streaming ----------------------------------------------------------
+
+    async def generate_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition],
+        tool_choice: str | None = None,
+        max_output_tokens: int | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream tokens from OpenRouter via the async OpenAI Chat Completions API.
+
+        Uses ``AsyncOpenAI`` with ``stream=True`` to get ``ChatCompletionChunk``
+        objects.  Each chunk's ``delta`` may carry:
+          - ``.content`` – text token
+          - ``.tool_calls`` – incremental tool-call info (index, id, function name/arguments)
+        """
+        try:
+            from openai import AsyncOpenAI
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "OpenAI SDK not installed. Add dependency: `openai`."
+            ) from exc
+
+        if not self.api_key:
+            raise RuntimeError("OpenRouter API key is missing. Set OPENROUTER_API_KEY.")
+
+        extra_headers: dict[str, str] = {"X-Title": self.app_name}
+        if self.http_referer:
+            extra_headers["HTTP-Referer"] = self.http_referer
+
+        client = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            default_headers=extra_headers,
+        )
+
+        stream = await client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": m.role, "content": m.content} for m in messages],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    },
+                }
+                for t in tools
+            ],
+            tool_choice=tool_choice or "auto",
+            max_tokens=max_output_tokens,
+            stream=True,
+        )
+
+        # Track which tool-call indices we've already sent a "start" for.
+        started_tool_calls: dict[int, str] = {}  # index -> call_id
+
+        async for chunk in stream:
+            choices = getattr(chunk, "choices", []) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+
+            # --- text content ------------------------------------------------
+            content = getattr(delta, "content", None)
+            if content:
+                yield StreamChunk(type="text", text=content)
+
+            # --- tool calls --------------------------------------------------
+            raw_tool_calls = getattr(delta, "tool_calls", None) or []
+            for tc in raw_tool_calls:
+                index = getattr(tc, "index", 0)
+                call_id = getattr(tc, "id", None)
+                function = getattr(tc, "function", None)
+                fn_name = getattr(function, "name", None) if function else None
+                fn_args = getattr(function, "arguments", None) if function else None
+
+                # First chunk for this tool-call index → emit start
+                if index not in started_tool_calls:
+                    resolved_id = call_id or f"call_{index + 1}"
+                    started_tool_calls[index] = resolved_id
+                    yield StreamChunk(
+                        type="tool_call_start",
+                        tool_call_id=resolved_id,
+                        tool_name=fn_name or "",
+                    )
+
+                resolved_id = started_tool_calls[index]
+
+                # Argument delta
+                if fn_args:
+                    yield StreamChunk(
+                        type="tool_call_delta",
+                        tool_call_id=resolved_id,
+                        arguments_delta=fn_args,
+                    )
+
+        # After the stream ends, emit "done" for all tool calls that started.
+        for call_id in started_tool_calls.values():
+            yield StreamChunk(
+                type="tool_call_done",
+                tool_call_id=call_id,
+            )
+
+    # ---- shared helpers -----------------------------------------------------
+
     def _parse_response(self, response: Any) -> LlmResponse:
         choices = getattr(response, "choices", []) or []
         if not choices:
@@ -118,4 +243,6 @@ class OpenRouterAdapter:
             )
 
         normalized_text = str(text).strip() if text else None
-        return LlmResponse(text=normalized_text or None, tool_calls=tool_calls, raw=response)
+        return LlmResponse(
+            text=normalized_text or None, tool_calls=tool_calls, raw=response
+        )
