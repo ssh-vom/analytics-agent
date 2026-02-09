@@ -67,6 +67,24 @@ export interface SseEventFrame {
   event: TimelineEvent;
 }
 
+export type StreamDeltaType =
+  | "assistant_text"
+  | "tool_call_sql"
+  | "tool_call_python";
+
+export interface StreamDeltaPayload {
+  type: StreamDeltaType;
+  call_id?: string;
+  delta?: string;
+  done?: boolean;
+}
+
+export interface SseDeltaFrame {
+  seq: number;
+  worldline_id: string;
+  delta: StreamDeltaPayload;
+}
+
 export interface SseDoneFrame {
   seq: number;
   worldline_id: string;

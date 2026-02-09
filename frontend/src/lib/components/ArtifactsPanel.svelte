@@ -1,5 +1,13 @@
 <script lang="ts">
-  import { FileText, Image, Sparkles, Download } from "lucide-svelte";
+  import { afterUpdate } from "svelte";
+  import {
+    FileText,
+    Image,
+    Sparkles,
+    Download,
+    ChevronLeft,
+    ChevronRight,
+  } from "lucide-svelte";
 
   import type { PythonArtifact, PythonResultPayload, TimelineEvent } from "$lib/types";
 
@@ -12,8 +20,36 @@
   }
 
   export let events: TimelineEvent[] = [];
+  export let collapsed = false;
+  export let selectedArtifactId: string | null = null;
+
+  let artifactListElement: HTMLDivElement | null = null;
+  let lastFocusedArtifactId: string | null = null;
 
   $: artifactEntries = extractArtifactEntries(events);
+  $: if (!selectedArtifactId) {
+    lastFocusedArtifactId = null;
+  }
+
+  afterUpdate(() => {
+    if (collapsed || !selectedArtifactId || selectedArtifactId === lastFocusedArtifactId) {
+      return;
+    }
+
+    const target = artifactListElement?.querySelector<HTMLElement>(
+      `[data-artifact-id="${selectedArtifactId}"]`,
+    );
+    if (!target) {
+      return;
+    }
+
+    target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    lastFocusedArtifactId = selectedArtifactId;
+  });
+
+  function toggleCollapsed(): void {
+    collapsed = !collapsed;
+  }
 
   function extractArtifactEntries(sourceEvents: TimelineEvent[]): ArtifactEntry[] {
     const collected: ArtifactEntry[] = [];
@@ -71,24 +107,56 @@
   }
 </script>
 
-<aside class="artifacts-panel">
+<aside class="artifacts-panel" class:collapsed>
   <header class="panel-header">
     <div class="panel-title">
       <Sparkles size={14} />
-      <h2>Artifacts</h2>
+      {#if !collapsed}
+        <h2>Artifacts</h2>
+      {/if}
     </div>
-    <span class="count-badge">{artifactEntries.length}</span>
+
+    <div class="panel-actions">
+      {#if !collapsed}
+        <span class="count-badge">{artifactEntries.length}</span>
+      {/if}
+      <button
+        type="button"
+        class="collapse-btn"
+        on:click={toggleCollapsed}
+        aria-label={collapsed ? "Expand artifacts panel" : "Collapse artifacts panel"}
+      >
+        {#if collapsed}
+          <ChevronLeft size={14} />
+        {:else}
+          <ChevronRight size={14} />
+        {/if}
+      </button>
+    </div>
   </header>
 
-  {#if artifactEntries.length === 0}
+  {#if collapsed}
+    <button
+      type="button"
+      class="collapsed-body"
+      on:click={toggleCollapsed}
+      aria-label="Open artifacts panel"
+    >
+      <span class="collapsed-count">{artifactEntries.length}</span>
+    </button>
+  {:else if artifactEntries.length === 0}
     <div class="empty-state">
       <Image size={20} />
       <p>Generated charts and files will appear here.</p>
     </div>
   {:else}
-    <div class="artifact-list">
+    <div class="artifact-list" bind:this={artifactListElement}>
       {#each artifactEntries as artifact (artifact.key)}
-        <article class="artifact-card">
+        <article
+          class="artifact-card"
+          class:selected={artifact.artifactId === selectedArtifactId}
+          data-artifact-id={artifact.artifactId}
+        >
           <div class="card-meta">
             <span class="type-tag">{artifact.type}</span>
             <time datetime={artifact.createdAt}>{formatTimestamp(artifact.createdAt)}</time>
@@ -144,6 +212,7 @@
     padding: var(--space-3) var(--space-3) var(--space-2);
     border-bottom: 1px solid var(--border-soft);
     background: var(--surface-1);
+    flex-shrink: 0;
   }
 
   .panel-title {
@@ -151,6 +220,7 @@
     align-items: center;
     gap: var(--space-2);
     color: var(--text-secondary);
+    min-width: 0;
   }
 
   .panel-title h2 {
@@ -159,6 +229,12 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+  }
+
+  .panel-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
   }
 
   .count-badge {
@@ -173,6 +249,49 @@
     font-size: 12px;
     padding: 0 var(--space-2);
     background: var(--surface-0);
+  }
+
+  .collapse-btn {
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    background: var(--surface-0);
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .collapse-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-medium);
+    background: var(--surface-hover);
+  }
+
+  .collapsed-body {
+    flex: 1;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-2);
+  }
+
+  .collapsed-count {
+    min-width: 30px;
+    height: 30px;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border-medium);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    background: var(--surface-1);
   }
 
   .empty-state {
@@ -211,6 +330,11 @@
     border-radius: var(--radius-lg);
     background: var(--surface-1);
     padding: var(--space-2);
+  }
+
+  .artifact-card.selected {
+    border-color: var(--accent-orange);
+    box-shadow: var(--glow-orange);
   }
 
   .card-meta {
@@ -297,6 +421,10 @@
       border-left: none;
       border-top: 1px solid var(--border-soft);
       max-height: 280px;
+    }
+
+    .artifacts-panel.collapsed {
+      max-height: 56px;
     }
   }
 </style>

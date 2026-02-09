@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
 
   import { groupEventsIntoCells } from "$lib/cells";
   import MessageCell from "$lib/components/MessageCell.svelte";
@@ -16,7 +16,12 @@
     fetchWorldlineEvents,
     streamChatTurn,
   } from "$lib/api/client";
-  import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
+  import type {
+    StreamDeltaPayload,
+    Thread,
+    TimelineEvent,
+    WorldlineItem,
+  } from "$lib/types";
   
   // Icons
   import { Database } from "lucide-svelte";
@@ -25,6 +30,14 @@
   import { Sparkles } from "lucide-svelte";
 
   type Provider = "gemini" | "openai" | "openrouter";
+  type DraftToolKind = "sql" | "python";
+
+  interface DraftToolCall {
+    id: string;
+    kind: DraftToolKind;
+    code: string;
+    createdAt: string;
+  }
 
   let threadId = "";
   let activeWorldlineId = "";
@@ -39,10 +52,19 @@
   let showProviderMenu = false;
   let composerExpanded = false;
   let isHydratingThread = false;
+  let artifactsPanelCollapsed = false;
+  let selectedArtifactId: string | null = null;
+  let assistantDraftText = "";
+  let assistantDraftCreatedAt = "";
+  let toolCallDrafts: DraftToolCall[] = [];
+  let feedElement: HTMLDivElement | null = null;
+  let shouldAutoScroll = true;
+  let pendingScrollRaf = 0;
 
   $: activeEvents = eventsByWorldline[activeWorldlineId] ?? [];
   $: cells = groupEventsIntoCells(activeEvents);
   $: currentThread = $activeThread;
+  $: hasDraftOutput = assistantDraftText.length > 0 || toolCallDrafts.length > 0;
 
   onMount(async () => {
     await threads.loadThreads();
@@ -61,10 +83,184 @@
     } else {
       await initializeSession();
     }
+
+    await tick();
+    scrollFeedToBottom(true);
+  });
+
+  onDestroy(() => {
+    if (pendingScrollRaf) {
+      cancelAnimationFrame(pendingScrollRaf);
+      pendingScrollRaf = 0;
+    }
   });
 
   $: if ($activeThread?.id && isReady && $activeThread.id !== threadId && !isHydratingThread) {
     void hydrateThread($activeThread.id);
+  }
+
+  function handleFeedScroll(): void {
+    if (!feedElement) {
+      return;
+    }
+    const bottomDistance =
+      feedElement.scrollHeight - feedElement.scrollTop - feedElement.clientHeight;
+    shouldAutoScroll = bottomDistance < 120;
+  }
+
+  function scrollFeedToBottom(force = false): void {
+    if (!feedElement) {
+      return;
+    }
+    if (!force && !shouldAutoScroll) {
+      return;
+    }
+    if (pendingScrollRaf) {
+      return;
+    }
+    pendingScrollRaf = requestAnimationFrame(() => {
+      pendingScrollRaf = 0;
+      if (!feedElement) {
+        return;
+      }
+      feedElement.scrollTo({
+        top: feedElement.scrollHeight,
+        behavior: "auto",
+      });
+    });
+  }
+
+  function resetStreamingDrafts(): void {
+    assistantDraftText = "";
+    assistantDraftCreatedAt = "";
+    toolCallDrafts = [];
+  }
+
+  function upsertToolCallDraft(
+    kind: DraftToolKind,
+    callId: string | undefined,
+    delta: string,
+  ): void {
+    if (!delta) {
+      return;
+    }
+    const draftId = callId && callId.trim() ? callId : `${kind}-draft`;
+    const existingIndex = toolCallDrafts.findIndex((draft) => draft.id === draftId);
+    if (existingIndex === -1) {
+      toolCallDrafts = [
+        ...toolCallDrafts,
+        {
+          id: draftId,
+          kind,
+          code: delta,
+          createdAt: new Date().toISOString(),
+        },
+      ];
+      return;
+    }
+
+    const existing = toolCallDrafts[existingIndex];
+    const updated = {
+      ...existing,
+      code: existing.code + delta,
+    };
+    toolCallDrafts = [
+      ...toolCallDrafts.slice(0, existingIndex),
+      updated,
+      ...toolCallDrafts.slice(existingIndex + 1),
+    ];
+  }
+
+  function removeToolCallDraft(kind: DraftToolKind, callId: string | null): void {
+    if (callId) {
+      toolCallDrafts = toolCallDrafts.filter((draft) => draft.id !== callId);
+      return;
+    }
+    const firstMatch = toolCallDrafts.find((draft) => draft.kind === kind);
+    if (!firstMatch) {
+      return;
+    }
+    toolCallDrafts = toolCallDrafts.filter((draft) => draft.id !== firstMatch.id);
+  }
+
+  function callIdFromPayload(payload: Record<string, unknown>): string | null {
+    const callId = payload.call_id;
+    if (typeof callId === "string" && callId.trim()) {
+      return callId;
+    }
+    return null;
+  }
+
+  function clearDraftFromPersistedEvent(event: TimelineEvent): void {
+    if (event.type === "assistant_message") {
+      assistantDraftText = "";
+      assistantDraftCreatedAt = "";
+      return;
+    }
+
+    if (event.type === "tool_call_sql") {
+      removeToolCallDraft("sql", callIdFromPayload(event.payload));
+      return;
+    }
+
+    if (event.type === "tool_call_python") {
+      removeToolCallDraft("python", callIdFromPayload(event.payload));
+    }
+  }
+
+  function handleStreamDelta(delta: StreamDeltaPayload): void {
+    if (delta.type === "assistant_text") {
+      if (typeof delta.delta === "string" && delta.delta.length > 0) {
+        if (!assistantDraftText) {
+          assistantDraftCreatedAt = new Date().toISOString();
+        }
+        assistantDraftText += delta.delta;
+        statusText = "Composing response...";
+      }
+      scrollFeedToBottom();
+      return;
+    }
+
+    if (delta.type === "tool_call_sql") {
+      upsertToolCallDraft("sql", delta.call_id, delta.delta ?? "");
+      statusText = "Drafting SQL...";
+      scrollFeedToBottom();
+      return;
+    }
+
+    if (delta.type === "tool_call_python") {
+      upsertToolCallDraft("python", delta.call_id, delta.delta ?? "");
+      statusText = "Drafting Python...";
+      scrollFeedToBottom();
+    }
+  }
+
+  function toDraftCallEvent(draft: DraftToolCall): TimelineEvent {
+    if (draft.kind === "sql") {
+      return {
+        id: `draft-sql-${draft.id}`,
+        parent_event_id: null,
+        type: "tool_call_sql",
+        payload: {
+          sql: draft.code,
+          limit: 100,
+          call_id: draft.id,
+        },
+        created_at: draft.createdAt,
+      };
+    }
+
+    return {
+      id: `draft-python-${draft.id}`,
+      parent_event_id: null,
+      type: "tool_call_python",
+      payload: {
+        code: draft.code,
+        timeout: 30,
+        call_id: draft.id,
+      },
+      created_at: draft.createdAt,
+    };
   }
 
   async function hydrateThread(targetThreadId: string, preferredWorldlineId?: string): Promise<void> {
@@ -76,6 +272,8 @@
       worldlines = [];
       eventsByWorldline = {};
       activeWorldlineId = "";
+      selectedArtifactId = null;
+      resetStreamingDrafts();
 
       await refreshWorldlines();
 
@@ -88,6 +286,7 @@
       if (activeWorldlineId) {
         await loadWorldline(activeWorldlineId);
         statusText = "Ready";
+        scrollFeedToBottom(true);
       } else {
         statusText = "Error: No worldline found";
       }
@@ -146,6 +345,8 @@
   async function initializeSession(): Promise<void> {
     try {
       statusText = "Creating thread...";
+      resetStreamingDrafts();
+      selectedArtifactId = null;
       
       // Create thread via API
       const thread = await createThread("TextQL Session");
@@ -177,6 +378,7 @@
       statusText = "Loading worldline...";
       await refreshWorldlines();
       await loadWorldline(activeWorldlineId);
+      scrollFeedToBottom(true);
       
       statusText = "Ready";
       isReady = true;
@@ -199,13 +401,17 @@
   async function loadWorldline(worldlineId: string): Promise<void> {
     const events = await fetchWorldlineEvents(worldlineId);
     setWorldlineEvents(worldlineId, events);
+    scrollFeedToBottom(true);
   }
 
   async function selectWorldline(worldlineId: string): Promise<void> {
     activeWorldlineId = worldlineId;
+    resetStreamingDrafts();
+    selectedArtifactId = null;
     if (!eventsByWorldline[worldlineId]) {
       await loadWorldline(worldlineId);
     }
+    scrollFeedToBottom(true);
   }
 
   async function handleWorldlineSelect(
@@ -234,6 +440,11 @@
     }
   }
 
+  function handleArtifactSelect(event: CustomEvent<{ artifactId: string }>): void {
+    artifactsPanelCollapsed = false;
+    selectedArtifactId = event.detail.artifactId;
+  }
+
   async function sendPrompt(): Promise<void> {
     const message = prompt.trim();
     if (!message || !activeWorldlineId || isSending) {
@@ -246,6 +457,10 @@
     isSending = true;
     prompt = "";
     statusText = "Agent is thinking...";
+    shouldAutoScroll = true;
+    resetStreamingDrafts();
+    selectedArtifactId = null;
+    scrollFeedToBottom(true);
 
     try {
       await streamChatTurn({
@@ -256,8 +471,10 @@
         maxIterations: provider === "gemini" ? 3 : 6,
         onEvent: (frame) => {
           ensureWorldlineVisible(frame.worldline_id);
+          clearDraftFromPersistedEvent(frame.event);
           appendEvent(frame.worldline_id, frame.event);
           activeWorldlineId = frame.worldline_id;
+          scrollFeedToBottom();
 
           if (frame.event.type === "tool_call_sql") {
             statusText = "Running SQL...";
@@ -269,10 +486,16 @@
             statusText = "Working...";
           }
         },
+        onDelta: (frame) => {
+          ensureWorldlineVisible(frame.worldline_id);
+          activeWorldlineId = frame.worldline_id;
+          handleStreamDelta(frame.delta);
+        },
         onDone: async (done) => {
           activeWorldlineId = done.worldline_id;
           await refreshWorldlines();
           statusText = "Done";
+          scrollFeedToBottom();
           
           // Update thread message count
           if ($activeThread) {
@@ -283,10 +506,12 @@
           }
         },
         onError: (error) => {
+          resetStreamingDrafts();
           statusText = `Error: ${error}`;
         },
       });
     } catch (error) {
+      resetStreamingDrafts();
       statusText = error instanceof Error ? error.message : "Request failed";
     } finally {
       isSending = false;
@@ -372,9 +597,9 @@
     </div>
   </header>
 
-  <div class="workspace">
+  <div class="workspace" class:panel-collapsed={artifactsPanelCollapsed}>
     <!-- Chat Feed -->
-    <div class="feed">
+    <div class="feed" bind:this={feedElement} on:scroll={handleFeedScroll}>
       {#if !isReady}
         <div class="empty-state">
           <div class="empty-icon">
@@ -382,7 +607,7 @@
           </div>
           <p>Initializing session...</p>
         </div>
-      {:else if cells.length === 0}
+      {:else if cells.length === 0 && !hasDraftOutput}
         <div class="empty-state">
           <div class="empty-icon">
             <Database size={32} />
@@ -409,7 +634,9 @@
             <PythonCell
               callEvent={cell.call}
               resultEvent={cell.result}
-              showArtifacts={false}
+              showArtifacts={true}
+              artifactLinkMode="panel"
+              on:artifactselect={handleArtifactSelect}
               onBranch={() => branchFromEvent(cell.result?.id ?? cell.call?.id ?? "")}
             />
           {:else}
@@ -424,10 +651,37 @@
             </article>
           {/if}
         {/each}
+
+        {#each toolCallDrafts as draft (draft.id)}
+          {@const callEvent = toDraftCallEvent(draft)}
+          {#if draft.kind === "sql"}
+            <SqlCell callEvent={callEvent} resultEvent={null} />
+          {:else}
+            <PythonCell
+              callEvent={callEvent}
+              resultEvent={null}
+              showArtifacts={false}
+              artifactLinkMode="panel"
+              on:artifactselect={handleArtifactSelect}
+            />
+          {/if}
+        {/each}
+
+        {#if assistantDraftText}
+          <MessageCell
+            role="assistant"
+            text={assistantDraftText}
+            createdAt={assistantDraftCreatedAt}
+          />
+        {/if}
       {/if}
     </div>
 
-    <ArtifactsPanel events={activeEvents} />
+    <ArtifactsPanel
+      events={activeEvents}
+      bind:collapsed={artifactsPanelCollapsed}
+      {selectedArtifactId}
+    />
   </div>
 
   <!-- Composer -->
@@ -470,6 +724,10 @@
     min-height: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) 340px;
+  }
+
+  .workspace.panel-collapsed {
+    grid-template-columns: minmax(0, 1fr) 56px;
   }
 
   .top-bar {
@@ -793,6 +1051,10 @@
     .workspace {
       grid-template-columns: 1fr;
       grid-template-rows: minmax(0, 1fr) auto;
+    }
+
+    .workspace.panel-collapsed {
+      grid-template-rows: minmax(0, 1fr) 56px;
     }
   }
 </style>

@@ -1,5 +1,6 @@
 import type {
   EventsResponse,
+  SseDeltaFrame,
   SseDoneFrame,
   SseEventFrame,
   ThreadCreateResponse,
@@ -21,6 +22,7 @@ interface StreamOptions {
   model?: string;
   maxIterations?: number;
   onEvent: (frame: SseEventFrame) => void;
+  onDelta?: (frame: SseDeltaFrame) => void;
   onDone?: (frame: SseDoneFrame) => void;
   onError?: (error: string) => void;
 }
@@ -125,6 +127,55 @@ export async function streamChatTurn(options: StreamOptions): Promise<void> {
   const decoder = new TextDecoder();
   let buffer = "";
 
+  const processFrame = (frame: string): void => {
+    if (!frame.trim()) {
+      return;
+    }
+
+    let eventName = "event";
+    const dataLines: string[] = [];
+    for (const line of frame.split("\n")) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+        continue;
+      }
+      if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+
+    if (dataLines.length === 0) {
+      return;
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
+    } catch {
+      options.onError?.("Failed to parse stream frame");
+      return;
+    }
+    if (eventName === "event") {
+      options.onEvent(parsed as unknown as SseEventFrame);
+      return;
+    }
+    if (eventName === "delta") {
+      options.onDelta?.(parsed as unknown as SseDeltaFrame);
+      return;
+    }
+    if (eventName === "done") {
+      options.onDone?.(parsed as unknown as SseDoneFrame);
+      return;
+    }
+    if (eventName === "error") {
+      const error =
+        typeof parsed.error === "string"
+          ? parsed.error
+          : "Unknown stream error";
+      options.onError?.(error);
+    }
+  };
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) {
@@ -136,37 +187,11 @@ export async function streamChatTurn(options: StreamOptions): Promise<void> {
     buffer = frames.pop() ?? "";
 
     for (const frame of frames) {
-      let eventName = "event";
-      let dataLine = "";
-      for (const line of frame.split("\n")) {
-        if (line.startsWith("event:")) {
-          eventName = line.slice(6).trim();
-          continue;
-        }
-        if (line.startsWith("data:")) {
-          dataLine = line.slice(5).trim();
-        }
-      }
-      if (!dataLine) {
-        continue;
-      }
-
-      const parsed = JSON.parse(dataLine) as Record<string, unknown>;
-      if (eventName === "event") {
-        options.onEvent(parsed as unknown as SseEventFrame);
-        continue;
-      }
-      if (eventName === "done") {
-        options.onDone?.(parsed as unknown as SseDoneFrame);
-        continue;
-      }
-      if (eventName === "error") {
-        const error =
-          typeof parsed.error === "string"
-            ? parsed.error
-            : "Unknown stream error";
-        options.onError?.(error);
-      }
+      processFrame(frame);
     }
+  }
+
+  if (buffer.trim()) {
+    processFrame(buffer);
   }
 }

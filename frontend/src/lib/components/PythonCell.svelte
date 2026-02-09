@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { createEventDispatcher } from "svelte";
   import CodeBlock from "$lib/components/CodeBlock.svelte";
-  import type { TimelineEvent } from "$lib/types";
+  import type { PythonArtifact, TimelineEvent } from "$lib/types";
   import { readPythonResult } from "$lib/cells";
   import { Terminal } from "lucide-svelte";
   import { ChevronDown } from "lucide-svelte";
@@ -18,9 +19,11 @@
   export let resultEvent: TimelineEvent | null = null;
   export let onBranch: (() => void) | null = null;
   export let showArtifacts = true;
+  export let artifactLinkMode: "download" | "panel" = "download";
   let cellCollapsed = false;
   let codeCollapsed = false;
   let outputCollapsed = false;
+  const dispatch = createEventDispatcher<{ artifactselect: { artifactId: string } }>();
 
   $: code =
     (callEvent?.payload?.code as string | undefined) ??
@@ -37,6 +40,22 @@
       : result
         ? "done"
         : "queued";
+
+  function getArtifactTarget(): string | undefined {
+    return artifactLinkMode === "download" ? "_blank" : undefined;
+  }
+
+  function getArtifactRel(): string | undefined {
+    return artifactLinkMode === "download" ? "noreferrer" : undefined;
+  }
+
+  function handleArtifactClick(event: MouseEvent, artifact: PythonArtifact): void {
+    if (artifactLinkMode !== "panel") {
+      return;
+    }
+    event.preventDefault();
+    dispatch("artifactselect", { artifactId: artifact.artifact_id });
+  }
 </script>
 
 <article class="python-cell">
@@ -163,14 +182,21 @@
                       <div class="chart-grid">
                         {#each imageArtifacts as artifact}
                           <div class="chart-card">
-                            <div class="chart-image">
+                            <a
+                              class="chart-image"
+                              href={`/api/artifacts/${artifact.artifact_id}`}
+                              target={getArtifactTarget()}
+                              rel={getArtifactRel()}
+                              on:click={(event) => handleArtifactClick(event, artifact)}
+                            >
                               <img src={`/api/artifacts/${artifact.artifact_id}`} alt={artifact.name} />
-                            </div>
+                            </a>
                             <a 
                               href={`/api/artifacts/${artifact.artifact_id}`} 
-                              target="_blank" 
-                              rel="noreferrer"
+                              target={getArtifactTarget()}
+                              rel={getArtifactRel()}
                               class="artifact-link"
+                              on:click={(event) => handleArtifactClick(event, artifact)}
                             >
                               <span>{artifact.name}</span>
                               <ExternalLink size={12} />
@@ -191,9 +217,10 @@
                         {#each fileArtifacts as artifact}
                           <a 
                             href={`/api/artifacts/${artifact.artifact_id}`} 
-                            target="_blank" 
-                            rel="noreferrer"
+                            target={getArtifactTarget()}
+                            rel={getArtifactRel()}
                             class="file-card"
+                            on:click={(event) => handleArtifactClick(event, artifact)}
                           >
                             <FileText size={16} />
                             <span>{artifact.name}</span>

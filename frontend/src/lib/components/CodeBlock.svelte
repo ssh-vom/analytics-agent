@@ -9,7 +9,6 @@
   let rendered = "";
   let timer: ReturnType<typeof setInterval> | null = null;
   let lastCode = "";
-  let animatedForCurrentCode = false;
   $: isRevealing = animate && rendered.length < code.length;
   $: content = rendered || placeholder;
   $: languageId = (language || "text").trim().toLowerCase();
@@ -192,36 +191,47 @@
   }
 
   function startReveal(): void {
-    stopTimer();
-    rendered = "";
     if (!code) {
+      rendered = "";
+      stopTimer();
+      return;
+    }
+    if (rendered.length >= code.length) {
+      stopTimer();
+      return;
+    }
+    if (timer) {
       return;
     }
 
-    const chunk = Math.max(1, Math.ceil(code.length / 180));
     timer = setInterval(() => {
       if (rendered.length >= code.length) {
         stopTimer();
         return;
       }
+      const remaining = code.length - rendered.length;
+      const chunk = Math.max(1, Math.ceil(remaining / 16));
       rendered = code.slice(0, Math.min(code.length, rendered.length + chunk));
     }, 14);
   }
 
-  $: {
-    if (code !== lastCode) {
-      lastCode = code;
-      animatedForCurrentCode = false;
-      if (!animate) {
-        stopTimer();
-        rendered = code;
-      }
-    }
+  $: if (!animate) {
+    stopTimer();
+    rendered = code;
+    lastCode = code;
   }
 
-  $: {
-    if (animate && !animatedForCurrentCode) {
-      animatedForCurrentCode = true;
+  $: if (animate) {
+    const previousCode = lastCode;
+    if (code !== previousCode) {
+      const isAppendOnly =
+        code.startsWith(previousCode) && rendered.startsWith(previousCode);
+      lastCode = code;
+      if (!isAppendOnly) {
+        rendered = "";
+      }
+      startReveal();
+    } else if (rendered.length < code.length) {
       startReveal();
     }
   }
