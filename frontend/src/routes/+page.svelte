@@ -16,7 +16,7 @@
   } from "$lib/api/client";
   import type { TimelineEvent, WorldlineItem } from "$lib/types";
 
-  type Provider = "gemini" | "openai";
+  type Provider = "gemini" | "openai" | "openrouter";
 
   let threadId = "";
   let activeWorldlineId = "";
@@ -36,20 +36,23 @@
     await initializeSession();
   });
 
-  function sortAndDedupe(events: TimelineEvent[]): TimelineEvent[] {
-    const byId = new Map<string, TimelineEvent>();
+  function dedupePreserveOrder(events: TimelineEvent[]): TimelineEvent[] {
+    const seenIds = new Set<string>();
+    const output: TimelineEvent[] = [];
     for (const event of events) {
-      byId.set(event.id, event);
+      if (seenIds.has(event.id)) {
+        continue;
+      }
+      seenIds.add(event.id);
+      output.push(event);
     }
-    return [...byId.values()].sort((a, b) =>
-      `${a.created_at}:${a.id}`.localeCompare(`${b.created_at}:${b.id}`),
-    );
+    return output;
   }
 
   function setWorldlineEvents(worldlineId: string, events: TimelineEvent[]): void {
     eventsByWorldline = {
       ...eventsByWorldline,
-      [worldlineId]: sortAndDedupe(events),
+      [worldlineId]: dedupePreserveOrder(events),
     };
   }
 
@@ -218,6 +221,7 @@
         <select bind:value={provider}>
           <option value="gemini">Gemini</option>
           <option value="openai">OpenAI</option>
+          <option value="openrouter">OpenRouter</option>
         </select>
       </label>
       <input
