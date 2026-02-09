@@ -121,6 +121,48 @@ class WorldlineServiceTests(unittest.TestCase):
             "carry this prompt",
         )
 
+    def test_branch_result_to_tool_result_shape(self) -> None:
+        thread_id = self._create_thread()
+        source_worldline_id = self._create_worldline(thread_id)
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_anchor_2",
+                    source_worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "anchor-2"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_anchor_2", source_worldline_id),
+            )
+            conn.commit()
+
+        service = WorldlineService()
+        result = service.branch_from_event(
+            BranchOptions(
+                source_worldline_id=source_worldline_id,
+                from_event_id="event_anchor_2",
+                name="tool-shape",
+                append_events=True,
+                carried_user_message="carry me",
+            )
+        )
+        payload = result.to_tool_result()
+
+        self.assertEqual(payload["new_worldline_id"], result.new_worldline_id)
+        self.assertEqual(payload["from_event_id"], "event_anchor_2")
+        self.assertEqual(payload["name"], "tool-shape")
+        self.assertEqual(payload["created_event_ids"], list(result.created_event_ids))
+        self.assertTrue(payload["switched"])
+
 
 if __name__ == "__main__":
     unittest.main()

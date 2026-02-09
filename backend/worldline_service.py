@@ -29,6 +29,15 @@ class BranchResult:
     created_event_ids: tuple[str, ...] = ()
     switched: bool = False
 
+    def to_tool_result(self) -> dict[str, object]:
+        return {
+            "new_worldline_id": self.new_worldline_id,
+            "from_event_id": self.from_event_id,
+            "name": self.name,
+            "created_event_ids": list(self.created_event_ids),
+            "switched": self.switched,
+        }
+
 
 class WorldlineService:
     def branch_from_event(self, options: BranchOptions) -> BranchResult:

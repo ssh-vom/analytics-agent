@@ -256,15 +256,7 @@ class ChatEngine:
                         carried_user_message=carried_user_message,
                     )
                 )
-                return (
-                    {
-                        "new_worldline_id": branch_result.new_worldline_id,
-                        "from_event_id": branch_result.from_event_id,
-                        "name": branch_result.name,
-                        "created_event_ids": list(branch_result.created_event_ids),
-                    },
-                    branch_result.new_worldline_id,
-                )
+                return branch_result.to_tool_result(), branch_result.new_worldline_id
             except HTTPException as exc:
                 return {"error": str(exc.detail), "status_code": exc.status_code}, None
             except Exception as exc:  # pragma: no cover
