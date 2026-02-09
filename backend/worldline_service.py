@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from fastapi import HTTPException
 
 try:
-    from backend.meta import get_conn, new_id
+    from backend.meta import append_event, get_conn, new_id, set_worldline_head
 except ModuleNotFoundError:
-    from meta import get_conn, new_id
+    from meta import append_event, get_conn, new_id, set_worldline_head
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,8 @@ class BranchResult:
 
 class WorldlineService:
     def branch_from_event(self, options: BranchOptions) -> BranchResult:
+        created_event_ids: list[str] = []
+
         with get_conn() as conn:
             source_worldline = conn.execute(
                 "SELECT id, thread_id FROM worldlines WHERE id = ?",
@@ -73,6 +75,52 @@ class WorldlineService:
                     branch_name,
                 ),
             )
+
+            if options.append_events:
+                worldline_created_event_id = append_event(
+                    conn=conn,
+                    worldline_id=new_worldline_id,
+                    parent_event_id=options.from_event_id,
+                    event_type="worldline_created",
+                    payload={
+                        "new_worldline_id": new_worldline_id,
+                        "parent_worldline_id": options.source_worldline_id,
+                        "forked_from_event_id": options.from_event_id,
+                        "name": branch_name,
+                    },
+                )
+                created_event_ids.append(worldline_created_event_id)
+
+                time_travel_event_id = append_event(
+                    conn=conn,
+                    worldline_id=new_worldline_id,
+                    parent_event_id=worldline_created_event_id,
+                    event_type="time_travel",
+                    payload={
+                        "from_worldline_id": options.source_worldline_id,
+                        "from_event_id": options.from_event_id,
+                        "new_worldline_id": new_worldline_id,
+                        "name": branch_name,
+                    },
+                )
+                created_event_ids.append(time_travel_event_id)
+
+                if options.carried_user_message:
+                    carried_user_event_id = append_event(
+                        conn=conn,
+                        worldline_id=new_worldline_id,
+                        parent_event_id=time_travel_event_id,
+                        event_type="user_message",
+                        payload={
+                            "text": options.carried_user_message,
+                            "carried_from_worldline_id": options.source_worldline_id,
+                        },
+                    )
+                    created_event_ids.append(carried_user_event_id)
+                    set_worldline_head(conn, new_worldline_id, carried_user_event_id)
+                else:
+                    set_worldline_head(conn, new_worldline_id, time_travel_event_id)
+
             conn.commit()
 
         return BranchResult(
@@ -81,6 +129,6 @@ class WorldlineService:
             source_worldline_id=options.source_worldline_id,
             from_event_id=options.from_event_id,
             name=branch_name,
-            created_event_ids=(),
-            switched=False,
+            created_event_ids=tuple(created_event_ids),
+            switched=options.append_events,
         )
