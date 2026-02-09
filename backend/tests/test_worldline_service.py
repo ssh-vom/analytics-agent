@@ -7,6 +7,8 @@ from pathlib import Path
 import meta
 import threads
 import worldlines
+import duckdb
+import duckdb_manager
 from worldline_service import BranchOptions, WorldlineService
 
 
@@ -162,6 +164,57 @@ class WorldlineServiceTests(unittest.TestCase):
         self.assertEqual(payload["name"], "tool-shape")
         self.assertEqual(payload["created_event_ids"], list(result.created_event_ids))
         self.assertTrue(payload["switched"])
+
+    def test_branch_clones_duckdb_state_from_source_worldline(self) -> None:
+        thread_id = self._create_thread()
+        source_worldline_id = self._create_worldline(thread_id)
+
+        source_db_path = duckdb_manager.ensure_worldline_db(source_worldline_id)
+        conn = duckdb.connect(str(source_db_path))
+        conn.execute("CREATE TABLE metrics (k VARCHAR, v INTEGER)")
+        conn.execute("INSERT INTO metrics VALUES ('a', 1), ('b', 2)")
+        conn.close()
+
+        with meta.get_conn() as sqlite_conn:
+            sqlite_conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_anchor_3",
+                    source_worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "anchor-3"}),
+                ),
+            )
+            sqlite_conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_anchor_3", source_worldline_id),
+            )
+            sqlite_conn.commit()
+
+        service = WorldlineService()
+        result = service.branch_from_event(
+            BranchOptions(
+                source_worldline_id=source_worldline_id,
+                from_event_id="event_anchor_3",
+                name="duckdb-clone",
+                append_events=False,
+            )
+        )
+
+        target_db_path = duckdb_manager.worldline_db_path(result.new_worldline_id)
+        self.assertTrue(target_db_path.exists())
+
+        target_conn = duckdb.connect(str(target_db_path))
+        rows = target_conn.execute(
+            "SELECT k, v FROM metrics ORDER BY k"
+        ).fetchall()
+        target_conn.close()
+
+        self.assertEqual(rows, [("a", 1), ("b", 2)])
 
 
 if __name__ == "__main__":
