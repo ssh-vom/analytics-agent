@@ -38,7 +38,7 @@ ToolEventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 class SqlToolRequest(BaseModel):
     worldline_id: str
     sql: str
-    limit: int = Field(default=100, ge=1, le=10_000)
+    limit: int = Field(default=1000, ge=1, le=100_000)
     call_id: str | None = None
 
 
@@ -141,7 +141,7 @@ async def run_sql(body: SqlToolRequest):
 class PythonToolRequest(BaseModel):
     worldline_id: str
     code: str
-    timeout: int = Field(default=30, ge=1, le=120)
+    timeout: int = Field(default=60, ge=1, le=600)
     call_id: str | None = None
 
 

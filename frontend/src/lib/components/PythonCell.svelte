@@ -20,7 +20,8 @@
   export let onBranch: (() => void) | null = null;
   export let showArtifacts = true;
   export let artifactLinkMode: "download" | "panel" = "download";
-  let cellCollapsed = true;
+  export let initialCollapsed: boolean = true;
+  let cellCollapsed = initialCollapsed;
   let codeCollapsed = false;
   let outputCollapsed = false;
   const dispatch = createEventDispatcher<{ artifactselect: { artifactId: string } }>();
@@ -64,6 +65,7 @@
       <button
         type="button"
         class="collapse-btn"
+        class:collapsed={cellCollapsed}
         on:click={() => (cellCollapsed = !cellCollapsed)}
         aria-label={cellCollapsed ? "Expand Python cell" : "Collapse Python cell"}
       >
@@ -80,6 +82,17 @@
       
       <span class="cell-title">Python</span>
       
+      {#if cellCollapsed}
+        <span class="expand-hint">Show content</span>
+      {/if}
+
+      {#if cellCollapsed && artifacts.length > 0}
+        <div class="artifact-badge">
+          <Image size={12} />
+          <span>{artifacts.length}</span>
+        </div>
+      {/if}
+
       <div class="status-badge {statusLabel}">
         {#if statusLabel === "running"}
           <Loader2 size={12} class="spin" />
@@ -294,10 +307,17 @@
     cursor: pointer;
     transition: all var(--transition-fast);
     flex-shrink: 0;
+    border-radius: var(--radius-sm);
   }
 
   .collapse-btn:hover {
     color: var(--text-primary);
+    background: var(--surface-hover);
+  }
+
+  .collapse-btn.collapsed {
+    color: var(--accent-cyan);
+    background: var(--accent-cyan-muted);
   }
 
   .cell-icon {
@@ -318,6 +338,28 @@
     font-weight: 500;
     color: var(--text-primary);
     flex-shrink: 0;
+  }
+
+  .expand-hint {
+    font-size: 11px;
+    color: var(--accent-cyan);
+    margin-left: var(--space-2);
+    pointer-events: none;
+  }
+
+  .artifact-badge {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--accent-cyan-muted);
+    color: var(--accent-cyan);
+    border: 1px solid var(--accent-cyan);
+    flex-shrink: 0;
+    margin-left: var(--space-2);
   }
 
   .status-badge {

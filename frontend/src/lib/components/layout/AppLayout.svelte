@@ -6,6 +6,7 @@
   import { Sidebar } from "lucide-svelte";
   import { GitBranch } from "lucide-svelte";
   import { Database } from "lucide-svelte";
+  import { FileSpreadsheet } from "lucide-svelte";
   import { Settings } from "lucide-svelte";
   import { Plus } from "lucide-svelte";
   import { ChevronDown } from "lucide-svelte";
@@ -68,6 +69,7 @@
   $: isConnectors = currentPath === "/connectors";
   $: isSettings = currentPath === "/settings";
   $: isWorldlines = currentPath === "/worldlines";
+  $: isData = currentPath === "/data";
 </script>
 
 <div class="app-layout">
@@ -129,6 +131,10 @@
         <a href="/worldlines" class="nav-item" class:active={isWorldlines}>
           <GitBranch size={18} />
           <span>Worldlines</span>
+        </a>
+        <a href="/data" class="nav-item" class:active={isData}>
+          <FileSpreadsheet size={18} />
+          <span>Data Sources</span>
         </a>
         <a href="/connectors" class="nav-item" class:active={isConnectors}>
           <Database size={18} />
@@ -363,9 +369,10 @@
   }
 
   .main-content {
-    overflow: auto;
+    overflow: hidden;
     background: var(--bg-0);
     height: 100vh;
+    overscroll-behavior: none;
   }
 
   @media (max-width: 768px) {

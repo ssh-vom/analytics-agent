@@ -11,6 +11,7 @@ try:
     from backend.tools import router as tools_router, get_sandbox_manager
     from backend.artifacts import router as artifacts_router
     from backend.chat_api import router as chat_router
+    from backend.seed_data_api import router as seed_data_router
 except ModuleNotFoundError:
     from env_loader import load_env_once
     from meta import init_meta_db
@@ -19,6 +20,7 @@ except ModuleNotFoundError:
     from tools import router as tools_router, get_sandbox_manager
     from artifacts import router as artifacts_router
     from chat_api import router as chat_router
+    from seed_data_api import router as seed_data_router
 
 REAPER_INTERVAL_SECONDS = int(os.getenv("SANDBOX_REAPER_INTERVAL_SECONDS", "60"))
 IDLE_TTL_SECONDS = int(os.getenv("SANDBOX_IDLE_TTL_SECONDS", "900"))
@@ -71,6 +73,7 @@ app.include_router(artifacts_router)
 app.include_router(threads_router)
 app.include_router(wordlines_router)
 app.include_router(chat_router)
+app.include_router(seed_data_router)
 
 
 @app.get("/")

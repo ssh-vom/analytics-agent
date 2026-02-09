@@ -7,7 +7,7 @@
   export let placeholder = "";
 
   let rendered = "";
-  let timer: ReturnType<typeof setInterval> | null = null;
+  let timer: ReturnType<typeof setInterval> | ReturnType<typeof requestAnimationFrame> | null = null;
   let lastCode = "";
   $: isRevealing = animate && rendered.length < code.length;
   $: content = rendered || placeholder;
@@ -185,7 +185,12 @@
 
   function stopTimer(): void {
     if (timer) {
-      clearInterval(timer);
+      // RAF uses a number, setInterval returns an object in some envs
+      if (typeof timer === "number") {
+        cancelAnimationFrame(timer);
+      } else {
+        clearInterval(timer);
+      }
       timer = null;
     }
   }
@@ -204,15 +209,35 @@
       return;
     }
 
-    timer = setInterval(() => {
-      if (rendered.length >= code.length) {
+    let lastFrameTime = performance.now();
+    const frameInterval = 33; // ~30fps for smoother, less jarring animation
+
+    function animate(currentTime: number): void {
+      if (!animate || rendered.length >= code.length) {
         stopTimer();
         return;
       }
+
+      const elapsed = currentTime - lastFrameTime;
+      if (elapsed < frameInterval) {
+        timer = requestAnimationFrame(animate);
+        return;
+      }
+
+      lastFrameTime = currentTime;
+
       const remaining = code.length - rendered.length;
-      const chunk = Math.max(1, Math.ceil(remaining / 16));
+      const chunk = Math.max(2, Math.ceil(remaining / 8));
       rendered = code.slice(0, Math.min(code.length, rendered.length + chunk));
-    }, 14);
+
+      if (rendered.length < code.length) {
+        timer = requestAnimationFrame(animate);
+      } else {
+        stopTimer();
+      }
+    }
+
+    timer = requestAnimationFrame(animate);
   }
 
   $: if (!animate) {
@@ -257,6 +282,8 @@
       var(--surface-0);
     overflow: hidden;
     box-shadow: inset 0 1px 0 rgb(255 255 255 / 3%);
+    contain: layout style paint;
+    will-change: auto;
   }
 
   .code-header {
@@ -277,12 +304,20 @@
     margin: 0;
     padding: 12px;
     overflow-x: auto;
+    overflow-y: auto;
     color: var(--text-primary);
     font-family: var(--font-mono);
     font-size: 13px;
     line-height: 1.45;
     min-height: 56px;
+    max-height: 60vh;
     white-space: pre-wrap;
+    scroll-behavior: smooth;
+  }
+
+  /* Large code blocks get internal scrolling */
+  pre:has(code) {
+    overscroll-behavior: contain;
   }
 
   code {

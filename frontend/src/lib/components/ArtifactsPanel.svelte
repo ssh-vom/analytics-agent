@@ -81,12 +81,16 @@
       return [];
     }
 
-    return artifacts.filter(
-      (artifact): artifact is PythonArtifact =>
-        typeof artifact?.artifact_id === "string" &&
-        typeof artifact?.name === "string" &&
-        typeof artifact?.type === "string",
-    );
+    // Validate artifacts - only artifact_id is required, provide defaults for others
+    return artifacts
+      .filter((artifact): artifact is { artifact_id: string; name?: string; type?: string } =>
+        typeof artifact?.artifact_id === "string" && artifact.artifact_id.length > 0
+      )
+      .map((artifact): PythonArtifact => ({
+        artifact_id: artifact.artifact_id,
+        name: artifact.name || "unnamed artifact",
+        type: artifact.type || "file",
+      }));
   }
 
   function isImageArtifact(type: string): boolean {

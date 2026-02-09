@@ -15,7 +15,8 @@
   export let callEvent: TimelineEvent | null = null;
   export let resultEvent: TimelineEvent | null = null;
   export let onBranch: (() => void) | null = null;
-  let cellCollapsed = true;
+  export let initialCollapsed: boolean = true;
+  let cellCollapsed = initialCollapsed;
   let codeCollapsed = false;
   let outputCollapsed = false;
 
@@ -38,6 +39,7 @@
       <button
         type="button"
         class="collapse-btn"
+        class:collapsed={cellCollapsed}
         on:click={() => (cellCollapsed = !cellCollapsed)}
         aria-label={cellCollapsed ? "Expand SQL cell" : "Collapse SQL cell"}
       >
@@ -54,6 +56,17 @@
       
       <span class="cell-title">SQL Query</span>
       
+      {#if cellCollapsed}
+        <span class="expand-hint">Show content</span>
+      {/if}
+
+      {#if cellCollapsed && result && result.row_count !== undefined}
+        <div class="row-count-badge">
+          <Database size={12} />
+          <span>{result.row_count} rows</span>
+        </div>
+      {/if}
+
       <div class="status-badge {statusLabel}">
         {#if statusLabel === "running"}
           <Loader2 size={12} class="spin" />
@@ -197,10 +210,17 @@
     cursor: pointer;
     transition: all var(--transition-fast);
     flex-shrink: 0;
+    border-radius: var(--radius-sm);
   }
 
   .collapse-btn:hover {
     color: var(--text-primary);
+    background: var(--surface-hover);
+  }
+
+  .collapse-btn.collapsed {
+    color: var(--accent-orange);
+    background: var(--accent-orange-muted);
   }
 
   .cell-icon {
@@ -221,6 +241,28 @@
     font-weight: 500;
     color: var(--text-primary);
     flex-shrink: 0;
+  }
+
+  .expand-hint {
+    font-size: 11px;
+    color: var(--accent-orange);
+    margin-left: var(--space-2);
+    pointer-events: none;
+  }
+
+  .row-count-badge {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--accent-orange-muted);
+    color: var(--accent-orange);
+    border: 1px solid var(--accent-orange);
+    flex-shrink: 0;
+    margin-left: var(--space-2);
   }
 
   .status-badge {

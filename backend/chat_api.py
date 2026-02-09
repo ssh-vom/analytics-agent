@@ -26,7 +26,7 @@ class ChatRequest(BaseModel):
     message: str
     provider: str | None = None
     model: str | None = None
-    max_iterations: int = Field(default=6, ge=1, le=20)
+    max_iterations: int = Field(default=6, ge=1, le=100)
 
 
 def _encode_sse_frame(
@@ -40,7 +40,8 @@ def _encode_sse_frame(
         lines.append(f"id: {event_id}")
     lines.append(f"event: {event}")
     lines.append(
-        "data: " + json.dumps(payload, ensure_ascii=True, default=str, separators=(",", ":"))
+        "data: "
+        + json.dumps(payload, ensure_ascii=True, default=str, separators=(",", ":"))
     )
     return "\n".join(lines) + "\n\n"
 

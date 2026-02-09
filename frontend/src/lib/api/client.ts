@@ -106,6 +106,142 @@ export async function branchWorldline(
   return (await response.json()) as WorldlineBranchResponse;
 }
 
+// Seed data API functions
+export async function importCSV(
+  worldlineId: string,
+  file: File,
+  tableName?: string,
+  ifExists: "fail" | "replace" | "append" = "fail",
+): Promise<{
+  success: boolean;
+  table_name: string;
+  row_count: number;
+  columns: { name: string; type: string }[];
+  import_time_ms: number;
+  event_id: string;
+}> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (tableName) {
+    formData.append("table_name", tableName);
+  }
+  formData.append("if_exists", ifExists);
+
+  const response = await fetch(`/api/seed-data/worldlines/${worldlineId}/import-csv`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to import CSV (${response.status}): ${errorText}`);
+  }
+
+  return await response.json();
+}
+
+export async function attachExternalDuckDB(
+  worldlineId: string,
+  dbPath: string,
+  alias?: string,
+): Promise<{
+  success: boolean;
+  alias: string;
+  db_path: string;
+  attached_at: string;
+  event_id: string;
+}> {
+  const response = await fetch(`/api/seed-data/worldlines/${worldlineId}/attach-duckdb`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ db_path: dbPath, alias }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to attach database (${response.status}): ${errorText}`);
+  }
+
+  return await response.json();
+}
+
+export async function detachExternalDuckDB(
+  worldlineId: string,
+  alias: string,
+): Promise<{
+  success: boolean;
+  alias: string;
+  status: string;
+  event_id: string;
+}> {
+  const response = await fetch(`/api/seed-data/worldlines/${worldlineId}/detach-duckdb`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ alias }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to detach database (${response.status}): ${errorText}`);
+  }
+
+  return await response.json();
+}
+
+export async function fetchWorldlineSchema(worldlineId: string): Promise<{
+  native_tables: {
+    schema: string;
+    name: string;
+    columns: { name: string; type: string }[];
+  }[];
+  imported_tables: {
+    table_name: string;
+    source_filename: string;
+    row_count: number;
+    imported_at: string;
+  }[];
+  attached_databases: {
+    alias: string;
+    db_path: string;
+    db_type: string;
+    attached_at: string;
+    tables: string[];
+  }[];
+}> {
+  const response = await fetch(`/api/seed-data/worldlines/${worldlineId}/schema`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch schema (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function fetchWorldlineTables(
+  worldlineId: string,
+  includeSystem = false,
+): Promise<{
+  tables: {
+    name: string;
+    schema: string;
+    type: "native" | "imported_csv" | "external";
+    columns?: { name: string; type: string }[];
+    source_filename?: string;
+    row_count?: number;
+    source_db?: string;
+  }[];
+  count: number;
+}> {
+  const url = new URL(`/api/seed-data/worldlines/${worldlineId}/tables`, window.location.origin);
+  if (includeSystem) {
+    url.searchParams.set("include_system", "true");
+  }
+
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    throw new Error(`Failed to fetch tables (${response.status})`);
+  }
+  return await response.json();
+}
+
 export async function streamChatTurn(options: StreamOptions): Promise<void> {
   const response = await fetch("/api/chat/stream", {
     method: "POST",
@@ -115,7 +251,7 @@ export async function streamChatTurn(options: StreamOptions): Promise<void> {
       message: options.message,
       provider: options.provider,
       model: options.model,
-      max_iterations: options.maxIterations ?? 6,
+      max_iterations: options.maxIterations ?? 20,
     }),
   });
 
