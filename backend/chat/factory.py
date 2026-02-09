@@ -6,10 +6,12 @@ try:
     from backend.chat.adapters.gemini_adapter import GeminiAdapter
     from backend.chat.adapters.openai_adapter import OpenAiAdapter
     from backend.chat.llm_client import LlmClient
+    from backend.env_loader import load_env_once
 except ModuleNotFoundError:
     from chat.adapters.gemini_adapter import GeminiAdapter
     from chat.adapters.openai_adapter import OpenAiAdapter
     from chat.llm_client import LlmClient
+    from env_loader import load_env_once
 
 
 def build_llm_client(
@@ -18,6 +20,8 @@ def build_llm_client(
     model: str | None = None,
     api_key: str | None = None,
 ) -> LlmClient:
+    load_env_once()
+
     resolved_provider = (provider or os.getenv("LLM_PROVIDER", "openai")).lower().strip()
     if resolved_provider == "openai":
         return OpenAiAdapter(
@@ -27,7 +31,7 @@ def build_llm_client(
     if resolved_provider == "gemini":
         return GeminiAdapter(
             model=model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-            api_key=api_key or os.getenv("GEMINI_API_KEY"),
+            api_key=api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
         )
 
     raise ValueError(f"Unsupported LLM provider: {resolved_provider}")

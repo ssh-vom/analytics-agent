@@ -164,6 +164,55 @@ class ChatApiTests(unittest.TestCase):
             "The query returned one row.",
         )
 
+    def test_chat_stops_repeated_identical_tool_calls_in_turn(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_repeat_1",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_repeat_2",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 10},
+                        )
+                    ],
+                ),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="run this once",
+                        provider="gemini",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 2)
+        self.assertEqual(
+            [event["type"] for event in result["events"]],
+            ["user_message", "tool_call_sql", "tool_result_sql", "assistant_message"],
+        )
+        self.assertIn(
+            "repeated the same tool call",
+            result["events"][-1]["payload"]["text"],
+        )
+
     def test_chat_time_travel_branches_and_continues_on_new_worldline(self) -> None:
         thread_id = self._create_thread()
         source_worldline_id = self._create_worldline(thread_id)

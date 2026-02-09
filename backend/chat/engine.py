@@ -95,6 +95,7 @@ class ChatEngine:
 
         messages = await self._build_llm_messages(active_worldline_id)
         final_text: str | None = None
+        successful_tool_signatures: set[str] = set()
 
         for _ in range(self.max_iterations):
             response = await self.llm_client.generate(
@@ -107,7 +108,20 @@ class ChatEngine:
                 messages.append(ChatMessage(role="assistant", content=response.text))
 
             if response.tool_calls:
+                repeated_call_detected = False
                 for tool_call in response.tool_calls:
+                    signature = self._tool_signature(
+                        worldline_id=active_worldline_id,
+                        tool_call=tool_call,
+                    )
+                    if signature in successful_tool_signatures:
+                        final_text = (
+                            "I stopped because the model repeated the same tool call "
+                            "with identical arguments in this turn."
+                        )
+                        repeated_call_detected = True
+                        break
+
                     tool_result, switched_worldline_id = await self._execute_tool_call(
                         worldline_id=active_worldline_id,
                         tool_call=tool_call,
@@ -131,10 +145,14 @@ class ChatEngine:
                         serialized = serialized[:12_000] + "...(truncated)"
                     messages.append(
                         ChatMessage(
-                            role="user",
+                            role="assistant",
                             content=f"Tool result for {tool_call.name}: {serialized}",
                         )
                     )
+                    if not tool_result.get("error"):
+                        successful_tool_signatures.add(signature)
+                if repeated_call_detected:
+                    break
                 continue
 
             final_text = response.text or "Done."
@@ -319,12 +337,24 @@ class ChatEngine:
                     summary = summary[:2_000] + "...(truncated)"
                 messages.append(
                     ChatMessage(
-                        role="user",
+                        role="assistant",
                         content=f"Prior {event_type} result: {summary}",
                     )
                 )
 
         return messages
+
+    def _tool_signature(self, *, worldline_id: str, tool_call: ToolCall) -> str:
+        return json.dumps(
+            {
+                "worldline_id": worldline_id,
+                "name": tool_call.name,
+                "arguments": tool_call.arguments or {},
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            default=str,
+        )
 
     def _append_worldline_event(
         self,

@@ -11,6 +11,34 @@ except ModuleNotFoundError:
     from chat.llm_client import ChatMessage, LlmResponse, ToolCall, ToolDefinition
 
 
+_UNSUPPORTED_SCHEMA_KEYS = {
+    "additionalProperties",
+    "additional_properties",
+}
+
+
+def _to_gemini_role(role: str) -> str:
+    normalized = (role or "").strip().lower()
+    if normalized == "assistant":
+        return "model"
+    if normalized in {"model", "user"}:
+        return normalized
+    return "user"
+
+
+def _sanitize_schema(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, inner in value.items():
+            if key in _UNSUPPORTED_SCHEMA_KEYS:
+                continue
+            sanitized[key] = _sanitize_schema(inner)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_schema(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class GeminiAdapter:
     model: str
@@ -48,12 +76,17 @@ class GeminiAdapter:
                 "Gemini SDK not installed. Add dependency: `google-genai`."
             ) from exc
 
+        if not self.api_key:
+            raise RuntimeError(
+                "Gemini API key is missing. Set GEMINI_API_KEY or GOOGLE_API_KEY."
+            )
+
         client = genai.Client(api_key=self.api_key)
         function_declarations = [
             genai_types.FunctionDeclaration(
                 name=t.name,
                 description=t.description,
-                parameters=t.input_schema,
+                parameters=_sanitize_schema(t.input_schema),
             )
             for t in tools
         ]
@@ -68,7 +101,10 @@ class GeminiAdapter:
 
         response = client.models.generate_content(
             model=self.model,
-            contents=[{"role": m.role, "parts": [{"text": m.content}]} for m in messages],
+            contents=[
+                {"role": _to_gemini_role(m.role), "parts": [{"text": m.content}]}
+                for m in messages
+            ],
             config=genai_types.GenerateContentConfig(**config_kwargs),
         )
         return self._parse_response(response)

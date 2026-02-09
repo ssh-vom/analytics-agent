@@ -4,6 +4,7 @@ import os
 import asyncio
 
 try:
+    from backend.env_loader import load_env_once
     from backend.meta import init_meta_db
     from backend.threads import router as threads_router
     from backend.worldlines import router as wordlines_router
@@ -11,6 +12,7 @@ try:
     from backend.artifacts import router as artifacts_router
     from backend.chat_api import router as chat_router
 except ModuleNotFoundError:
+    from env_loader import load_env_once
     from meta import init_meta_db
     from threads import router as threads_router
     from worldlines import router as wordlines_router
@@ -40,6 +42,7 @@ async def _sandbox_reaper_loop(stop_event: asyncio.Event) -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    load_env_once()
     init_meta_db()
     stop_event = asyncio.Event()
     app.state.sandbox_reaper_stop_event = stop_event
