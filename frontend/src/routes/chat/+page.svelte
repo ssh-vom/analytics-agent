@@ -5,6 +5,7 @@
   import MessageCell from "$lib/components/MessageCell.svelte";
   import PythonCell from "$lib/components/PythonCell.svelte";
   import SqlCell from "$lib/components/SqlCell.svelte";
+  import ArtifactsPanel from "$lib/components/ArtifactsPanel.svelte";
   import WorldlinePicker from "$lib/components/WorldlinePicker.svelte";
   import { activeThread, threads } from "$lib/stores/threads";
   import {
@@ -371,57 +372,62 @@
     </div>
   </header>
 
-  <!-- Chat Feed -->
-  <div class="feed">
-    {#if !isReady}
-      <div class="empty-state">
-        <div class="empty-icon">
-          <Sparkles size={32} />
+  <div class="workspace">
+    <!-- Chat Feed -->
+    <div class="feed">
+      {#if !isReady}
+        <div class="empty-state">
+          <div class="empty-icon">
+            <Sparkles size={32} />
+          </div>
+          <p>Initializing session...</p>
         </div>
-        <p>Initializing session...</p>
-      </div>
-    {:else if cells.length === 0}
-      <div class="empty-state">
-        <div class="empty-icon">
-          <Database size={32} />
+      {:else if cells.length === 0}
+        <div class="empty-state">
+          <div class="empty-icon">
+            <Database size={32} />
+          </div>
+          <h3>Start analyzing your data</h3>
+          <p>Ask a question, write SQL, or request Python analysis</p>
         </div>
-        <h3>Start analyzing your data</h3>
-        <p>Ask a question, write SQL, or request Python analysis</p>
-      </div>
-    {:else}
-      {#each cells as cell (cell.id)}
-        {#if cell.kind === "message"}
-          <MessageCell
-            role={cell.role}
-            text={cell.text}
-            createdAt={cell.event.created_at}
-            onBranch={() => branchFromEvent(cell.event.id)}
-          />
-        {:else if cell.kind === "sql"}
-          <SqlCell
-            callEvent={cell.call}
-            resultEvent={cell.result}
-            onBranch={() => branchFromEvent(cell.result?.id ?? cell.call?.id ?? "")}
-          />
-        {:else if cell.kind === "python"}
-          <PythonCell
-            callEvent={cell.call}
-            resultEvent={cell.result}
-            onBranch={() => branchFromEvent(cell.result?.id ?? cell.call?.id ?? "")}
-          />
-        {:else}
-          <article class="meta-cell">
-            <header>
-              <strong>{cell.label}</strong>
-              <button type="button" on:click={() => branchFromEvent(cell.event.id)}>
-                Branch from here
-              </button>
-            </header>
-            <pre>{JSON.stringify(cell.event.payload, null, 2)}</pre>
-          </article>
-        {/if}
-      {/each}
-    {/if}
+      {:else}
+        {#each cells as cell (cell.id)}
+          {#if cell.kind === "message"}
+            <MessageCell
+              role={cell.role}
+              text={cell.text}
+              createdAt={cell.event.created_at}
+              onBranch={() => branchFromEvent(cell.event.id)}
+            />
+          {:else if cell.kind === "sql"}
+            <SqlCell
+              callEvent={cell.call}
+              resultEvent={cell.result}
+              onBranch={() => branchFromEvent(cell.result?.id ?? cell.call?.id ?? "")}
+            />
+          {:else if cell.kind === "python"}
+            <PythonCell
+              callEvent={cell.call}
+              resultEvent={cell.result}
+              showArtifacts={false}
+              onBranch={() => branchFromEvent(cell.result?.id ?? cell.call?.id ?? "")}
+            />
+          {:else}
+            <article class="meta-cell">
+              <header>
+                <strong>{cell.label}</strong>
+                <button type="button" on:click={() => branchFromEvent(cell.event.id)}>
+                  Branch from here
+                </button>
+              </header>
+              <pre>{JSON.stringify(cell.event.payload, null, 2)}</pre>
+            </article>
+          {/if}
+        {/each}
+      {/if}
+    </div>
+
+    <ArtifactsPanel events={activeEvents} />
   </div>
 
   <!-- Composer -->
@@ -457,6 +463,13 @@
     flex-direction: column;
     height: 100vh;
     background: var(--bg-0);
+  }
+
+  .workspace {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 340px;
   }
 
   .top-bar {
@@ -607,12 +620,12 @@
   }
 
   .feed {
-    flex: 1;
     overflow-y: auto;
     padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+    min-height: 0;
   }
 
   .empty-state {
@@ -773,6 +786,13 @@
   @keyframes spin {
     to {
       transform: rotate(360deg);
+    }
+  }
+
+  @media (max-width: 1100px) {
+    .workspace {
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(0, 1fr) auto;
     }
   }
 </style>

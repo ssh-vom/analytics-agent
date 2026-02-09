@@ -17,6 +17,7 @@
   export let callEvent: TimelineEvent | null = null;
   export let resultEvent: TimelineEvent | null = null;
   export let onBranch: (() => void) | null = null;
+  export let showArtifacts = true;
   let cellCollapsed = false;
   let codeCollapsed = false;
   let outputCollapsed = false;
@@ -151,7 +152,7 @@
                 </div>
               {/if}
               
-              {#if artifacts.length > 0}
+              {#if showArtifacts && artifacts.length > 0}
                 <div class="artifacts-section">
                   {#if imageArtifacts.length > 0}
                     <div class="artifact-group">
@@ -202,6 +203,11 @@
                       </div>
                     </div>
                   {/if}
+                </div>
+              {:else if !showArtifacts && artifacts.length > 0}
+                <div class="artifacts-note">
+                  <Image size={14} />
+                  <span>{artifacts.length} artifacts available in the Artifacts panel.</span>
                 </div>
               {/if}
             {:else}
@@ -491,6 +497,18 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+  }
+
+  .artifacts-note {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    background: var(--surface-0);
+    color: var(--text-dim);
+    font-size: 12px;
   }
 
   .artifact-group {
