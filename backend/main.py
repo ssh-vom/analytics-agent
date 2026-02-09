@@ -9,12 +9,14 @@ try:
     from backend.worldlines import router as wordlines_router
     from backend.tools import router as tools_router, get_sandbox_manager
     from backend.artifacts import router as artifacts_router
+    from backend.chat_api import router as chat_router
 except ModuleNotFoundError:
     from meta import init_meta_db
     from threads import router as threads_router
     from worldlines import router as wordlines_router
     from tools import router as tools_router, get_sandbox_manager
     from artifacts import router as artifacts_router
+    from chat_api import router as chat_router
 
 REAPER_INTERVAL_SECONDS = int(os.getenv("SANDBOX_REAPER_INTERVAL_SECONDS", "60"))
 IDLE_TTL_SECONDS = int(os.getenv("SANDBOX_IDLE_TTL_SECONDS", "900"))
@@ -65,6 +67,7 @@ app.include_router(tools_router)
 app.include_router(artifacts_router)
 app.include_router(threads_router)
 app.include_router(wordlines_router)
+app.include_router(chat_router)
 
 
 @app.get("/")
