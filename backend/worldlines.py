@@ -4,11 +4,13 @@ from pydantic import BaseModel
 
 try:
     from backend.meta import get_conn, new_id
+    from backend.worldline_service import BranchOptions, WorldlineService
 except ModuleNotFoundError:
     from meta import get_conn, new_id
-
+    from worldline_service import BranchOptions, WorldlineService
 
 router = APIRouter(prefix="/api", tags=["worldlines"])
+_worldline_service = WorldlineService()
 
 
 class CreateWorldlineRequest(BaseModel):
@@ -55,49 +57,17 @@ async def create_worldline(body: CreateWorldlineRequest):
 
 @router.post("/worldlines/{worldline_id}/branch")
 async def branch_worldline(worldline_id: str, body: BranchWorldlineRequest):
-    new_worldline_id = new_id("worldline")
-
-    with get_conn() as conn:
-        source_worldline = conn.execute(
-            "SELECT id, thread_id FROM worldlines WHERE id = ?",
-            (worldline_id,),
-        ).fetchone()
-        if source_worldline is None:
-            raise HTTPException(status_code=404, detail="source worldline not found")
-
-        source_event = conn.execute(
-            "SELECT id, worldline_id FROM events WHERE id = ?",
-            (body.from_event_id,),
-        ).fetchone()
-        if source_event is None:
-            raise HTTPException(status_code=404, detail="from_event_id not found")
-
-        if source_event["worldline_id"] != worldline_id:
-            raise HTTPException(
-                status_code=400,
-                detail="from_event_id does not belong to source worldline",
-            )
-
-        branch_name = body.name or f"branch-{body.from_event_id[-6:]}"
-
-        _ = conn.execute(
-            """
-                INSERT INTO worldlines
-                (id, thread_id, parent_worldline_id, forked_from_event_id, head_event_id, name)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-            (
-                new_worldline_id,
-                source_worldline["thread_id"],
-                worldline_id,
-                body.from_event_id,
-                body.from_event_id,
-                branch_name,
-            ),
+    result = _worldline_service.branch_from_event(
+        BranchOptions(
+            source_worldline_id=worldline_id,
+            from_event_id=body.from_event_id,
+            name=body.name,
+            append_events=False,
+            carried_user_message=None,
         )
-        conn.commit()
+    )
 
-    return {"new_worldline_id": new_worldline_id}
+    return {"new_worldline_id": result.new_worldline_id}
 
 
 @router.get("/worldlines/{worldline_id}/events")
