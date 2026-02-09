@@ -3,6 +3,7 @@ import type {
   SseDoneFrame,
   SseEventFrame,
   ThreadCreateResponse,
+  ThreadsResponse,
   TimelineEvent,
   WorldlineBranchResponse,
   WorldlineCreateResponse,
@@ -40,6 +41,15 @@ export async function createThread(title?: string): Promise<ThreadCreateResponse
     throw new Error(`Failed to create thread (${response.status}): ${errorText}`);
   }
   return (await response.json()) as ThreadCreateResponse;
+}
+
+export async function fetchThreads(): Promise<ThreadsResponse> {
+  const response = await fetch("/api/threads");
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to fetch threads (${response.status}): ${errorText}`);
+  }
+  return (await response.json()) as ThreadsResponse;
 }
 
 export async function createWorldline(

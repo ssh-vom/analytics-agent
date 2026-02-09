@@ -1,6 +1,6 @@
-import { writable, derived } from "svelte/store";
+import { writable } from "svelte/store";
 import type { Thread } from "$lib/types";
-import { createThread } from "$lib/api/client";
+import { createThread, fetchThreads } from "$lib/api/client";
 
 interface ThreadsState {
   threads: Thread[];
@@ -9,7 +9,7 @@ interface ThreadsState {
 }
 
 function createThreadsStore() {
-  const { subscribe, set, update } = writable<ThreadsState>({
+  const { subscribe, update } = writable<ThreadsState>({
     threads: [],
     loading: false,
     error: null,
@@ -21,11 +21,15 @@ function createThreadsStore() {
     loadThreads: async () => {
       update((s) => ({ ...s, loading: true, error: null }));
       try {
-        // For now, we'll use localStorage to persist threads
-        // In a real implementation, this would fetch from the backend
-        const saved = localStorage.getItem("textql_threads");
-        const parsed = saved ? JSON.parse(saved) : [];
-        update((s) => ({ ...s, threads: parsed, loading: false }));
+        const response = await fetchThreads();
+        const mapped = response.threads.map((thread) => ({
+          id: thread.id,
+          name: thread.title || "New Thread",
+          createdAt: thread.created_at,
+          lastActivity: thread.last_activity,
+          messageCount: thread.message_count,
+        }));
+        update((s) => ({ ...s, threads: mapped, loading: false }));
       } catch (err) {
         update((s) => ({
           ...s,
@@ -36,7 +40,6 @@ function createThreadsStore() {
     },
 
     saveThreads: (newThreads: Thread[]) => {
-      localStorage.setItem("textql_threads", JSON.stringify(newThreads));
       update((s) => ({ ...s, threads: newThreads }));
     },
 
@@ -54,7 +57,6 @@ function createThreadsStore() {
         
         update((s) => {
           const threads = [newThread, ...s.threads];
-          localStorage.setItem("textql_threads", JSON.stringify(threads));
           return { ...s, threads, loading: false, error: null };
         });
         
@@ -72,7 +74,6 @@ function createThreadsStore() {
     addThreadLocal: (thread: Thread) => {
       update((s) => {
         const threads = [thread, ...s.threads];
-        localStorage.setItem("textql_threads", JSON.stringify(threads));
         return { ...s, threads, loading: false, error: null };
       });
     },
@@ -82,7 +83,6 @@ function createThreadsStore() {
         const threads = s.threads.map((t) =>
           t.id === id ? { ...t, ...updates } : t
         );
-        localStorage.setItem("textql_threads", JSON.stringify(threads));
         return { ...s, threads };
       });
     },
@@ -90,7 +90,6 @@ function createThreadsStore() {
     deleteThread: (id: string) => {
       update((s) => {
         const threads = s.threads.filter((t) => t.id !== id);
-        localStorage.setItem("textql_threads", JSON.stringify(threads));
         return { ...s, threads };
       });
     },
@@ -126,24 +125,28 @@ export const activeThread = createActiveThreadStore();
 
 // Helper function to create a new thread and make it active
 export async function createNewThread(name?: string) {
-  console.log("createNewThread called with name:", name);
   const thread = await threads.addThread(name);
-  console.log("Thread created in store:", thread);
   activeThread.set(thread);
   activeThread.saveToStorage(thread);
-  console.log("Active thread set and saved");
   return thread;
 }
 
 // Helper function to load a thread and make it active
 export async function loadThread(threadId: string) {
-  const threadList = threads;
   let found: Thread | undefined;
-  
-  const unsubscribe = threadList.subscribe((state) => {
+
+  const unsubscribe = threads.subscribe((state) => {
     found = state.threads.find((t) => t.id === threadId);
   });
   unsubscribe();
+
+  if (!found) {
+    await threads.loadThreads();
+    const retryUnsubscribe = threads.subscribe((state) => {
+      found = state.threads.find((t) => t.id === threadId);
+    });
+    retryUnsubscribe();
+  }
 
   if (found) {
     activeThread.set(found);

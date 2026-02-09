@@ -21,6 +21,19 @@ export interface ThreadCreateResponse {
   thread_id: string;
 }
 
+export interface ThreadListItem {
+  id: string;
+  title: string;
+  created_at: string;
+  message_count: number;
+  last_activity: string;
+}
+
+export interface ThreadsResponse {
+  threads: ThreadListItem[];
+  next_cursor: string | null;
+}
+
 export interface WorldlineCreateResponse {
   worldline_id: string;
 }

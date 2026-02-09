@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { threads, activeThread, createNewThread, loadThread } from "$lib/stores/threads";
   import { createWorldline } from "$lib/api/client";
@@ -40,25 +41,26 @@
   });
 
   async function handleCreateNewThread() {
-    console.log("Creating new thread...");
     try {
       const thread = await createNewThread();
-      console.log("Thread created:", thread);
       
       // Create a worldline for this thread
-      console.log("Creating worldline for thread:", thread.id);
       const worldline = await createWorldline(thread.id, "main");
-      console.log("Worldline created:", worldline);
       
       // Store the worldline ID in localStorage so chat page can pick it up
       localStorage.setItem("textql_active_worldline", worldline.worldline_id);
       
       // Navigate to chat page
-      window.location.href = "/chat";
+      await goto("/chat");
     } catch (err) {
       console.error("Failed to create thread:", err);
       alert("Failed to create thread: " + (err instanceof Error ? err.message : "Unknown error"));
     }
+  }
+
+  async function handleThreadSelect(threadId: string): Promise<void> {
+    await loadThread(threadId);
+    await goto("/chat");
   }
 
   $: currentPath = $page.url.pathname;
@@ -88,28 +90,30 @@
           {/if}
           <MessageSquare size={16} />
           <span class="section-title">Threads</span>
-          <span class="section-count">({$threads.length})</span>
+          <span class="section-count">({$threads.threads.length})</span>
         </button>
 
         {#if threadsExpanded}
           <div class="section-content">
-            {#each $threads as thread}
-              <button
-                class="thread-card"
-                class:active={thread.id === $activeThread?.id}
-                on:click={() => loadThread(thread.id)}
-              >
-                <div class="thread-info">
-                  <span class="thread-name">{thread.name}</span>
-                  <span class="thread-meta">
-                    {thread.messageCount} msgs · {formatRelativeTime(thread.lastActivity)}
-                  </span>
-                </div>
-                {#if thread.id === $activeThread?.id}
-                  <div class="active-indicator"></div>
-                {/if}
-              </button>
-            {/each}
+            <div class="thread-list">
+              {#each $threads.threads as thread}
+                <button
+                  class="thread-card"
+                  class:active={thread.id === $activeThread?.id}
+                  on:click={() => handleThreadSelect(thread.id)}
+                >
+                  <div class="thread-info">
+                    <span class="thread-name">{thread.name}</span>
+                    <span class="thread-meta">
+                      {thread.messageCount} msgs · {formatRelativeTime(thread.lastActivity)}
+                    </span>
+                  </div>
+                  {#if thread.id === $activeThread?.id}
+                    <div class="active-indicator"></div>
+                  {/if}
+                </button>
+              {/each}
+            </div>
 
             <button class="new-thread-btn" on:click={handleCreateNewThread}>
               <Plus size={14} />
@@ -149,8 +153,9 @@
   .app-layout {
     display: grid;
     grid-template-columns: var(--sidebar-width) 1fr;
-    min-height: 100vh;
+    height: 100vh;
     background: var(--bg-0);
+    overflow: hidden;
   }
 
   .sidebar {
@@ -187,7 +192,7 @@
 
   .sidebar-content {
     flex: 1;
-    overflow-y: auto;
+    overflow: hidden;
     padding: var(--space-3);
   }
 
@@ -232,6 +237,16 @@
     flex-direction: column;
     gap: var(--space-1);
     padding: var(--space-1) 0;
+    min-height: 0;
+  }
+
+  .thread-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    overflow-y: auto;
+    max-height: min(56vh, calc(100vh - 260px));
+    padding-right: 2px;
   }
 
   .thread-card {

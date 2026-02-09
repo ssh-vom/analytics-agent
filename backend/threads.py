@@ -27,6 +27,53 @@ async def create_thread(body: CreateThreadRequest | None = None):
     return {"thread_id": thread_id}
 
 
+@router.get("/threads")
+async def list_threads(
+    limit: int = Query(default=100, ge=1, le=500),
+    cursor: str | None = None,
+):
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                t.id,
+                t.title,
+                t.created_at,
+                COUNT(CASE WHEN e.type IN ('user_message', 'assistant_message') THEN 1 END) AS message_count,
+                COALESCE(MAX(e.created_at), t.created_at) AS last_activity
+            FROM threads t
+            LEFT JOIN worldlines w ON w.thread_id = t.id
+            LEFT JOIN events e ON e.worldline_id = w.id
+            GROUP BY t.id, t.title, t.created_at
+            ORDER BY datetime(last_activity) DESC, datetime(t.created_at) DESC, t.id DESC
+            """
+        ).fetchall()
+
+    threads = []
+    for row in rows:
+        threads.append(
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "created_at": row["created_at"],
+                "message_count": row["message_count"],
+                "last_activity": row["last_activity"],
+            }
+        )
+
+    if cursor:
+        idx = next(
+            (i for i, thread in enumerate(threads) if thread["id"] == cursor), None
+        )
+        if idx is None:
+            raise HTTPException(status_code=400, detail="invalid cursor")
+        threads = threads[idx + 1 :]
+
+    page = threads[:limit]
+    next_cursor = page[-1]["id"] if len(threads) > limit else None
+    return {"threads": page, "next_cursor": next_cursor}
+
+
 @router.get("/threads/{thread_id}/worldlines")
 async def get_thread_worldlines(
     thread_id: str,

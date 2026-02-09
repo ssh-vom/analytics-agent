@@ -27,7 +27,9 @@ class Stage1ApiDbTests(unittest.TestCase):
         return asyncio.run(coro)
 
     def _create_thread(self, title: str = "thread-for-test") -> str:
-        response = self._run(threads.create_thread(threads.CreateThreadRequest(title=title)))
+        response = self._run(
+            threads.create_thread(threads.CreateThreadRequest(title=title))
+        )
         return response["thread_id"]
 
     def _create_worldline(self, thread_id: str, name: str = "main") -> str:
@@ -96,7 +98,13 @@ class Stage1ApiDbTests(unittest.TestCase):
                 INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                ("event_seed_1", source_worldline_id, None, "user_message", '{"text":"hi"}'),
+                (
+                    "event_seed_1",
+                    source_worldline_id,
+                    None,
+                    "user_message",
+                    '{"text":"hi"}',
+                ),
             )
             conn.execute(
                 "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
@@ -147,7 +155,13 @@ class Stage1ApiDbTests(unittest.TestCase):
                 INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                ("event_2", worldline_id, "event_1", "assistant_message", '{"text":"a1"}'),
+                (
+                    "event_2",
+                    worldline_id,
+                    "event_1",
+                    "assistant_message",
+                    '{"text":"a1"}',
+                ),
             )
             conn.execute(
                 "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
@@ -156,10 +170,14 @@ class Stage1ApiDbTests(unittest.TestCase):
             conn.commit()
 
         response = self._run(
-            worldlines.get_worldline_events(worldline_id=worldline_id, limit=10, cursor=None)
+            worldlines.get_worldline_events(
+                worldline_id=worldline_id, limit=10, cursor=None
+            )
         )
 
-        self.assertEqual([event["id"] for event in response["events"]], ["event_1", "event_2"])
+        self.assertEqual(
+            [event["id"] for event in response["events"]], ["event_1", "event_2"]
+        )
         self.assertIsNone(response["next_cursor"])
         self.assertEqual(response["events"][0]["payload"], json.loads('{"text":"q1"}'))
 
@@ -196,6 +214,49 @@ class Stage1ApiDbTests(unittest.TestCase):
                 )
             )
         self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_list_threads_returns_last_activity_desc(self) -> None:
+        older_thread_id = self._create_thread("older")
+        newer_thread_id = self._create_thread("newer")
+        older_worldline_id = self._create_worldline(older_thread_id, "main")
+        newer_worldline_id = self._create_worldline(newer_thread_id, "main")
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_old_1",
+                    older_worldline_id,
+                    None,
+                    "user_message",
+                    '{"text":"older"}',
+                    "2024-01-01 00:00:00",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_new_1",
+                    newer_worldline_id,
+                    None,
+                    "assistant_message",
+                    '{"text":"newer"}',
+                    "2025-01-01 00:00:00",
+                ),
+            )
+            conn.commit()
+
+        response = self._run(threads.list_threads(limit=10, cursor=None))
+        self.assertEqual(response["threads"][0]["id"], newer_thread_id)
+        self.assertEqual(response["threads"][1]["id"], older_thread_id)
+        self.assertEqual(response["threads"][0]["message_count"], 1)
+        self.assertEqual(response["threads"][1]["message_count"], 1)
 
 
 if __name__ == "__main__":

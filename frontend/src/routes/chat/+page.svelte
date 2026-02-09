@@ -1,14 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { page } from "$app/stores";
-  import { goto } from "$app/navigation";
 
   import { groupEventsIntoCells } from "$lib/cells";
   import MessageCell from "$lib/components/MessageCell.svelte";
   import PythonCell from "$lib/components/PythonCell.svelte";
   import SqlCell from "$lib/components/SqlCell.svelte";
   import WorldlinePicker from "$lib/components/WorldlinePicker.svelte";
-  import { activeThread, threads, createNewThread, loadThread } from "$lib/stores/threads";
+  import { activeThread, threads } from "$lib/stores/threads";
   import {
     branchWorldline,
     createThread,
@@ -17,7 +15,7 @@
     fetchWorldlineEvents,
     streamChatTurn,
   } from "$lib/api/client";
-  import type { TimelineEvent, WorldlineItem } from "$lib/types";
+  import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
   import { Database } from "lucide-svelte";
@@ -39,12 +37,15 @@
   let isReady = false;
   let showProviderMenu = false;
   let composerExpanded = false;
+  let isHydratingThread = false;
 
   $: activeEvents = eventsByWorldline[activeWorldlineId] ?? [];
   $: cells = groupEventsIntoCells(activeEvents);
   $: currentThread = $activeThread;
 
   onMount(async () => {
+    await threads.loadThreads();
+
     // Load from localStorage if available
     activeThread.loadFromStorage();
     
@@ -52,26 +53,52 @@
     const storedWorldlineId = localStorage.getItem("textql_active_worldline");
     
     if ($activeThread) {
-      threadId = $activeThread.id;
-      await refreshWorldlines();
-      
-      // Use stored worldline if it exists and is valid for this thread
-      if (storedWorldlineId && worldlines.some(w => w.id === storedWorldlineId)) {
-        activeWorldlineId = storedWorldlineId;
+      await hydrateThread($activeThread.id, storedWorldlineId ?? undefined);
+      if (storedWorldlineId) {
         localStorage.removeItem("textql_active_worldline");
-      } else if (worldlines.length > 0) {
-        activeWorldlineId = worldlines[0].id;
       }
-      
-      if (activeWorldlineId) {
-        await loadWorldline(activeWorldlineId);
-      }
-      isReady = true;
-      statusText = activeWorldlineId ? "Ready" : "Error: No worldline found";
     } else {
       await initializeSession();
     }
   });
+
+  $: if ($activeThread?.id && isReady && $activeThread.id !== threadId && !isHydratingThread) {
+    void hydrateThread($activeThread.id);
+  }
+
+  async function hydrateThread(targetThreadId: string, preferredWorldlineId?: string): Promise<void> {
+    isHydratingThread = true;
+    statusText = "Loading thread...";
+
+    try {
+      threadId = targetThreadId;
+      worldlines = [];
+      eventsByWorldline = {};
+      activeWorldlineId = "";
+
+      await refreshWorldlines();
+
+      if (preferredWorldlineId && worldlines.some((w) => w.id === preferredWorldlineId)) {
+        activeWorldlineId = preferredWorldlineId;
+      } else if (worldlines.length > 0) {
+        activeWorldlineId = worldlines[0].id;
+      }
+
+      if (activeWorldlineId) {
+        await loadWorldline(activeWorldlineId);
+        statusText = "Ready";
+      } else {
+        statusText = "Error: No worldline found";
+      }
+
+      isReady = true;
+    } catch (error) {
+      statusText = error instanceof Error ? error.message : "Failed to load thread";
+      isReady = false;
+    } finally {
+      isHydratingThread = false;
+    }
+  }
 
   function dedupePreserveOrder(events: TimelineEvent[]): TimelineEvent[] {
     const seenIds = new Set<string>();
