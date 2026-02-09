@@ -97,16 +97,17 @@ class ChatEngine:
         final_text: str | None = None
         successful_tool_signatures: set[str] = set()
         tool_call_count: dict[str, int] = {}
+        python_succeeded_in_turn = False
         max_tool_calls_per_turn = {
             "run_sql": 3,
-            "run_python": 2,
+            "run_python": 3,
             "time_travel": 1,
         }
 
         for _ in range(self.max_iterations):
             response = await self.llm_client.generate(
                 messages=messages,
-                tools=self._tool_definitions(),
+                tools=self._tool_definitions(include_python=not python_succeeded_in_turn),
                 max_output_tokens=self.max_output_tokens,
             )
 
@@ -117,6 +118,15 @@ class ChatEngine:
                 repeated_call_detected = False
                 for tool_call in response.tool_calls:
                     tool_name = (tool_call.name or "").strip()
+
+                    if tool_name == "run_python" and python_succeeded_in_turn:
+                        final_text = (
+                            "Python already ran successfully in this turn, so I stopped "
+                            "additional Python executions and finalized the result."
+                        )
+                        repeated_call_detected = True
+                        break
+
                     tool_call_count[tool_name] = tool_call_count.get(tool_name, 0) + 1
 
                     max_calls = max_tool_calls_per_turn.get(tool_name)
@@ -169,6 +179,8 @@ class ChatEngine:
                     )
                     if not tool_result.get("error"):
                         successful_tool_signatures.add(signature)
+                        if tool_name == "run_python":
+                            python_succeeded_in_turn = True
                 if repeated_call_detected:
                     break
                 continue
@@ -199,8 +211,8 @@ class ChatEngine:
             events,
         )
 
-    def _tool_definitions(self) -> list[ToolDefinition]:
-        return [
+    def _tool_definitions(self, *, include_python: bool = True) -> list[ToolDefinition]:
+        tools: list[ToolDefinition] = [
             ToolDefinition(
                 name="run_sql",
                 description=(
@@ -210,14 +222,6 @@ class ChatEngine:
                 input_schema=SQL_TOOL_SCHEMA,
             ),
             ToolDefinition(
-                name="run_python",
-                description=(
-                    "Execute Python in the sandbox workspace for this worldline. "
-                    "Use for plotting, data manipulation, and file artifacts."
-                ),
-                input_schema=PYTHON_TOOL_SCHEMA,
-            ),
-            ToolDefinition(
                 name="time_travel",
                 description=(
                     "Create a new worldline from a prior event and continue execution there."
@@ -225,6 +229,20 @@ class ChatEngine:
                 input_schema=TIME_TRAVEL_TOOL_SCHEMA,
             ),
         ]
+
+        if include_python:
+            tools.insert(
+                1,
+                ToolDefinition(
+                    name="run_python",
+                    description=(
+                        "Execute Python in the sandbox workspace for this worldline. "
+                        "Use for plotting, data manipulation, and file artifacts."
+                    ),
+                    input_schema=PYTHON_TOOL_SCHEMA,
+                ),
+            )
+        return tools
 
     async def _execute_tool_call(
         self,

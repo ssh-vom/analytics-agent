@@ -291,6 +291,70 @@ class ChatApiTests(unittest.TestCase):
             result["events"][-1]["payload"]["text"],
         )
 
+    def test_chat_allows_only_one_successful_python_run_per_turn(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_py_once",
+                            name="run_python",
+                            arguments={"code": "print('ok')", "timeout": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_py_again",
+                            name="run_python",
+                            arguments={"code": "print('again')", "timeout": 10},
+                        )
+                    ],
+                ),
+            ]
+        )
+
+        async def fake_execute_python_tool(*args, **kwargs):
+            return {
+                "stdout": "ok\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [
+                    {"type": "image", "name": "line_2x.png", "artifact_id": "artifact_fake"}
+                ],
+                "previews": {"dataframes": []},
+                "execution_ms": 10,
+            }
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client), patch(
+            "chat.engine.execute_python_tool",
+            side_effect=fake_execute_python_tool,
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="plot a line",
+                        provider="openrouter",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 2)
+        self.assertEqual(
+            [event["type"] for event in result["events"]],
+            ["user_message", "assistant_message"],
+        )
+        self.assertIn(
+            "Python already ran successfully in this turn",
+            result["events"][-1]["payload"]["text"],
+        )
+
     def test_chat_time_travel_branches_and_continues_on_new_worldline(self) -> None:
         thread_id = self._create_thread()
         source_worldline_id = self._create_worldline(thread_id)
