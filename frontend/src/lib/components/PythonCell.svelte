@@ -34,6 +34,7 @@
   $: imageArtifacts = artifacts.filter((artifact) => artifact.type === "image");
   $: fileArtifacts = artifacts.filter((artifact) => artifact.type !== "image");
   $: isRunning = Boolean(callEvent) && !resultEvent;
+  $: isDraft = Boolean(callEvent) && !resultEvent;
   $: statusLabel = isRunning
     ? "running"
     : result?.error
@@ -138,7 +139,7 @@
             <CodeBlock
               code={code}
               language="Python"
-              animate={false}
+              animate={isDraft}
               placeholder="# waiting"
             />
           </div>

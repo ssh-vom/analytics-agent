@@ -24,6 +24,7 @@
   $: result = readSqlResult(resultEvent);
   $: hasError = Boolean(result?.error);
   $: isRunning = Boolean(callEvent) && !resultEvent;
+  $: isDraft = Boolean(callEvent) && !resultEvent;
   $: statusLabel = isRunning
     ? "running"
     : hasError
@@ -112,7 +113,7 @@
             <CodeBlock
               code={sql}
               language="SQL"
-              animate={false}
+              animate={isDraft}
               placeholder="-- waiting --"
             />
           </div>

@@ -41,6 +41,7 @@
     id: string;
     kind: DraftToolKind;
     code: string;
+    rawArgs: string;
     createdAt: string;
   }
 
@@ -81,6 +82,41 @@
   $: cells = groupEventsIntoCells(activeEvents);
   $: currentThread = $activeThread;
   $: hasDraftOutput = assistantDraftText.length > 0 || toolCallDrafts.length > 0;
+
+  /**
+   * Try to extract the SQL/Python code from accumulated raw JSON arguments.
+   * The backend streams raw JSON fragments like `{"sql": "SELECT 1", "limit": 10}`.
+   * We try to parse and extract the relevant field; if parsing fails (incomplete
+   * JSON), we fall back to a regex extraction for partial display.
+   */
+  function extractCodeFromArgs(rawArgs: string, kind: DraftToolKind): string {
+    const codeField = kind === "sql" ? "sql" : "code";
+    // Try full JSON parse first
+    try {
+      const parsed = JSON.parse(rawArgs);
+      if (typeof parsed === "object" && parsed !== null && typeof parsed[codeField] === "string") {
+        return parsed[codeField];
+      }
+    } catch {
+      // JSON is incomplete — try regex extraction for partial content
+    }
+
+    // Regex fallback: find `"sql": "...` or `"code": "...` and extract what we have so far
+    // This handles the case where JSON is still streaming and not yet complete
+    const pattern = new RegExp(`"${codeField}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`, "s");
+    const match = rawArgs.match(pattern);
+    if (match) {
+      // Unescape JSON string escapes
+      try {
+        return JSON.parse(`"${match[1]}"`);
+      } catch {
+        // If the escape sequence is incomplete, just return the raw match
+        return match[1].replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      }
+    }
+
+    return "";
+  }
 
   onMount(async () => {
     await threads.loadThreads();
@@ -188,12 +224,14 @@
     const draftId = callId && callId.trim() ? callId : `${kind}-draft`;
     const existingIndex = toolCallDrafts.findIndex((draft) => draft.id === draftId);
     if (existingIndex === -1) {
+      const rawArgs = delta;
       toolCallDrafts = [
         ...toolCallDrafts,
         {
           id: draftId,
           kind,
-          code: delta,
+          rawArgs,
+          code: extractCodeFromArgs(rawArgs, kind),
           createdAt: new Date().toISOString(),
         },
       ];
@@ -201,9 +239,11 @@
     }
 
     const existing = toolCallDrafts[existingIndex];
+    const rawArgs = existing.rawArgs + delta;
     const updated = {
       ...existing,
-      code: existing.code + delta,
+      rawArgs,
+      code: extractCodeFromArgs(rawArgs, kind),
     };
     toolCallDrafts = [
       ...toolCallDrafts.slice(0, existingIndex),
@@ -233,7 +273,7 @@
   }
 
   function clearDraftFromPersistedEvent(event: TimelineEvent): void {
-    if (event.type === "assistant_message") {
+    if (event.type === "assistant_message" || event.type === "assistant_plan") {
       assistantDraftText = "";
       assistantDraftCreatedAt = "";
       return;
@@ -251,6 +291,12 @@
 
   function handleStreamDelta(delta: StreamDeltaPayload): void {
     if (delta.type === "assistant_text") {
+      if (delta.done) {
+        // Text stream closed — text will become an assistant_plan event
+        // if tool calls follow (backend persists it). Nothing to do here;
+        // clearDraftFromPersistedEvent will handle cleanup.
+        return;
+      }
       if (typeof delta.delta === "string" && delta.delta.length > 0) {
         if (!assistantDraftText) {
           assistantDraftCreatedAt = new Date().toISOString();
@@ -262,17 +308,50 @@
       return;
     }
 
-    if (delta.type === "tool_call_sql") {
-      upsertToolCallDraft("sql", delta.call_id, delta.delta ?? "");
-      statusText = "Drafting SQL...";
-      scrollFeedToBottom();
-      return;
-    }
+    if (delta.type === "tool_call_sql" || delta.type === "tool_call_python") {
+      const kind: DraftToolKind = delta.type === "tool_call_sql" ? "sql" : "python";
 
-    if (delta.type === "tool_call_python") {
-      upsertToolCallDraft("python", delta.call_id, delta.delta ?? "");
-      statusText = "Drafting Python...";
+      if (delta.done) {
+        // Final parse: do one last extraction to ensure code is fully parsed
+        finalizeDraft(kind, delta.call_id);
+        scrollFeedToBottom();
+        return;
+      }
+
+      // Clear text draft when a tool call starts streaming — the backend
+      // will have already closed the text stream and will persist it as
+      // an assistant_plan event.
+      if (assistantDraftText && !toolCallDrafts.some((d) => d.id === (delta.call_id ?? `${kind}-draft`))) {
+        // This is the first delta for a new tool call; clear text draft
+        assistantDraftText = "";
+        assistantDraftCreatedAt = "";
+      }
+
+      upsertToolCallDraft(kind, delta.call_id, delta.delta ?? "");
+      statusText = kind === "sql" ? "Drafting SQL..." : "Drafting Python...";
       scrollFeedToBottom();
+    }
+  }
+
+  /**
+   * On `done` signal, do a final JSON parse to ensure the extracted code is
+   * fully correct. This handles edge cases where the regex fallback missed
+   * trailing content.
+   */
+  function finalizeDraft(kind: DraftToolKind, callId: string | undefined): void {
+    const draftId = callId && callId.trim() ? callId : `${kind}-draft`;
+    const idx = toolCallDrafts.findIndex((d) => d.id === draftId);
+    if (idx === -1) return;
+
+    const draft = toolCallDrafts[idx];
+    const finalCode = extractCodeFromArgs(draft.rawArgs, kind);
+    if (finalCode !== draft.code) {
+      const updated = { ...draft, code: finalCode };
+      toolCallDrafts = [
+        ...toolCallDrafts.slice(0, idx),
+        updated,
+        ...toolCallDrafts.slice(idx + 1),
+      ];
     }
   }
 
@@ -501,6 +580,17 @@
     shouldAutoScroll = true;
     resetStreamingDrafts();
     selectedArtifactId = null;
+
+    // Optimistic user message — show immediately in the feed
+    const optimisticId = `optimistic-user-${Date.now()}`;
+    const optimisticEvent: TimelineEvent = {
+      id: optimisticId,
+      parent_event_id: null,
+      type: "user_message",
+      payload: { text: message },
+      created_at: new Date().toISOString(),
+    };
+    appendEvent(activeWorldlineId, optimisticEvent);
     scrollFeedToBottom(true);
 
     try {
@@ -513,7 +603,16 @@
         onEvent: (frame) => {
           ensureWorldlineVisible(frame.worldline_id);
           clearDraftFromPersistedEvent(frame.event);
-          appendEvent(frame.worldline_id, frame.event);
+
+          // Remove optimistic user message when real one arrives
+          if (frame.event.type === "user_message") {
+            const existing = eventsByWorldline[frame.worldline_id] ?? [];
+            const filtered = existing.filter((e) => e.id !== optimisticId);
+            setWorldlineEvents(frame.worldline_id, [...filtered, frame.event]);
+          } else {
+            appendEvent(frame.worldline_id, frame.event);
+          }
+
           activeWorldlineId = frame.worldline_id;
           scrollFeedToBottom();
 
@@ -746,6 +845,14 @@
           {/if}
         {/each}
 
+        {#if assistantDraftText}
+          <MessageCell
+            role="assistant"
+            text={assistantDraftText}
+            createdAt={assistantDraftCreatedAt}
+          />
+        {/if}
+
         {#each toolCallDrafts as draft (draft.id)}
           {@const callEvent = toDraftCallEvent(draft)}
           {#if draft.kind === "sql"}
@@ -762,12 +869,15 @@
           {/if}
         {/each}
 
-        {#if assistantDraftText}
-          <MessageCell
-            role="assistant"
-            text={assistantDraftText}
-            createdAt={assistantDraftCreatedAt}
-          />
+        {#if isSending && !hasDraftOutput}
+          <div class="thinking-indicator">
+            <div class="thinking-dots">
+              <span class="dot"></span>
+              <span class="dot"></span>
+              <span class="dot"></span>
+            </div>
+            <span class="thinking-label">Thinking...</span>
+          </div>
         {/if}
       {/if}
     </div>
@@ -1483,5 +1593,46 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  /* Thinking Indicator */
+  .thinking-indicator {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    color: var(--text-muted);
+  }
+
+  .thinking-dots {
+    display: flex;
+    gap: 4px;
+  }
+
+  .thinking-dots .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-orange);
+    opacity: 0.4;
+    animation: thinking-pulse 1.4s ease-in-out infinite;
+  }
+
+  .thinking-dots .dot:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .thinking-dots .dot:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+
+  @keyframes thinking-pulse {
+    0%, 80%, 100% { opacity: 0.4; transform: scale(1); }
+    40% { opacity: 1; transform: scale(1.2); }
+  }
+
+  .thinking-label {
+    font-size: 13px;
+    font-style: italic;
   }
 </style>
