@@ -2,7 +2,6 @@
   import { onMount } from "svelte";
   import { Settings as SettingsIcon } from "lucide-svelte";
   import { Moon } from "lucide-svelte";
-  import { Sun } from "lucide-svelte";
   import { Bell } from "lucide-svelte";
   import { Key } from "lucide-svelte";
   import { Save } from "lucide-svelte";

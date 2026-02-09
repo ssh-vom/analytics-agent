@@ -401,15 +401,6 @@
     border-color: var(--border-soft);
   }
 
-  :global(.spin) {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
   .execution-time {
     display: flex;
     align-items: center;

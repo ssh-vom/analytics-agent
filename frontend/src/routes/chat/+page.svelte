@@ -50,7 +50,7 @@
   let worldlines: WorldlineItem[] = [];
   let eventsByWorldline: Record<string, TimelineEvent[]> = {};
   let prompt = "";
-  let provider: Provider = "gemini";
+  let provider: Provider = "openrouter";
   let model = "";
   let statusText = "Initializing...";
   let isSending = false;
@@ -253,15 +253,17 @@
   }
 
   function removeToolCallDraft(kind: DraftToolKind, callId: string | null): void {
-    if (callId) {
+    if (callId && callId.trim()) {
       toolCallDrafts = toolCallDrafts.filter((draft) => draft.id !== callId);
       return;
     }
-    const firstMatch = toolCallDrafts.find((draft) => draft.kind === kind);
-    if (!firstMatch) {
-      return;
-    }
-    toolCallDrafts = toolCallDrafts.filter((draft) => draft.id !== firstMatch.id);
+    // Fallback when call_id missing: remove most recent draft of this kind
+    const matches = toolCallDrafts.filter((draft) => draft.kind === kind);
+    if (matches.length === 0) return;
+    const mostRecent = matches.sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    )[0];
+    toolCallDrafts = toolCallDrafts.filter((draft) => draft.id !== mostRecent.id);
   }
 
   function callIdFromPayload(payload: Record<string, unknown>): string | null {
@@ -634,6 +636,9 @@
         onDone: async (done) => {
           activeWorldlineId = done.worldline_id;
           await refreshWorldlines();
+          if (activeWorldlineId) {
+            await loadWorldline(activeWorldlineId);
+          }
           statusText = "Done";
           scrollFeedToBottom();
           
@@ -821,12 +826,14 @@
             <SqlCell
               callEvent={cell.call}
               resultEvent={cell.result}
+              initialCollapsed={Boolean(cell.result)}
               onBranch={() => branchFromEvent(cell.result?.id ?? cell.call?.id ?? "")}
             />
           {:else if cell.kind === "python"}
             <PythonCell
               callEvent={cell.call}
               resultEvent={cell.result}
+              initialCollapsed={Boolean(cell.result)}
               showArtifacts={true}
               artifactLinkMode="panel"
               on:artifactselect={handleArtifactSelect}
@@ -1357,12 +1364,6 @@
     border-top-color: #111;
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
-  }
-
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 
   @media (max-width: 1100px) {

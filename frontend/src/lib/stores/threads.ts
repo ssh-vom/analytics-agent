@@ -71,25 +71,11 @@ function createThreadsStore() {
       }
     },
 
-    addThreadLocal: (thread: Thread) => {
-      update((s) => {
-        const threads = [thread, ...s.threads];
-        return { ...s, threads, loading: false, error: null };
-      });
-    },
-
     updateThread: (id: string, updates: Partial<Thread>) => {
       update((s) => {
         const threads = s.threads.map((t) =>
           t.id === id ? { ...t, ...updates } : t
         );
-        return { ...s, threads };
-      });
-    },
-
-    deleteThread: (id: string) => {
-      update((s) => {
-        const threads = s.threads.filter((t) => t.id !== id);
         return { ...s, threads };
       });
     },

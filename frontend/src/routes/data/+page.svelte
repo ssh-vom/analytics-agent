@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { activeThread } from "$lib/stores/threads";
   import {
     importCSV,
     attachExternalDuckDB,
@@ -15,7 +14,6 @@
     Loader2,
     Plus,
     Table,
-    Trash2,
     Upload,
     X,
   } from "lucide-svelte";
@@ -749,13 +747,4 @@
     text-align: center;
   }
 
-  :global(.spin) {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
 </style>

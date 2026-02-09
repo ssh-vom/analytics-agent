@@ -3,7 +3,6 @@
   import { page } from "$app/stores";
   import { threads, activeThread, createNewThread, loadThread } from "$lib/stores/threads";
   import { createWorldline } from "$lib/api/client";
-  import { Sidebar } from "lucide-svelte";
   import { GitBranch } from "lucide-svelte";
   import { Database } from "lucide-svelte";
   import { FileSpreadsheet } from "lucide-svelte";
@@ -65,7 +64,6 @@
   }
 
   $: currentPath = $page.url.pathname;
-  $: isChat = currentPath === "/" || currentPath === "/chat";
   $: isConnectors = currentPath === "/connectors";
   $: isSettings = currentPath === "/settings";
   $: isWorldlines = currentPath === "/worldlines";
