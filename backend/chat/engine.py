@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
 
@@ -76,6 +76,7 @@ class ChatEngine:
         self,
         worldline_id: str,
         message: str,
+        on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         if not message or not message.strip():
             raise HTTPException(status_code=400, detail="message must not be empty")
@@ -146,12 +147,17 @@ class ChatEngine:
             event_type="assistant_message",
             payload={"text": final_text},
         )
+        events = self._events_since_rowid(
+            worldline_id=active_worldline_id,
+            rowid=starting_rowid_by_worldline[active_worldline_id],
+        )
+        if on_event is not None:
+            for event in events:
+                await on_event(active_worldline_id, event)
+
         return (
             active_worldline_id,
-            self._events_since_rowid(
-                worldline_id=active_worldline_id,
-                rowid=starting_rowid_by_worldline[active_worldline_id],
-            ),
+            events,
         )
 
     def _tool_definitions(self) -> list[ToolDefinition]:

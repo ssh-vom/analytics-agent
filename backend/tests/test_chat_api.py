@@ -10,6 +10,7 @@ import meta
 import threads
 import worldlines
 from chat.llm_client import LlmResponse, ToolCall
+from fastapi.responses import StreamingResponse
 
 
 class FakeLlmClient:
@@ -38,6 +39,26 @@ class ChatApiTests(unittest.TestCase):
 
     def _run(self, coro):
         return asyncio.run(coro)
+
+    async def _consume_stream(self, response: StreamingResponse) -> str:
+        chunks: list[str] = []
+        async for chunk in response.body_iterator:
+            if isinstance(chunk, bytes):
+                chunks.append(chunk.decode("utf-8"))
+            else:
+                chunks.append(str(chunk))
+        return "".join(chunks)
+
+    def _extract_sse_payloads(self, raw_stream: str) -> list[dict]:
+        payloads: list[dict] = []
+        for frame in raw_stream.split("\n\n"):
+            frame = frame.strip()
+            if not frame:
+                continue
+            for line in frame.splitlines():
+                if line.startswith("data: "):
+                    payloads.append(json.loads(line[len("data: ") :]))
+        return payloads
 
     def _create_thread(self, title: str = "chat-test-thread") -> str:
         response = self._run(threads.create_thread(threads.CreateThreadRequest(title=title)))
@@ -242,6 +263,37 @@ class ChatApiTests(unittest.TestCase):
             json.loads(head_event["payload_json"])["text"],
             "Now continuing in the branched worldline.",
         )
+
+    def test_chat_stream_returns_sse_event_frames(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[LlmResponse(text="Streaming hello.", tool_calls=[])]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            response = self._run(
+                chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="stream this",
+                        provider="gemini",
+                    )
+                )
+            )
+            self.assertIsInstance(response, StreamingResponse)
+            self.assertEqual(response.media_type, "text/event-stream")
+
+            raw_stream = self._run(self._consume_stream(response))
+            payloads = self._extract_sse_payloads(raw_stream)
+
+        self.assertGreaterEqual(len(payloads), 3)
+        self.assertEqual(payloads[0]["seq"], 1)
+        self.assertEqual(payloads[0]["worldline_id"], worldline_id)
+        self.assertEqual(payloads[0]["event"]["type"], "user_message")
+        self.assertEqual(payloads[1]["seq"], 2)
+        self.assertEqual(payloads[1]["event"]["type"], "assistant_message")
+        self.assertTrue(payloads[-1]["done"])
 
 
 if __name__ == "__main__":
