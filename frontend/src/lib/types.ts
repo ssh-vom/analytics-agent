@@ -89,3 +89,20 @@ export interface PythonResultPayload {
   };
   execution_ms?: number;
 }
+
+export interface Thread {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastActivity: string;
+  messageCount: number;
+}
+
+export interface Connector {
+  id: string;
+  name: string;
+  type: "sqlite" | "postgres" | "duckdb" | "mysql";
+  connectionString: string;
+  isActive: boolean;
+  lastConnected?: string;
+}

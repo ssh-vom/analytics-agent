@@ -25,13 +25,19 @@ interface StreamOptions {
 }
 
 export async function createThread(title?: string): Promise<ThreadCreateResponse> {
+  const body: { title?: string } = {};
+  if (title) {
+    body.title = title;
+  }
+  
   const response = await fetch("/api/threads", {
     method: "POST",
     headers: JSON_HEADERS,
-    body: JSON.stringify({ title }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(`Failed to create thread (${response.status})`);
+    const errorText = await response.text();
+    throw new Error(`Failed to create thread (${response.status}): ${errorText}`);
   }
   return (await response.json()) as ThreadCreateResponse;
 }

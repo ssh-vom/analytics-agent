@@ -3,6 +3,14 @@
   import ResultTable from "$lib/components/ResultTable.svelte";
   import type { TimelineEvent } from "$lib/types";
   import { readSqlResult } from "$lib/cells";
+  import { Database } from "lucide-svelte";
+  import { ChevronDown } from "lucide-svelte";
+  import { ChevronRight } from "lucide-svelte";
+  import { GitBranch } from "lucide-svelte";
+  import { Clock } from "lucide-svelte";
+  import { AlertCircle } from "lucide-svelte";
+  import { CheckCircle } from "lucide-svelte";
+  import { Loader2 } from "lucide-svelte";
 
   export let callEvent: TimelineEvent | null = null;
   export let resultEvent: TimelineEvent | null = null;
@@ -24,211 +32,375 @@
         : "queued";
 </script>
 
-<article class="cell">
+<article class="sql-cell">
   <header class="cell-header">
-    <div class="left">
+    <div class="header-left">
       <button
         type="button"
-        class="toggle"
+        class="collapse-btn"
         on:click={() => (cellCollapsed = !cellCollapsed)}
         aria-label={cellCollapsed ? "Expand SQL cell" : "Collapse SQL cell"}
       >
-        {cellCollapsed ? "▸" : "▾"}
+        {#if cellCollapsed}
+          <ChevronRight size={16} />
+        {:else}
+          <ChevronDown size={16} />
+        {/if}
       </button>
-      <strong>SQL</strong>
-      <span class={`status ${statusLabel}`}>
-        <i></i>{statusLabel}
-      </span>
+      
+      <div class="cell-icon">
+        <Database size={16} />
+      </div>
+      
+      <span class="cell-title">SQL Query</span>
+      
+      <div class="status-badge {statusLabel}">
+        {#if statusLabel === "running"}
+          <Loader2 size={12} class="spin" />
+        {:else if statusLabel === "error"}
+          <AlertCircle size={12} />
+        {:else if statusLabel === "done"}
+          <CheckCircle size={12} />
+        {/if}
+        <span>{statusLabel}</span>
+      </div>
+      
+      {#if result?.execution_ms !== undefined}
+        <div class="execution-time">
+          <Clock size={12} />
+          <span>{result.execution_ms}ms</span>
+        </div>
+      {/if}
     </div>
-    {#if result?.execution_ms !== undefined}
-      <span class="exec-time">{result.execution_ms}ms</span>
-    {/if}
+    
     {#if onBranch}
-      <button type="button" class="branch" on:click={onBranch}>Branch from here</button>
+      <button type="button" class="branch-btn" on:click={onBranch}>
+        <GitBranch size={12} />
+        <span>Branch</span>
+      </button>
     {/if}
   </header>
 
   {#if !cellCollapsed}
-    <section class="section">
-      <div class="section-header">
-        <span>Query</span>
-        <button
-          type="button"
-          class="section-toggle"
-          on:click={() => (codeCollapsed = !codeCollapsed)}
-        >
-          {codeCollapsed ? "Show" : "Hide"}
-        </button>
-      </div>
-      {#if !codeCollapsed}
-        <CodeBlock
-          code={sql}
-          language="SQL"
-          animate={isRunning}
-          placeholder="-- waiting --"
-        />
-      {/if}
-    </section>
-
-    <section class="section">
-      <div class="section-header">
-        <span>Output</span>
-        <button
-          type="button"
-          class="section-toggle"
-          on:click={() => (outputCollapsed = !outputCollapsed)}
-        >
-          {outputCollapsed ? "Show" : "Hide"}
-        </button>
-      </div>
-      {#if !outputCollapsed}
-        {#if result}
-          {#if hasError}
-            <p class="error">{result?.error}</p>
-          {:else}
-            <p class="meta">
-              {result?.preview_count ?? 0} preview rows / {result?.row_count ?? 0} total rows
-            </p>
-            <ResultTable
-              columns={result?.columns ?? []}
-              rows={result?.rows ?? []}
+    <div class="cell-content">
+      <section class="content-section">
+        <div class="section-header">
+          <span class="section-title">Query</span>
+          <button
+            type="button"
+            class="section-toggle"
+            on:click={() => (codeCollapsed = !codeCollapsed)}
+          >
+            {codeCollapsed ? "Show" : "Hide"}
+          </button>
+        </div>
+        {#if !codeCollapsed}
+          <div class="code-wrapper">
+            <CodeBlock
+              code={sql}
+              language="SQL"
+              animate={isRunning}
+              placeholder="-- waiting --"
             />
-          {/if}
-        {:else}
-          <p class="meta">Executing query...</p>
+          </div>
         {/if}
-      {/if}
-    </section>
+      </section>
+
+      <section class="content-section">
+        <div class="section-header">
+          <span class="section-title">Results</span>
+          <button
+            type="button"
+            class="section-toggle"
+            on:click={() => (outputCollapsed = !outputCollapsed)}
+          >
+            {outputCollapsed ? "Show" : "Hide"}
+          </button>
+        </div>
+        {#if !outputCollapsed}
+          <div class="output-content">
+            {#if result}
+              {#if hasError}
+                <div class="error-message">
+                  <AlertCircle size={16} />
+                  <span>{result?.error}</span>
+                </div>
+              {:else}
+                <div class="result-stats">
+                  <span class="stat">{result?.preview_count ?? 0} rows shown</span>
+                  <span class="stat-divider">·</span>
+                  <span class="stat">{result?.row_count ?? 0} total</span>
+                  {#if result?.execution_ms}
+                    <span class="stat-divider">·</span>
+                    <span class="stat">{result.execution_ms}ms</span>
+                  {/if}
+                </div>
+                <ResultTable
+                  columns={result?.columns ?? []}
+                  rows={result?.rows ?? []}
+                />
+              {/if}
+            {:else}
+              <div class="loading-state">
+                <Loader2 size={20} class="spin" />
+                <span>Executing query...</span>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </section>
+    </div>
   {/if}
 </article>
 
 <style>
-  .cell {
+  .sql-cell {
+    background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: 12px;
-    padding: 12px;
-    background: var(--surface-1);
-    display: grid;
-    gap: 10px;
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    transition: all var(--transition-fast);
+  }
+
+  .sql-cell:hover {
+    border-color: var(--border-medium);
+    box-shadow: var(--shadow-sm);
   }
 
   .cell-header {
     display: flex;
-    gap: 8px;
     align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--border-soft);
   }
 
-  .left {
-    display: inline-flex;
+  .header-left {
+    display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
   }
 
-  .toggle {
-    width: 24px;
-    height: 24px;
-    border-radius: 7px;
-    border: 1px solid var(--border-soft);
-    color: var(--text-muted);
-    background: var(--surface-0);
-    display: inline-flex;
+  .collapse-btn {
+    display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0;
-    font-size: 13px;
-    line-height: 1;
+    width: 24px;
+    height: 24px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
   }
 
-  strong {
+  .collapse-btn:hover {
+    color: var(--text-primary);
+  }
+
+  .cell-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: var(--accent-orange-muted);
+    color: var(--accent-orange);
+    border-radius: var(--radius-md);
+    flex-shrink: 0;
+  }
+
+  .cell-title {
     font-family: var(--font-heading);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    flex-shrink: 0;
+  }
+
+  .status-badge {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border: 1px solid transparent;
+    flex-shrink: 0;
+  }
+
+  .status-badge.running {
+    background: var(--accent-blue-muted);
+    color: var(--accent-blue);
+    border-color: var(--accent-blue);
+  }
+
+  .status-badge.done {
+    background: var(--accent-cyan-muted);
+    color: var(--accent-cyan);
+    border-color: var(--accent-cyan);
+  }
+
+  .status-badge.error {
+    background: var(--danger-muted);
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+
+  .status-badge.queued {
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border-color: var(--border-soft);
+  }
+
+  :global(.spin) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  .execution-time {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-left: auto;
+  }
+
+  .branch-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    opacity: 0;
+    flex-shrink: 0;
+  }
+
+  .sql-cell:hover .branch-btn {
+    opacity: 1;
+  }
+
+  .branch-btn:hover {
+    background: var(--surface-hover);
+    border-color: var(--accent-orange);
     color: var(--accent-orange);
   }
 
-  .exec-time {
-    color: var(--text-dim);
-    font-size: 12px;
+  .cell-content {
+    display: flex;
+    flex-direction: column;
   }
 
-  .status {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-muted);
-    border: 1px solid var(--border-soft);
-    border-radius: 999px;
-    padding: 2px 8px;
+  .content-section {
+    border-bottom: 1px solid var(--border-soft);
   }
 
-  .status i {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-  }
-
-  .status.running i {
-    background: var(--accent-blue);
-  }
-
-  .status.done i {
-    background: var(--accent-cyan);
-  }
-
-  .status.error i {
-    background: var(--danger);
-  }
-
-  .meta {
-    margin: 0;
-    color: var(--text-dim);
-    font-size: 13px;
-  }
-
-  .error {
-    color: var(--danger);
-    margin: 0 2px;
-  }
-
-  .section {
-    border: 1px solid var(--border-soft);
-    border-radius: 10px;
-    background: rgb(255 255 255 / 1%);
-    padding: 10px;
-    display: grid;
-    gap: 8px;
+  .content-section:last-child {
+    border-bottom: none;
   }
 
   .section-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    color: var(--text-muted);
+    padding: var(--space-2) var(--space-4);
+    background: var(--bg-1);
+  }
+
+  .section-title {
     font-family: var(--font-heading);
-    font-size: 12px;
-    letter-spacing: 0.06em;
+    font-size: 11px;
+    font-weight: 500;
     text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
   }
 
   .section-toggle {
-    border: 1px solid var(--border-soft);
+    padding: 2px var(--space-2);
     background: var(--surface-0);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
     color: var(--text-muted);
-    border-radius: 8px;
     font-size: 11px;
-    padding: 3px 8px;
-    text-transform: none;
+    cursor: pointer;
+    transition: all var(--transition-fast);
   }
 
-  .branch {
-    margin-left: auto;
-    border: 1px solid var(--border-soft);
-    background: transparent;
-    color: var(--text-muted);
-    border-radius: 8px;
-    padding: 4px 8px;
+  .section-toggle:hover {
+    background: var(--surface-hover);
+    border-color: var(--border-medium);
+    color: var(--text-primary);
+  }
+
+  .code-wrapper {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .output-content {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .error-message {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    background: var(--danger-muted);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-md);
+    color: var(--danger);
+    font-size: 14px;
+  }
+
+  .result-stats {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+    color: var(--text-dim);
     font-size: 12px;
+  }
+
+  .stat-divider {
+    color: var(--border-medium);
+  }
+
+  .loading-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-8);
+    color: var(--text-muted);
+  }
+
+  @media (max-width: 640px) {
+    .branch-btn {
+      opacity: 1;
+    }
+
+    .execution-time {
+      display: none;
+    }
   }
 </style>

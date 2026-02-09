@@ -3,24 +3,77 @@
 :root {
   color-scheme: dark;
 
+  /* Background Colors */
   --bg-0: #07090e;
   --bg-1: #0f1118;
+  --bg-2: #141821;
   --surface-0: #0b0f15;
   --surface-1: #11161f;
   --surface-2: #161c27;
+  --surface-3: #1c2330;
+  --surface-hover: rgba(255, 255, 255, 0.05);
+  --surface-active: rgba(255, 159, 67, 0.08);
 
-  --text-primary: #e6e8ec;
-  --text-muted: #a0a8b8;
-  --text-dim: #7b8393;
+  /* Text Colors */
+  --text-primary: #f0f2f5;
+  --text-secondary: #a0a8b8;
+  --text-muted: #7b8393;
+  --text-dim: #5a6270;
 
+  /* Accent Colors */
   --accent-orange: #ff9f43;
+  --accent-orange-hover: #ffb366;
+  --accent-orange-muted: rgba(255, 159, 67, 0.15);
   --accent-blue: #4ea7ff;
+  --accent-blue-muted: rgba(78, 167, 255, 0.15);
   --accent-cyan: #42d7c4;
+  --accent-cyan-muted: rgba(66, 215, 196, 0.15);
+  --accent-purple: #a855f7;
+  --accent-purple-muted: rgba(168, 85, 247, 0.15);
   --danger: #ff6b6b;
+  --danger-muted: rgba(255, 107, 107, 0.15);
+  --success: #42d7c4;
+  --warning: #ff9f43;
 
-  --border-soft: rgba(255, 255, 255, 0.12);
+  /* Border Colors */
+  --border-soft: rgba(255, 255, 255, 0.08);
+  --border-medium: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(255, 255, 255, 0.2);
+  --border-accent: rgba(255, 159, 67, 0.4);
 
-  --font-heading: "Departure Mono", "IBM Plex Mono", ui-monospace, monospace;
+  /* Shadow & Glow */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+  --glow-orange: 0 0 20px rgba(255, 159, 67, 0.15);
+  --glow-blue: 0 0 20px rgba(78, 167, 255, 0.15);
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Border Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* Typography */
+  --font-heading: "IBM Plex Mono", ui-monospace, monospace;
   --font-body: "IBM Plex Sans", -apple-system, blinkmacsystemfont, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
+  --transition-slow: 350ms ease;
+
+  /* Sidebar */
+  --sidebar-width: 260px;
 }

@@ -2,6 +2,17 @@
   import CodeBlock from "$lib/components/CodeBlock.svelte";
   import type { TimelineEvent } from "$lib/types";
   import { readPythonResult } from "$lib/cells";
+  import { Terminal } from "lucide-svelte";
+  import { ChevronDown } from "lucide-svelte";
+  import { ChevronRight } from "lucide-svelte";
+  import { GitBranch } from "lucide-svelte";
+  import { Clock } from "lucide-svelte";
+  import { AlertCircle } from "lucide-svelte";
+  import { CheckCircle } from "lucide-svelte";
+  import { Loader2 } from "lucide-svelte";
+  import { Image } from "lucide-svelte";
+  import { FileText } from "lucide-svelte";
+  import { ExternalLink } from "lucide-svelte";
 
   export let callEvent: TimelineEvent | null = null;
   export let resultEvent: TimelineEvent | null = null;
@@ -27,315 +38,569 @@
         : "queued";
 </script>
 
-<article class="cell">
+<article class="python-cell">
   <header class="cell-header">
-    <div class="left">
+    <div class="header-left">
       <button
         type="button"
-        class="toggle"
+        class="collapse-btn"
         on:click={() => (cellCollapsed = !cellCollapsed)}
         aria-label={cellCollapsed ? "Expand Python cell" : "Collapse Python cell"}
       >
-        {cellCollapsed ? "▸" : "▾"}
+        {#if cellCollapsed}
+          <ChevronRight size={16} />
+        {:else}
+          <ChevronDown size={16} />
+        {/if}
       </button>
-      <strong>Python</strong>
-      <span class={`status ${statusLabel}`}>
-        <i></i>{statusLabel}
-      </span>
+      
+      <div class="cell-icon">
+        <Terminal size={16} />
+      </div>
+      
+      <span class="cell-title">Python</span>
+      
+      <div class="status-badge {statusLabel}">
+        {#if statusLabel === "running"}
+          <Loader2 size={12} class="spin" />
+        {:else if statusLabel === "error"}
+          <AlertCircle size={12} />
+        {:else if statusLabel === "done"}
+          <CheckCircle size={12} />
+        {/if}
+        <span>{statusLabel}</span>
+      </div>
+      
+      {#if result?.execution_ms !== undefined}
+        <div class="execution-time">
+          <Clock size={12} />
+          <span>{result.execution_ms}ms</span>
+        </div>
+      {/if}
     </div>
-    {#if result?.execution_ms !== undefined}
-      <span class="exec-time">{result.execution_ms}ms</span>
-    {/if}
+    
     {#if onBranch}
-      <button type="button" class="branch" on:click={onBranch}>Branch from here</button>
+      <button type="button" class="branch-btn" on:click={onBranch}>
+        <GitBranch size={12} />
+        <span>Branch</span>
+      </button>
     {/if}
   </header>
 
   {#if !cellCollapsed}
-    <section class="section">
-      <div class="section-header">
-        <span>Code</span>
-        <button
-          type="button"
-          class="section-toggle"
-          on:click={() => (codeCollapsed = !codeCollapsed)}
-        >
-          {codeCollapsed ? "Show" : "Hide"}
-        </button>
-      </div>
-      {#if !codeCollapsed}
-        <CodeBlock
-          code={code}
-          language="Python"
-          animate={isRunning}
-          placeholder="# waiting"
-        />
-      {/if}
-    </section>
-
-    <section class="section">
-      <div class="section-header">
-        <span>Output</span>
-        <button
-          type="button"
-          class="section-toggle"
-          on:click={() => (outputCollapsed = !outputCollapsed)}
-        >
-          {outputCollapsed ? "Show" : "Hide"}
-        </button>
-      </div>
-      {#if !outputCollapsed}
-        {#if result}
-          {#if result.error}
-            <p class="error">{result.error}</p>
-          {/if}
-          {#if result.stdout}
-            <details open>
-              <summary>stdout</summary>
-              <pre class="plain">{result.stdout}</pre>
-            </details>
-          {/if}
-          {#if result.stderr}
-            <details>
-              <summary>stderr</summary>
-              <pre class="plain">{result.stderr}</pre>
-            </details>
-          {/if}
-          {#if artifacts.length > 0}
-            <section class="artifacts">
-              {#if imageArtifacts.length > 0}
-                <h4>Charts</h4>
-                <ul class="chart-grid">
-                  {#each imageArtifacts as artifact}
-                    <li class="chart-card">
-                      <img src={`/api/artifacts/${artifact.artifact_id}`} alt={artifact.name} />
-                      <a href={`/api/artifacts/${artifact.artifact_id}`} target="_blank" rel="noreferrer">
-                        {artifact.name}
-                      </a>
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
-
-              {#if fileArtifacts.length > 0}
-                <h4>Files</h4>
-                <ul>
-                  {#each fileArtifacts as artifact}
-                    <li class="file-item">
-                      <a href={`/api/artifacts/${artifact.artifact_id}`} target="_blank" rel="noreferrer">
-                        {artifact.name}
-                      </a>
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
-            </section>
-          {/if}
-        {:else}
-          <p class="meta">Running python...</p>
+    <div class="cell-content">
+      <section class="content-section">
+        <div class="section-header">
+          <span class="section-title">Code</span>
+          <button
+            type="button"
+            class="section-toggle"
+            on:click={() => (codeCollapsed = !codeCollapsed)}
+          >
+            {codeCollapsed ? "Show" : "Hide"}
+          </button>
+        </div>
+        {#if !codeCollapsed}
+          <div class="code-wrapper">
+            <CodeBlock
+              code={code}
+              language="Python"
+              animate={isRunning}
+              placeholder="# waiting"
+            />
+          </div>
         {/if}
-      {/if}
-    </section>
+      </section>
+
+      <section class="content-section">
+        <div class="section-header">
+          <span class="section-title">Output</span>
+          <button
+            type="button"
+            class="section-toggle"
+            on:click={() => (outputCollapsed = !outputCollapsed)}
+          >
+            {outputCollapsed ? "Show" : "Hide"}
+          </button>
+        </div>
+        {#if !outputCollapsed}
+          <div class="output-content">
+            {#if result}
+              {#if result.error}
+                <div class="error-message">
+                  <AlertCircle size={16} />
+                  <span>{result.error}</span>
+                </div>
+              {/if}
+              
+              {#if result.stdout}
+                <div class="output-stream">
+                  <div class="stream-header">
+                    <span class="stream-label">stdout</span>
+                  </div>
+                  <pre class="stream-content">{result.stdout}</pre>
+                </div>
+              {/if}
+              
+              {#if result.stderr}
+                <div class="output-stream error">
+                  <div class="stream-header">
+                    <span class="stream-label">stderr</span>
+                  </div>
+                  <pre class="stream-content">{result.stderr}</pre>
+                </div>
+              {/if}
+              
+              {#if artifacts.length > 0}
+                <div class="artifacts-section">
+                  {#if imageArtifacts.length > 0}
+                    <div class="artifact-group">
+                      <div class="artifact-header">
+                        <Image size={14} />
+                        <span>Charts & Images ({imageArtifacts.length})</span>
+                      </div>
+                      <div class="chart-grid">
+                        {#each imageArtifacts as artifact}
+                          <div class="chart-card">
+                            <div class="chart-image">
+                              <img src={`/api/artifacts/${artifact.artifact_id}`} alt={artifact.name} />
+                            </div>
+                            <a 
+                              href={`/api/artifacts/${artifact.artifact_id}`} 
+                              target="_blank" 
+                              rel="noreferrer"
+                              class="artifact-link"
+                            >
+                              <span>{artifact.name}</span>
+                              <ExternalLink size={12} />
+                            </a>
+                          </div>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
+
+                  {#if fileArtifacts.length > 0}
+                    <div class="artifact-group">
+                      <div class="artifact-header">
+                        <FileText size={14} />
+                        <span>Files ({fileArtifacts.length})</span>
+                      </div>
+                      <div class="file-list">
+                        {#each fileArtifacts as artifact}
+                          <a 
+                            href={`/api/artifacts/${artifact.artifact_id}`} 
+                            target="_blank" 
+                            rel="noreferrer"
+                            class="file-card"
+                          >
+                            <FileText size={16} />
+                            <span>{artifact.name}</span>
+                            <ExternalLink size={12} />
+                          </a>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            {:else}
+              <div class="loading-state">
+                <Loader2 size={20} class="spin" />
+                <span>Running Python code...</span>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </section>
+    </div>
   {/if}
 </article>
 
 <style>
-  .cell {
+  .python-cell {
+    background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: 12px;
-    padding: 12px;
-    background: var(--surface-1);
-    display: grid;
-    gap: 10px;
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    transition: all var(--transition-fast);
+  }
+
+  .python-cell:hover {
+    border-color: var(--border-medium);
+    box-shadow: var(--shadow-sm);
   }
 
   .cell-header {
     display: flex;
-    gap: 8px;
     align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--border-soft);
   }
 
-  .left {
-    display: inline-flex;
+  .header-left {
+    display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
   }
 
-  .toggle {
-    width: 24px;
-    height: 24px;
-    border-radius: 7px;
-    border: 1px solid var(--border-soft);
-    color: var(--text-muted);
-    background: var(--surface-0);
-    display: inline-flex;
+  .collapse-btn {
+    display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0;
-    font-size: 13px;
-    line-height: 1;
-  }
-
-  strong {
-    font-family: var(--font-heading);
-    color: var(--accent-cyan);
-  }
-
-  .exec-time {
-    color: var(--text-dim);
-    font-size: 12px;
-  }
-
-  .status {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-muted);
-    border: 1px solid var(--border-soft);
-    border-radius: 999px;
-    padding: 2px 8px;
-  }
-
-  .status i {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-  }
-
-  .status.running i {
-    background: var(--accent-blue);
-  }
-
-  .status.done i {
-    background: var(--accent-cyan);
-  }
-
-  .status.error i {
-    background: var(--danger);
-  }
-
-  .plain {
-    margin-top: 8px;
-    margin-bottom: 0;
-  }
-
-  .meta {
-    margin: 0;
-    color: var(--text-dim);
-  }
-
-  .error {
-    color: var(--danger);
-    margin: 0 2px;
-  }
-
-  details {
-    margin-top: 8px;
-    border: 1px solid var(--border-soft);
-    border-radius: 10px;
-    padding: 8px 10px;
-    background: var(--surface-0);
-  }
-
-  summary {
+    width: 24px;
+    height: 24px;
+    background: transparent;
+    border: none;
     color: var(--text-muted);
     cursor: pointer;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
   }
 
-  .section {
+  .collapse-btn:hover {
+    color: var(--text-primary);
+  }
+
+  .cell-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: var(--accent-cyan-muted);
+    color: var(--accent-cyan);
+    border-radius: var(--radius-md);
+    flex-shrink: 0;
+  }
+
+  .cell-title {
+    font-family: var(--font-heading);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    flex-shrink: 0;
+  }
+
+  .status-badge {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border: 1px solid transparent;
+    flex-shrink: 0;
+  }
+
+  .status-badge.running {
+    background: var(--accent-blue-muted);
+    color: var(--accent-blue);
+    border-color: var(--accent-blue);
+  }
+
+  .status-badge.done {
+    background: var(--accent-cyan-muted);
+    color: var(--accent-cyan);
+    border-color: var(--accent-cyan);
+  }
+
+  .status-badge.error {
+    background: var(--danger-muted);
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+
+  .status-badge.queued {
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border-color: var(--border-soft);
+  }
+
+  :global(.spin) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  .execution-time {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-left: auto;
+  }
+
+  .branch-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
     border: 1px solid var(--border-soft);
-    border-radius: 10px;
-    background: rgb(255 255 255 / 1%);
-    padding: 10px;
-    display: grid;
-    gap: 8px;
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    opacity: 0;
+    flex-shrink: 0;
+  }
+
+  .python-cell:hover .branch-btn {
+    opacity: 1;
+  }
+
+  .branch-btn:hover {
+    background: var(--surface-hover);
+    border-color: var(--accent-orange);
+    color: var(--accent-orange);
+  }
+
+  .cell-content {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .content-section {
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .content-section:last-child {
+    border-bottom: none;
   }
 
   .section-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    color: var(--text-muted);
+    padding: var(--space-2) var(--space-4);
+    background: var(--bg-1);
+  }
+
+  .section-title {
     font-family: var(--font-heading);
-    font-size: 12px;
-    letter-spacing: 0.06em;
+    font-size: 11px;
+    font-weight: 500;
     text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
   }
 
   .section-toggle {
-    border: 1px solid var(--border-soft);
+    padding: 2px var(--space-2);
     background: var(--surface-0);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
     color: var(--text-muted);
-    border-radius: 8px;
     font-size: 11px;
-    padding: 3px 8px;
-    text-transform: none;
+    cursor: pointer;
+    transition: all var(--transition-fast);
   }
 
-  .artifacts {
-    margin-top: 12px;
+  .section-toggle:hover {
+    background: var(--surface-hover);
+    border-color: var(--border-medium);
+    color: var(--text-primary);
   }
 
-  .artifacts h4 {
-    margin: 0 0 8px;
-    font-family: var(--font-heading);
+  .code-wrapper {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .output-content {
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .error-message {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    background: var(--danger-muted);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-md);
+    color: var(--danger);
+    font-size: 14px;
+  }
+
+  .output-stream {
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+
+  .output-stream.error {
+    border-color: var(--danger);
+  }
+
+  .stream-header {
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .output-stream.error .stream-header {
+    background: var(--danger-muted);
+    border-color: var(--danger);
+  }
+
+  .stream-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+  }
+
+  .output-stream.error .stream-label {
+    color: var(--danger);
+  }
+
+  .stream-content {
+    margin: 0;
+    padding: var(--space-3);
+    background: var(--bg-0);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .artifacts-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .artifact-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .artifact-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
     color: var(--text-muted);
     font-size: 13px;
-  }
-
-  ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: grid;
-    gap: 10px;
-  }
-
-  li {
-    display: grid;
-    gap: 8px;
+    font-weight: 500;
   }
 
   .chart-grid {
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: var(--space-3);
   }
 
   .chart-card {
+    background: var(--surface-1);
     border: 1px solid var(--border-soft);
-    border-radius: 12px;
-    padding: 10px;
-    background: var(--surface-0);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    transition: all var(--transition-fast);
   }
 
-  .file-item {
-    border: 1px solid var(--border-soft);
-    border-radius: 8px;
-    padding: 8px 10px;
-    background: var(--surface-0);
+  .chart-card:hover {
+    border-color: var(--border-medium);
+    box-shadow: var(--shadow-sm);
   }
 
-  img {
-    max-width: 100%;
-    border-radius: 10px;
-    border: 1px solid var(--border-soft);
+  .chart-image {
+    padding: var(--space-2);
   }
 
-  a {
+  .chart-image img {
+    width: 100%;
+    height: auto;
+    border-radius: var(--radius-md);
+    display: block;
+  }
+
+  .artifact-link {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-1);
     color: var(--accent-blue);
     text-decoration: none;
+    font-size: 13px;
+    transition: all var(--transition-fast);
   }
 
-  .branch {
-    margin-left: auto;
+  .artifact-link:hover {
+    background: var(--accent-blue-muted);
+  }
+
+  .file-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .file-card {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-1);
     border: 1px solid var(--border-soft);
-    background: transparent;
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    transition: all var(--transition-fast);
+  }
+
+  .file-card:hover {
+    background: var(--surface-hover);
+    border-color: var(--border-medium);
+    color: var(--text-primary);
+  }
+
+  .loading-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-8);
     color: var(--text-muted);
-    border-radius: 8px;
-    padding: 4px 8px;
-    font-size: 12px;
+  }
+
+  @media (max-width: 640px) {
+    .branch-btn {
+      opacity: 1;
+    }
+
+    .execution-time {
+      display: none;
+    }
+
+    .chart-grid {
+      grid-template-columns: 1fr;
+    }
   }
 </style>
