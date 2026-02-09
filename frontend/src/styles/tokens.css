@@ -1,0 +1,26 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+:root {
+  color-scheme: dark;
+
+  --bg-0: #07090e;
+  --bg-1: #0f1118;
+  --surface-0: #0b0f15;
+  --surface-1: #11161f;
+  --surface-2: #161c27;
+
+  --text-primary: #e6e8ec;
+  --text-muted: #a0a8b8;
+  --text-dim: #7b8393;
+
+  --accent-orange: #ff9f43;
+  --accent-blue: #4ea7ff;
+  --accent-cyan: #42d7c4;
+  --danger: #ff6b6b;
+
+  --border-soft: rgba(255, 255, 255, 0.12);
+
+  --font-heading: "Departure Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --font-body: "IBM Plex Sans", -apple-system, blinkmacsystemfont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
