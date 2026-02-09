@@ -153,6 +153,85 @@ class Stage1ApiDbTests(unittest.TestCase):
         )
         self.assertEqual(row["name"], "branch-a")
 
+    def test_branch_worldline_from_ancestor_event_in_history(self) -> None:
+        thread_id = self._create_thread()
+        source_worldline_id = self._create_worldline(thread_id, "main")
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_seed_ancestor",
+                    source_worldline_id,
+                    None,
+                    "user_message",
+                    '{"text":"ancestor"}',
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_ancestor", source_worldline_id),
+            )
+            conn.commit()
+
+        legacy_branch = self._run(
+            worldlines.branch_worldline(
+                source_worldline_id,
+                worldlines.BranchWorldlineRequest(
+                    from_event_id="event_seed_ancestor", name="legacy-branch"
+                ),
+            )
+        )["new_worldline_id"]
+
+        # Simulate legacy data where the branch head points to the ancestor event
+        # from a different worldline.
+        with meta.get_conn() as conn:
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_ancestor", legacy_branch),
+            )
+            conn.commit()
+
+        response = self._run(
+            worldlines.branch_worldline(
+                legacy_branch,
+                worldlines.BranchWorldlineRequest(
+                    from_event_id="event_seed_ancestor", name="branch-from-branch"
+                ),
+            )
+        )
+        new_worldline_id = response["new_worldline_id"]
+
+        with meta.get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, thread_id, parent_worldline_id, forked_from_event_id, head_event_id, name
+                FROM worldlines
+                WHERE id = ?
+                """,
+                (new_worldline_id,),
+            ).fetchone()
+            head_event = conn.execute(
+                """
+                SELECT id, worldline_id, parent_event_id, type
+                FROM events
+                WHERE id = ?
+                """,
+                (row["head_event_id"],),
+            ).fetchone()
+
+        self.assertEqual(row["thread_id"], thread_id)
+        self.assertEqual(row["parent_worldline_id"], legacy_branch)
+        self.assertEqual(row["forked_from_event_id"], "event_seed_ancestor")
+        self.assertEqual(row["name"], "branch-from-branch")
+        self.assertIsNotNone(head_event)
+        self.assertEqual(head_event["worldline_id"], new_worldline_id)
+        self.assertEqual(head_event["parent_event_id"], "event_seed_ancestor")
+        self.assertEqual(head_event["type"], "worldline_created")
+
     def test_get_worldline_events_returns_chain(self) -> None:
         thread_id = self._create_thread()
         worldline_id = self._create_worldline(thread_id, "main")

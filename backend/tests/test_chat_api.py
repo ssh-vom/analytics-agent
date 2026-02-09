@@ -64,7 +64,9 @@ class ChatApiTests(unittest.TestCase):
         return payloads
 
     def _create_thread(self, title: str = "chat-test-thread") -> str:
-        response = self._run(threads.create_thread(threads.CreateThreadRequest(title=title)))
+        response = self._run(
+            threads.create_thread(threads.CreateThreadRequest(title=title))
+        )
         return response["thread_id"]
 
     def _create_worldline(self, thread_id: str, name: str = "main") -> str:
@@ -328,15 +330,22 @@ class ChatApiTests(unittest.TestCase):
                 "stderr": "",
                 "error": None,
                 "artifacts": [
-                    {"type": "image", "name": "line_2x.png", "artifact_id": "artifact_fake"}
+                    {
+                        "type": "image",
+                        "name": "line_2x.png",
+                        "artifact_id": "artifact_fake",
+                    }
                 ],
                 "previews": {"dataframes": []},
                 "execution_ms": 10,
             }
 
-        with patch.object(chat_api, "build_llm_client", return_value=fake_client), patch(
-            "chat.engine.execute_python_tool",
-            side_effect=fake_execute_python_tool,
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch(
+                "chat.engine.execute_python_tool",
+                side_effect=fake_execute_python_tool,
+            ),
         ):
             result = self._run(
                 chat_api.chat(
@@ -549,7 +558,10 @@ class ChatApiTests(unittest.TestCase):
                         ToolCall(
                             id="call_stream_delta_sql",
                             name="run_sql",
-                            arguments={"sql": "SELECT 123 AS value", "limit": 5},
+                            arguments={
+                                "sql": "SELECT 123 AS value\nFROM (SELECT 1) t",
+                                "limit": 5,
+                            },
                         )
                     ],
                 ),
@@ -577,6 +589,14 @@ class ChatApiTests(unittest.TestCase):
         ]
         self.assertTrue(any(delta.get("delta") for delta in sql_deltas))
         self.assertTrue(any(delta.get("done") for delta in sql_deltas))
+        sql_text_chunks = [
+            delta["delta"]
+            for delta in sql_deltas
+            if isinstance(delta.get("delta"), str)
+        ]
+        self.assertEqual(
+            sql_text_chunks, ["SELECT 123 AS value\n", "FROM (SELECT 1) t"]
+        )
 
 
 if __name__ == "__main__":

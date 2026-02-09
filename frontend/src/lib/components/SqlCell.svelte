@@ -99,7 +99,7 @@
             <CodeBlock
               code={sql}
               language="SQL"
-              animate={isRunning}
+              animate={false}
               placeholder="-- waiting --"
             />
           </div>

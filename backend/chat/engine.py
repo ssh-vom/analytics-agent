@@ -109,7 +109,9 @@ class ChatEngine:
         for _ in range(self.max_iterations):
             response = await self.llm_client.generate(
                 messages=messages,
-                tools=self._tool_definitions(include_python=not python_succeeded_in_turn),
+                tools=self._tool_definitions(
+                    include_python=not python_succeeded_in_turn
+                ),
                 max_output_tokens=self.max_output_tokens,
             )
 
@@ -516,18 +518,19 @@ class ChatEngine:
             remaining = remaining[split_at:]
         return chunks
 
-    def _chunk_code(self, code: str, *, max_chunk_chars: int = 28) -> list[str]:
+    def _chunk_code(self, code: str, *, max_partial_chars: int = 120) -> list[str]:
         chunks: list[str] = []
-        for line in code.splitlines(keepends=True):
-            segment = line
-            while len(segment) > max_chunk_chars:
-                chunks.append(segment[:max_chunk_chars])
-                segment = segment[max_chunk_chars:]
-            if segment:
-                chunks.append(segment)
+        current: list[str] = []
 
-        if not chunks and code:
-            chunks.append(code)
+        for ch in code:
+            current.append(ch)
+            if ch == "\n" or len(current) >= max_partial_chars:
+                chunks.append("".join(current))
+                current = []
+
+        if current:
+            chunks.append("".join(current))
+
         return chunks
 
     def _append_worldline_event(

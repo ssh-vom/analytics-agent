@@ -125,7 +125,7 @@
             <CodeBlock
               code={code}
               language="Python"
-              animate={isRunning}
+              animate={false}
               placeholder="# waiting"
             />
           </div>
