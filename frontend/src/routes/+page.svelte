@@ -152,6 +152,7 @@
         message,
         provider,
         model: model.trim() || undefined,
+        maxIterations: provider === "gemini" ? 3 : 6,
         onEvent: (frame) => {
           ensureWorldlineVisible(frame.worldline_id);
           appendEvent(frame.worldline_id, frame.event);
