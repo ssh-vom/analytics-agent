@@ -5,6 +5,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -93,8 +94,36 @@ def get_conn() -> Iterator[sqlite3.Connection]:
 def init_meta_db() -> None:
     with get_conn() as conn:
         for statement in SCHEMA_STATEMENTS:
-            _ = conn.execute(statement)  # discard cursor
+            conn.execute(statement)
         conn.commit()
+
+
+def event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "parent_event_id": row["parent_event_id"],
+        "type": row["type"],
+        "payload": json.loads(row["payload_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def paginate_by_cursor(
+    items: list[dict[str, Any]],
+    *,
+    cursor: str | None,
+    limit: int,
+    id_key: str = "id",
+) -> tuple[list[dict[str, Any]], str | None]:
+    if cursor:
+        idx = next((i for i, item in enumerate(items) if item[id_key] == cursor), None)
+        if idx is None:
+            raise ValueError("invalid cursor")
+        items = items[idx + 1 :]
+
+    page = items[:limit]
+    next_cursor = page[-1][id_key] if len(items) > limit else None
+    return page, next_cursor
 
 
 def get_worldline_row(conn: sqlite3.Connection, worldline_id: str):
@@ -112,7 +141,7 @@ def append_event(
     payload: dict,
 ) -> str:
     event_id = new_id("event")
-    _ = conn.execute(
+    conn.execute(
         """
         INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
         VALUES (?, ?, ?, ?, ?)
@@ -125,7 +154,7 @@ def append_event(
 def set_worldline_head(
     conn: sqlite3.Connection, worldline_id: str, event_id: str
 ) -> None:
-    _ = conn.execute(
+    conn.execute(
         "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
         (event_id, worldline_id),
     )

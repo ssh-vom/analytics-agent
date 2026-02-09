@@ -9,12 +9,11 @@ This module provides functionality to:
 
 import duckdb
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 try:
     from backend import meta
@@ -249,7 +248,6 @@ def attach_external_duckdb(
     Raises:
         HTTPException: If attachment fails or database not found
     """
-    import time
     from datetime import datetime
 
     # Validate external DB path

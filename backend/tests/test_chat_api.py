@@ -258,7 +258,8 @@ class ChatApiTests(unittest.TestCase):
             result["events"][-1]["payload"]["text"],
         )
 
-    def test_chat_stops_after_too_many_tool_calls_in_turn(self) -> None:
+    def test_chat_allows_many_sql_calls_per_turn(self) -> None:
+        """No per-tool-call limit; multiple SQL runs complete and finalize."""
         thread_id = self._create_thread()
         worldline_id = self._create_worldline(thread_id)
         fake_client = FakeLlmClient(
@@ -279,7 +280,7 @@ class ChatApiTests(unittest.TestCase):
                         ToolCall(
                             id="call_many_2",
                             name="run_sql",
-                            arguments={"sql": "SELECT 1 AS x", "limit": 2},
+                            arguments={"sql": "SELECT 2 AS x", "limit": 2},
                         )
                     ],
                 ),
@@ -289,7 +290,7 @@ class ChatApiTests(unittest.TestCase):
                         ToolCall(
                             id="call_many_3",
                             name="run_sql",
-                            arguments={"sql": "SELECT 1 AS x", "limit": 3},
+                            arguments={"sql": "SELECT 3 AS x", "limit": 3},
                         )
                     ],
                 ),
@@ -299,9 +300,13 @@ class ChatApiTests(unittest.TestCase):
                         ToolCall(
                             id="call_many_4",
                             name="run_sql",
-                            arguments={"sql": "SELECT 1 AS x", "limit": 4},
+                            arguments={"sql": "SELECT 4 AS x", "limit": 4},
                         )
                     ],
+                ),
+                LlmResponse(
+                    text="Here are the results from all four queries.",
+                    tool_calls=[],
                 ),
             ]
         )
@@ -317,7 +322,7 @@ class ChatApiTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(fake_client.calls, 4)
+        self.assertEqual(fake_client.calls, 5)
         self.assertEqual(
             [event["type"] for event in result["events"]],
             [
@@ -328,12 +333,10 @@ class ChatApiTests(unittest.TestCase):
                 "tool_result_sql",
                 "tool_call_sql",
                 "tool_result_sql",
+                "tool_call_sql",
+                "tool_result_sql",
                 "assistant_message",
             ],
-        )
-        self.assertIn(
-            "called too many times",
-            result["events"][-1]["payload"]["text"],
         )
 
     def test_chat_allows_only_one_successful_python_run_per_turn(self) -> None:

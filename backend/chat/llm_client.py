@@ -16,6 +16,8 @@ class ToolDefinition:
 class ChatMessage:
     role: str
     content: str
+    tool_call_id: str | None = None  # For role="tool" messages
+    tool_calls: list[dict[str, Any]] | None = None  # For role="assistant" with tool calls
 
 
 @dataclass(frozen=True)

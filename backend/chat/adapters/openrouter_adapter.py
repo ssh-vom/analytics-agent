@@ -78,9 +78,10 @@ class OpenRouterAdapter:
             default_headers=extra_headers,
         )
 
+        api_messages = self._messages_to_api(messages)
         response = client.chat.completions.create(
             model=self.model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
+            messages=api_messages,
             tools=[
                 {
                     "type": "function",
@@ -134,9 +135,10 @@ class OpenRouterAdapter:
             default_headers=extra_headers,
         )
 
+        api_messages = self._messages_to_api(messages)
         stream = await client.chat.completions.create(
             model=self.model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
+            messages=api_messages,
             tools=[
                 {
                     "type": "function",
@@ -206,6 +208,18 @@ class OpenRouterAdapter:
             )
 
     # ---- shared helpers -----------------------------------------------------
+
+    def _messages_to_api(self, messages: list[ChatMessage]) -> list[dict[str, Any]]:
+        """Convert ChatMessages to OpenAI/OpenRouter API format."""
+        result: list[dict[str, Any]] = []
+        for m in messages:
+            msg: dict[str, Any] = {"role": m.role, "content": m.content or ""}
+            if m.role == "tool" and m.tool_call_id:
+                msg["tool_call_id"] = m.tool_call_id
+            if m.role == "assistant" and m.tool_calls:
+                msg["tool_calls"] = m.tool_calls
+            result.append(msg)
+        return result
 
     def _parse_response(self, response: Any) -> LlmResponse:
         choices = getattr(response, "choices", []) or []

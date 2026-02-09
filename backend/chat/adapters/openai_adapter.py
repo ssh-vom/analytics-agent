@@ -63,9 +63,10 @@ class OpenAiAdapter:
             ) from exc
 
         client = OpenAI(api_key=self.api_key)
+        api_input = self._messages_to_api(messages)
         response = client.responses.create(
             model=self.model,
-            input=[{"role": m.role, "content": m.content} for m in messages],
+            input=api_input,
             tools=[
                 {
                     "type": "function",
@@ -109,10 +110,11 @@ class OpenAiAdapter:
             ) from exc
 
         client = AsyncOpenAI(api_key=self.api_key)
+        api_input = self._messages_to_api(messages)
 
         stream = await client.responses.create(
             model=self.model,
-            input=[{"role": m.role, "content": m.content} for m in messages],
+            input=api_input,
             tools=[
                 {
                     "type": "function",
@@ -156,7 +158,7 @@ class OpenAiAdapter:
             # --- function-call argument deltas -------------------------------
             if event_type == "response.function_call_arguments.delta":
                 delta = getattr(event, "delta", "")
-                call_id = getattr(event, "item_id", None)
+                call_id = getattr(event, "call_id", None) or getattr(event, "item_id", None)
                 if delta:
                     yield StreamChunk(
                         type="tool_call_delta",
@@ -167,7 +169,7 @@ class OpenAiAdapter:
 
             # --- function-call argument stream done --------------------------
             if event_type == "response.function_call_arguments.done":
-                call_id = getattr(event, "item_id", None)
+                call_id = getattr(event, "call_id", None) or getattr(event, "item_id", None)
                 yield StreamChunk(
                     type="tool_call_done",
                     tool_call_id=call_id,
@@ -175,6 +177,18 @@ class OpenAiAdapter:
                 continue
 
     # ---- shared helpers -----------------------------------------------------
+
+    def _messages_to_api(self, messages: list[ChatMessage]) -> list[dict[str, Any]]:
+        """Convert ChatMessages to OpenAI Responses API input format."""
+        result: list[dict[str, Any]] = []
+        for m in messages:
+            msg: dict[str, Any] = {"role": m.role, "content": m.content or ""}
+            if m.role == "tool" and m.tool_call_id:
+                msg["tool_call_id"] = m.tool_call_id
+            if m.role == "assistant" and m.tool_calls:
+                msg["tool_calls"] = m.tool_calls
+            result.append(msg)
+        return result
 
     def _parse_response(self, response: Any) -> LlmResponse:
         output_items = getattr(response, "output", []) or []

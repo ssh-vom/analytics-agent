@@ -29,6 +29,18 @@ class ChatRequest(BaseModel):
     max_iterations: int = Field(default=6, ge=1, le=100)
 
 
+def _build_chat_engine(body: ChatRequest) -> ChatEngine:
+    try:
+        llm_client = build_llm_client(provider=body.provider, model=body.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return ChatEngine(
+        llm_client=llm_client,
+        max_iterations=body.max_iterations,
+    )
+
+
 def _encode_sse_frame(
     payload: dict[str, Any],
     *,
@@ -48,15 +60,7 @@ def _encode_sse_frame(
 
 @router.post("/chat")
 async def chat(body: ChatRequest):
-    try:
-        llm_client = build_llm_client(provider=body.provider, model=body.model)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    engine = ChatEngine(
-        llm_client=llm_client,
-        max_iterations=body.max_iterations,
-    )
+    engine = _build_chat_engine(body)
     active_worldline_id, events = await engine.run_turn(
         worldline_id=body.worldline_id,
         message=body.message,
@@ -66,15 +70,7 @@ async def chat(body: ChatRequest):
 
 @router.post("/chat/stream")
 async def chat_stream(body: ChatRequest):
-    try:
-        llm_client = build_llm_client(provider=body.provider, model=body.model)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    engine = ChatEngine(
-        llm_client=llm_client,
-        max_iterations=body.max_iterations,
-    )
+    engine = _build_chat_engine(body)
 
     async def event_stream() -> AsyncIterator[str]:
         queue: asyncio.Queue[str | None] = asyncio.Queue()

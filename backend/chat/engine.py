@@ -12,12 +12,12 @@ try:
         ChatMessage,
         LlmClient,
         LlmResponse,
-        StreamChunk,
         ToolCall,
         ToolDefinition,
     )
     from backend.meta import (
         append_event,
+        event_row_to_dict,
         get_conn,
         get_worldline_row,
         set_worldline_head,
@@ -35,11 +35,16 @@ except ModuleNotFoundError:
         ChatMessage,
         LlmClient,
         LlmResponse,
-        StreamChunk,
         ToolCall,
         ToolDefinition,
     )
-    from meta import append_event, get_conn, get_worldline_row, set_worldline_head
+    from meta import (
+        append_event,
+        event_row_to_dict,
+        get_conn,
+        get_worldline_row,
+        set_worldline_head,
+    )
     from tools import (
         PythonToolRequest,
         SqlToolRequest,
@@ -83,7 +88,7 @@ TIME_TRAVEL_TOOL_SCHEMA: dict[str, Any] = {
 @dataclass
 class ChatEngine:
     llm_client: LlmClient
-    max_iterations: int = 6
+    max_iterations: int = 20
     max_output_tokens: int | None = 1500
     worldline_service: WorldlineService = field(default_factory=WorldlineService)
 
@@ -112,13 +117,7 @@ class ChatEngine:
         messages = await self._build_llm_messages(active_worldline_id)
         final_text: str | None = None
         successful_tool_signatures: set[str] = set()
-        tool_call_count: dict[str, int] = {}
         python_succeeded_in_turn = False
-        max_tool_calls_per_turn = {
-            "run_sql": 3,
-            "run_python": 3,
-            "time_travel": 1,
-        }
 
         for _ in range(self.max_iterations):
             # ----- LLM call: stream when on_delta is available, else batch -----
@@ -166,17 +165,6 @@ class ChatEngine:
                         repeated_call_detected = True
                         break
 
-                    tool_call_count[tool_name] = tool_call_count.get(tool_name, 0) + 1
-
-                    max_calls = max_tool_calls_per_turn.get(tool_name)
-                    if max_calls is not None and tool_call_count[tool_name] > max_calls:
-                        final_text = (
-                            f"I stopped because `{tool_name}` was called too many times "
-                            "in one turn. Please refine the request and try again."
-                        )
-                        repeated_call_detected = True
-                        break
-
                     signature = self._tool_signature(
                         worldline_id=active_worldline_id,
                         tool_call=tool_call,
@@ -191,6 +179,9 @@ class ChatEngine:
 
                     # Note: tool call deltas were already streamed in _stream_llm_response.
                     # For the non-streaming path (on_delta is None), no deltas are emitted.
+
+                    # Small delay between tool calls to avoid burning through API requests too fast
+                    await asyncio.sleep(0.4)
 
                     tool_result, switched_worldline_id = await self._execute_tool_call(
                         worldline_id=active_worldline_id,
@@ -208,7 +199,6 @@ class ChatEngine:
                         # Reset per-turn state for the new worldline context
                         python_succeeded_in_turn = False
                         successful_tool_signatures.clear()
-                        tool_call_count.clear()
 
                     serialized = json.dumps(
                         tool_result,
@@ -219,8 +209,9 @@ class ChatEngine:
                         serialized = serialized[:12_000] + "...(truncated)"
                     messages.append(
                         ChatMessage(
-                            role="assistant",
-                            content=f"Tool result for {tool_call.name}: {serialized}",
+                            role="tool",
+                            content=serialized,
+                            tool_call_id=tool_call.id or None,
                         )
                     )
                     if not tool_result.get("error"):
@@ -428,7 +419,9 @@ class ChatEngine:
                     name="run_python",
                     description=(
                         "Execute Python in the sandbox workspace for this worldline. "
-                        "Use for plotting, data manipulation, and file artifacts."
+                        "Use for plotting, data manipulation, and file artifacts. "
+                        "For plots: use matplotlib (plt.plot, plt.bar, etc.) and call "
+                        "plt.savefig('plot.png') before plt.show() to persist the image."
                     ),
                     input_schema=PYTHON_TOOL_SCHEMA,
                 ),
@@ -450,7 +443,17 @@ class ChatEngine:
         if name == "run_sql":
             sql = args.get("sql")
             if not isinstance(sql, str) or not sql.strip():
-                return {"error": "run_sql requires a non-empty 'sql' string"}, None
+                err_result = {"error": "run_sql requires a non-empty 'sql' string"}
+                if on_event is not None:
+                    await self._persist_failed_tool_call(
+                        worldline_id,
+                        "tool_call_sql",
+                        "tool_result_sql",
+                        {"sql": str(sql) if sql else "", "limit": 100, "call_id": tool_call.id},
+                        err_result,
+                        on_event,
+                    )
+                return err_result, None
 
             raw_limit = args.get("limit", 100)
             try:
@@ -482,7 +485,17 @@ class ChatEngine:
         if name == "run_python":
             code = args.get("code")
             if not isinstance(code, str) or not code.strip():
-                return {"error": "run_python requires a non-empty 'code' string"}, None
+                err_result = {"error": "run_python requires a non-empty 'code' string"}
+                if on_event is not None:
+                    await self._persist_failed_tool_call(
+                        worldline_id,
+                        "tool_call_python",
+                        "tool_result_python",
+                        {"code": str(code) if code else "", "timeout": 30, "call_id": tool_call.id},
+                        err_result,
+                        on_event,
+                    )
+                return err_result, None
 
             raw_timeout = args.get("timeout", 30)
             try:
@@ -541,6 +554,32 @@ class ChatEngine:
 
         return {"error": f"unknown tool '{name}'"}, None
 
+    async def _persist_failed_tool_call(
+        self,
+        worldline_id: str,
+        call_type: str,
+        result_type: str,
+        call_payload: dict[str, Any],
+        result_payload: dict[str, Any],
+        on_event: Callable[[str, dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        """Persist a tool call and its error result so the user sees the attempt."""
+        call_event = self._append_worldline_event(
+            worldline_id=worldline_id,
+            event_type=call_type,
+            payload=call_payload,
+        )
+        if on_event is not None:
+            await on_event(worldline_id, call_event)
+
+        result_event = self._append_worldline_event(
+            worldline_id=worldline_id,
+            event_type=result_type,
+            payload=result_payload,
+        )
+        if on_event is not None:
+            await on_event(worldline_id, result_event)
+
     # ---- message building ---------------------------------------------------
 
     async def _build_llm_messages(self, worldline_id: str) -> list[ChatMessage]:
@@ -552,32 +591,140 @@ class ChatEngine:
         events = timeline.get("events", [])
         messages: list[ChatMessage] = []
 
-        for event in events:
+        # Add system message explaining available tools and when to use them
+        system_prompt = """You are an AI assistant with access to tools for data analysis. You have two main tools available:
+
+1. **run_sql**: Execute SQL queries against a DuckDB database containing user data. Use this when:
+   - The user asks questions about data, tables, or specific values
+   - You need to retrieve, filter, aggregate, or explore data
+   - The request involves counting, summing, or analyzing structured data
+
+2. **run_python**: Execute Python code in a sandboxed environment. Use this when:
+   - You need to create visualizations, charts, or plots (matplotlib is available)
+   - Complex data manipulation or statistical analysis is required
+   - Working with files, dataframes, or generating data insights
+
+   For plots: use matplotlib (e.g. plt.plot, plt.bar) and call plt.savefig('filename.png') 
+   to persist the image. The working directory is /workspace; saved files become viewable artifacts.
+
+**CRITICAL - You MUST execute tools:**
+- NEVER respond with only a plan or description of what you would do. You MUST actually call run_sql and/or run_python.
+- When the user asks for analysis, data exploration, or visualizations: call the tools first, then summarize the results.
+- If you need to explore the schema: call run_sql with a query like "SELECT * FROM table LIMIT 5" or "PRAGMA table_info(table)".
+- Do not say "Let me..." or "I'll..." without immediately following with a tool call in the same response.
+
+**Guidelines:**
+- Call SQL first to retrieve the data, then use Python if you need to visualize or further analyze it
+- After getting results, provide insights and context, not just raw data
+- If a query might be expensive or return many rows, add appropriate LIMIT clauses
+
+The user is expecting you to help them explore and understand their data. Use the appropriate tool(s) to deliver helpful analysis and insights."""
+        messages.append(ChatMessage(role="system", content=system_prompt))
+
+        # Events are newest-first (depth DESC); reverse for chronological order
+        events_chrono = list(reversed(events))
+        by_id = {e["id"]: e for e in events}
+
+        pending_plan: str | None = None
+        pending_tool_calls: list[dict[str, Any]] = []
+        assistant_emitted_for_turn = False
+
+        for event in events_chrono:
             event_type = event.get("type")
             payload = event.get("payload", {})
 
             if event_type == "user_message":
+                pending_plan = None
+                pending_tool_calls = []
+                assistant_emitted_for_turn = False
                 text = payload.get("text")
                 if text:
                     messages.append(ChatMessage(role="user", content=str(text)))
                 continue
 
-            if event_type in {"assistant_message", "assistant_plan"}:
+            if event_type == "assistant_plan":
+                pending_plan = (payload.get("text") or "").strip() or None
+                pending_tool_calls = []
+                assistant_emitted_for_turn = False
+                continue
+
+            if event_type == "assistant_message":
+                # Emit pending assistant with tool_calls before final message
+                if pending_tool_calls and not assistant_emitted_for_turn:
+                    tool_calls_spec = [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": json.dumps(tc["arguments"] or {}),
+                            },
+                        }
+                        for tc in pending_tool_calls
+                    ]
+                    content = (pending_plan or "").strip()
+                    messages.append(
+                        ChatMessage(
+                            role="assistant",
+                            content=content or "",
+                            tool_calls=tool_calls_spec,
+                        )
+                    )
+                    assistant_emitted_for_turn = True
+                pending_plan = None
+                pending_tool_calls = []
+                assistant_emitted_for_turn = False
                 text = payload.get("text")
                 if text:
                     messages.append(ChatMessage(role="assistant", content=str(text)))
                 continue
 
+            if event_type in {"tool_call_sql", "tool_call_python"}:
+                name = "run_sql" if "sql" in event_type else "run_python"
+                args = dict(payload)
+                args.pop("call_id", None)
+                call_id = payload.get("call_id") or event.get("id", "")
+                pending_tool_calls.append(
+                    {"id": call_id, "name": name, "arguments": args}
+                )
+                continue
+
             if event_type in {"tool_result_sql", "tool_result_python"}:
+                parent_id = event.get("parent_event_id") or ""
+                parent = by_id.get(parent_id, {})
+                call_id = (parent.get("payload") or {}).get("call_id") or parent_id
                 summary = json.dumps(payload, ensure_ascii=True, default=str)
                 if len(summary) > 2_000:
                     summary = summary[:2_000] + "...(truncated)"
+                if pending_tool_calls and not assistant_emitted_for_turn:
+                    tool_calls_spec = [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": json.dumps(tc["arguments"] or {}),
+                            },
+                        }
+                        for tc in pending_tool_calls
+                    ]
+                    content = (pending_plan or "").strip()
+                    messages.append(
+                        ChatMessage(
+                            role="assistant",
+                            content=content or "",
+                            tool_calls=tool_calls_spec,
+                        )
+                    )
+                    assistant_emitted_for_turn = True
                 messages.append(
                     ChatMessage(
-                        role="assistant",
-                        content=f"Prior {event_type} result: {summary}",
+                        role="tool",
+                        content=summary,
+                        tool_call_id=call_id or None,
                     )
                 )
+                continue
 
         return messages
 
@@ -630,13 +777,7 @@ class ChatEngine:
                 (event_id,),
             ).fetchone()
 
-        return {
-            "id": row["id"],
-            "parent_event_id": row["parent_event_id"],
-            "type": row["type"],
-            "payload": json.loads(row["payload_json"]),
-            "created_at": row["created_at"],
-        }
+        return event_row_to_dict(row)
 
     def _max_worldline_rowid(self, worldline_id: str) -> int:
         with get_conn() as conn:
@@ -666,13 +807,5 @@ class ChatEngine:
 
         output: list[dict[str, Any]] = []
         for row in rows:
-            output.append(
-                {
-                    "id": row["id"],
-                    "parent_event_id": row["parent_event_id"],
-                    "type": row["type"],
-                    "payload": json.loads(row["payload_json"]),
-                    "created_at": row["created_at"],
-                }
-            )
+            output.append(event_row_to_dict(row))
         return output

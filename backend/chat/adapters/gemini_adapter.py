@@ -30,6 +30,32 @@ _UNSUPPORTED_SCHEMA_KEYS = {
 }
 
 
+def _messages_to_gemini_contents(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    """Convert ChatMessages to Gemini contents format."""
+    result: list[dict[str, Any]] = []
+    for m in messages:
+        role = _to_gemini_role(m.role)
+        parts: list[dict[str, Any]] = []
+        if m.content:
+            parts.append({"text": m.content})
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                if isinstance(fn, dict) and fn.get("name"):
+                    args_raw = fn.get("arguments", "{}")
+                    args = json.loads(args_raw) if isinstance(args_raw, str) else (fn.get("arguments") or {})
+                    parts.append({
+                        "function_call": {
+                            "name": fn["name"],
+                            "args": args if isinstance(args, dict) else {},
+                        }
+                    })
+        if not parts:
+            parts = [{"text": m.content or ""}]
+        result.append({"role": role, "parts": parts})
+    return result
+
+
 def _to_gemini_role(role: str) -> str:
     normalized = (role or "").strip().lower()
     if normalized == "assistant":
@@ -114,12 +140,10 @@ class GeminiAdapter:
             # Keep this permissive; provider-specific options may vary by SDK version.
             config_kwargs["tool_choice"] = tool_choice
 
+        contents = _messages_to_gemini_contents(messages)
         response = client.models.generate_content(
             model=self.model,
-            contents=[
-                {"role": _to_gemini_role(m.role), "parts": [{"text": m.content}]}
-                for m in messages
-            ],
+            contents=contents,
             config=genai_types.GenerateContentConfig(**config_kwargs),
         )
         return self._parse_response(response)

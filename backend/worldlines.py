@@ -1,12 +1,11 @@
-import json
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 try:
-    from backend.meta import get_conn, new_id
+    from backend.meta import event_row_to_dict, get_conn, new_id, paginate_by_cursor
     from backend.worldline_service import BranchOptions, WorldlineService
 except ModuleNotFoundError:
-    from meta import get_conn, new_id
+    from meta import event_row_to_dict, get_conn, new_id, paginate_by_cursor
     from worldline_service import BranchOptions, WorldlineService
 
 router = APIRouter(prefix="/api", tags=["worldlines"])
@@ -30,7 +29,7 @@ async def create_worldline(body: CreateWorldlineRequest):
     parent_worldline_id = None
     forked_from_event_id = None
     head_event_id = None
-    name = body.name if body and body.name else "main"
+    name = body.name or "main"
     with get_conn() as conn:
         thread_row = conn.execute(
             "SELECT id FROM threads WHERE id = ?",
@@ -39,7 +38,7 @@ async def create_worldline(body: CreateWorldlineRequest):
         if thread_row is None:
             raise HTTPException(status_code=404, detail="thread not found")
 
-        _ = conn.execute(
+        conn.execute(
             "INSERT INTO worldlines (id, thread_id, parent_worldline_id, forked_from_event_id, head_event_id, name) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 worldline_id,
@@ -108,22 +107,11 @@ async def get_worldline_events(
 
     events = []
     for row in rows:
-        events.append(
-            {
-                "id": row["id"],
-                "parent_event_id": row["parent_event_id"],
-                "type": row["type"],
-                "payload": json.loads(row["payload_json"]),
-                "created_at": row["created_at"],
-            }
-        )
+        events.append(event_row_to_dict(row))
 
-    if cursor:
-        idx = next((i for i, e in enumerate(events) if e["id"] == cursor), None)
-        if idx is None:
-            raise HTTPException(status_code=400, detail="invalid cursor")
-        events = events[idx + 1 :]
+    try:
+        page, next_cursor = paginate_by_cursor(events, cursor=cursor, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    page = events[:limit]
-    next_cursor = page[-1]["id"] if len(events) > limit else None
     return {"events": page, "next_cursor": next_cursor}

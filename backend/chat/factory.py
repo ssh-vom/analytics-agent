@@ -25,7 +25,7 @@ def build_llm_client(
     load_env_once()
 
     resolved_provider = (
-        (provider or os.getenv("LLM_PROVIDER", "openai")).lower().strip()
+        (provider or os.getenv("LLM_PROVIDER", "openrouter")).lower().strip()
     )
     if resolved_provider == "openai":
         return OpenAiAdapter(
@@ -42,7 +42,7 @@ def build_llm_client(
     if resolved_provider == "openrouter":
         return OpenRouterAdapter(
             model=model or os.getenv("OPENROUTER_MODEL", "stepfun/step-3.5-flash:free"),
-            api_key=api_key or os.getenv("OPENROUTER_KEY"),
+            api_key=api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_KEY"),
             app_name=os.getenv("OPENROUTER_APP_NAME", "TextQL"),
             http_referer=os.getenv("OPENROUTER_HTTP_REFERER"),
         )

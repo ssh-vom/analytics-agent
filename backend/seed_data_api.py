@@ -3,8 +3,6 @@ API endpoints for seed data operations - CSV import and external DB attachment.
 """
 
 import shutil
-from pathlib import Path
-from typing import Any
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Query
 from pydantic import BaseModel, Field
 
@@ -46,13 +44,25 @@ except ModuleNotFoundError:
 router = APIRouter(prefix="/api/seed-data", tags=["seed-data"])
 
 
-class CSVImportRequest(BaseModel):
-    table_name: str | None = Field(
-        default=None, description="Optional table name (auto-generated if not provided)"
-    )
-    if_exists: str = Field(
-        default="fail", description="Behavior if table exists: fail, replace, append"
-    )
+def _require_worldline(conn, worldline_id: str):
+    worldline = get_worldline_row(conn, worldline_id)
+    if worldline is None:
+        raise HTTPException(status_code=404, detail="Worldline not found")
+    return worldline
+
+
+def _append_worldline_event(
+    conn,
+    *,
+    worldline_id: str,
+    parent_event_id: str | None,
+    event_type: str,
+    payload: dict,
+) -> str:
+    event_id = append_event(conn, worldline_id, parent_event_id, event_type, payload)
+    set_worldline_head(conn, worldline_id, event_id)
+    conn.commit()
+    return event_id
 
 
 class AttachExternalDBRequest(BaseModel):
@@ -80,11 +90,8 @@ async def import_csv_endpoint(
     - **table_name**: Optional table name (auto-generated from filename if not provided)
     - **if_exists**: What to do if table exists: "fail", "replace", or "append"
     """
-    # Validate worldline exists
     with get_conn() as conn:
-        worldline = get_worldline_row(conn, worldline_id)
-        if worldline is None:
-            raise HTTPException(status_code=404, detail="Worldline not found")
+        worldline = _require_worldline(conn, worldline_id)
         parent_event_id = worldline["head_event_id"]
 
         # Save uploaded file temporarily
@@ -112,11 +119,13 @@ async def import_csv_endpoint(
                 "import_time_ms": result.import_time_ms,
             }
 
-            event_id = append_event(
-                conn, worldline_id, parent_event_id, "csv_import", event_payload
+            event_id = _append_worldline_event(
+                conn,
+                worldline_id=worldline_id,
+                parent_event_id=parent_event_id,
+                event_type="csv_import",
+                payload=event_payload,
             )
-            set_worldline_head(conn, worldline_id, event_id)
-            conn.commit()
 
             return {
                 "success": True,
@@ -141,11 +150,8 @@ async def attach_duckdb_endpoint(worldline_id: str, request: AttachExternalDBReq
     - **db_path**: Path to the external DuckDB file
     - **alias**: Optional alias name for the attached database
     """
-    # Validate worldline exists
     with get_conn() as conn:
-        worldline = get_worldline_row(conn, worldline_id)
-        if worldline is None:
-            raise HTTPException(status_code=404, detail="Worldline not found")
+        worldline = _require_worldline(conn, worldline_id)
         parent_event_id = worldline["head_event_id"]
 
         # Attach the external database
@@ -160,11 +166,13 @@ async def attach_duckdb_endpoint(worldline_id: str, request: AttachExternalDBReq
             "attached_at": result.attached_at,
         }
 
-        event_id = append_event(
-            conn, worldline_id, parent_event_id, "external_db_attached", event_payload
+        event_id = _append_worldline_event(
+            conn,
+            worldline_id=worldline_id,
+            parent_event_id=parent_event_id,
+            event_type="external_db_attached",
+            payload=event_payload,
         )
-        set_worldline_head(conn, worldline_id, event_id)
-        conn.commit()
 
         return {
             "success": True,
@@ -182,11 +190,8 @@ async def detach_duckdb_endpoint(worldline_id: str, request: DetachExternalDBReq
 
     - **alias**: The alias of the attached database to detach
     """
-    # Validate worldline exists
     with get_conn() as conn:
-        worldline = get_worldline_row(conn, worldline_id)
-        if worldline is None:
-            raise HTTPException(status_code=404, detail="Worldline not found")
+        worldline = _require_worldline(conn, worldline_id)
         parent_event_id = worldline["head_event_id"]
 
         # Detach the database
@@ -195,11 +200,13 @@ async def detach_duckdb_endpoint(worldline_id: str, request: DetachExternalDBReq
         # Record the detachment as an event
         event_payload = {"alias": request.alias, "status": result["status"]}
 
-        event_id = append_event(
-            conn, worldline_id, parent_event_id, "external_db_detached", event_payload
+        event_id = _append_worldline_event(
+            conn,
+            worldline_id=worldline_id,
+            parent_event_id=parent_event_id,
+            event_type="external_db_detached",
+            payload=event_payload,
         )
-        set_worldline_head(conn, worldline_id, event_id)
-        conn.commit()
 
         return {
             "success": True,
@@ -212,13 +219,8 @@ async def detach_duckdb_endpoint(worldline_id: str, request: DetachExternalDBReq
 @router.get("/worldlines/{worldline_id}/imported-tables")
 async def list_imported_tables_endpoint(worldline_id: str):
     """List all tables imported from CSV files in a worldline."""
-    # Validate worldline exists
     with get_conn() as conn:
-        worldline = conn.execute(
-            "SELECT id FROM worldlines WHERE id = ?", (worldline_id,)
-        ).fetchone()
-        if worldline is None:
-            raise HTTPException(status_code=404, detail="Worldline not found")
+        _require_worldline(conn, worldline_id)
 
     tables = list_imported_tables(worldline_id)
     return {"tables": tables}
@@ -227,13 +229,8 @@ async def list_imported_tables_endpoint(worldline_id: str):
 @router.get("/worldlines/{worldline_id}/attached-databases")
 async def list_attached_databases_endpoint(worldline_id: str):
     """List all attached external databases in a worldline."""
-    # Validate worldline exists
     with get_conn() as conn:
-        worldline = conn.execute(
-            "SELECT id FROM worldlines WHERE id = ?", (worldline_id,)
-        ).fetchone()
-        if worldline is None:
-            raise HTTPException(status_code=404, detail="Worldline not found")
+        _require_worldline(conn, worldline_id)
 
     databases = list_attached_databases(worldline_id)
     return {"attached_databases": databases}
@@ -247,13 +244,8 @@ async def get_worldline_schema_endpoint(worldline_id: str):
     - Imported CSV tables
     - Attached external databases and their tables
     """
-    # Validate worldline exists
     with get_conn() as conn:
-        worldline = conn.execute(
-            "SELECT id FROM worldlines WHERE id = ?", (worldline_id,)
-        ).fetchone()
-        if worldline is None:
-            raise HTTPException(status_code=404, detail="Worldline not found")
+        _require_worldline(conn, worldline_id)
 
     schema = get_worldline_schema(worldline_id)
     return schema
@@ -267,13 +259,8 @@ async def list_all_tables_endpoint(
     """
     List all tables available in a worldline, including native, imported, and attached DB tables.
     """
-    # Validate worldline exists
     with get_conn() as conn:
-        worldline = conn.execute(
-            "SELECT id FROM worldlines WHERE id = ?", (worldline_id,)
-        ).fetchone()
-        if worldline is None:
-            raise HTTPException(status_code=404, detail="Worldline not found")
+        _require_worldline(conn, worldline_id)
 
     schema = get_worldline_schema(worldline_id)
 

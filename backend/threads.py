@@ -2,9 +2,9 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 try:
-    from backend.meta import get_conn, new_id
+    from backend.meta import get_conn, new_id, paginate_by_cursor
 except ModuleNotFoundError:
-    from meta import get_conn, new_id
+    from meta import get_conn, new_id, paginate_by_cursor
 
 
 router = APIRouter(prefix="/api", tags=["threads"])
@@ -19,7 +19,7 @@ async def create_thread(body: CreateThreadRequest | None = None):
     thread_id = new_id("thread")
     title = body.title if body and body.title else "New Base Thread"
     with get_conn() as conn:
-        _ = conn.execute(
+        conn.execute(
             "INSERT INTO threads (id, title) VALUES (?, ?)", (thread_id, title)
         )
         conn.commit()
@@ -61,16 +61,11 @@ async def list_threads(
             }
         )
 
-    if cursor:
-        idx = next(
-            (i for i, thread in enumerate(threads) if thread["id"] == cursor), None
-        )
-        if idx is None:
-            raise HTTPException(status_code=400, detail="invalid cursor")
-        threads = threads[idx + 1 :]
+    try:
+        page, next_cursor = paginate_by_cursor(threads, cursor=cursor, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    page = threads[:limit]
-    next_cursor = page[-1]["id"] if len(threads) > limit else None
     return {"threads": page, "next_cursor": next_cursor}
 
 
@@ -111,12 +106,9 @@ async def get_thread_worldlines(
             }
         )
 
-    if cursor:
-        idx = next((i for i, w in enumerate(worldlines) if w["id"] == cursor), None)
-        if idx is None:
-            raise HTTPException(status_code=400, detail="invalid cursor")
-        worldlines = worldlines[idx + 1 :]
+    try:
+        page, next_cursor = paginate_by_cursor(worldlines, cursor=cursor, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    page = worldlines[:limit]
-    next_cursor = page[-1]["id"] if len(worldlines) > limit else None
     return {"worldlines": page, "next_cursor": next_cursor}

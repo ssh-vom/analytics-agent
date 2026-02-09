@@ -1,5 +1,4 @@
 import time
-import json
 import textwrap
 from typing import Any, Awaitable, Callable
 from fastapi import APIRouter, HTTPException
@@ -9,6 +8,7 @@ try:
     from backend.duckdb_manager import execute_read_query
     from backend.meta import (
         append_event,
+        event_row_to_dict,
         get_conn,
         get_worldline_row,
         set_worldline_head,
@@ -20,6 +20,7 @@ except ModuleNotFoundError:
     from duckdb_manager import execute_read_query
     from meta import (
         append_event,
+        event_row_to_dict,
         get_conn,
         get_worldline_row,
         set_worldline_head,
@@ -66,13 +67,30 @@ def _load_event_by_id(conn, event_id: str) -> dict[str, Any]:
         """,
         (event_id,),
     ).fetchone()
-    return {
-        "id": row["id"],
-        "parent_event_id": row["parent_event_id"],
-        "type": row["type"],
-        "payload": json.loads(row["payload_json"]),
-        "created_at": row["created_at"],
-    }
+    return event_row_to_dict(row)
+
+
+async def _append_worldline_event(
+    conn,
+    *,
+    worldline_id: str,
+    parent_event_id: str | None,
+    event_type: str,
+    payload: dict[str, Any],
+    on_event: ToolEventCallback | None = None,
+) -> str:
+    event_id = append_event(
+        conn,
+        worldline_id,
+        parent_event_id,
+        event_type,
+        payload,
+    )
+    set_worldline_head(conn, worldline_id, event_id)
+    conn.commit()
+    if on_event is not None:
+        await on_event(_load_event_by_id(conn, event_id))
+    return event_id
 
 
 async def execute_sql_tool(
@@ -91,45 +109,36 @@ async def execute_sql_tool(
         call_payload: dict[str, Any] = {"sql": body.sql, "limit": body.limit}
         if body.call_id:
             call_payload["call_id"] = body.call_id
-        call_event_id = append_event(
+        call_event_id = await _append_worldline_event(
             conn,
-            body.worldline_id,
-            parent_event_id,
-            "tool_call_sql",
-            call_payload,
+            worldline_id=body.worldline_id,
+            parent_event_id=parent_event_id,
+            event_type="tool_call_sql",
+            payload=call_payload,
+            on_event=on_event,
         )
-        set_worldline_head(conn, body.worldline_id, call_event_id)
-        conn.commit()
-        if on_event is not None:
-            await on_event(_load_event_by_id(conn, call_event_id))
 
         try:
             result = execute_read_query(body.worldline_id, body.sql, body.limit)
             result["execution_ms"] = int((time.perf_counter() - started) * 1000)
-            result_event_id = append_event(
+            await _append_worldline_event(
                 conn,
-                body.worldline_id,
-                call_event_id,
-                "tool_result_sql",
-                result,
+                worldline_id=body.worldline_id,
+                parent_event_id=call_event_id,
+                event_type="tool_result_sql",
+                payload=result,
+                on_event=on_event,
             )
-            set_worldline_head(conn, body.worldline_id, result_event_id)
-            conn.commit()
-            if on_event is not None:
-                await on_event(_load_event_by_id(conn, result_event_id))
             return result
         except Exception as exc:
-            result_event_id = append_event(
+            await _append_worldline_event(
                 conn,
-                body.worldline_id,
-                call_event_id,
-                "tool_result_sql",
-                {"error": str(exc)},
+                worldline_id=body.worldline_id,
+                parent_event_id=call_event_id,
+                event_type="tool_result_sql",
+                payload={"error": str(exc)},
+                on_event=on_event,
             )
-            set_worldline_head(conn, body.worldline_id, result_event_id)
-            conn.commit()
-            if on_event is not None:
-                await on_event(_load_event_by_id(conn, result_event_id))
             raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -169,15 +178,7 @@ def _load_event_chain(conn, head_event_id: str | None) -> list[dict]:
 
     events: list[dict] = []
     for row in rows:
-        events.append(
-            {
-                "id": row["id"],
-                "parent_event_id": row["parent_event_id"],
-                "type": row["type"],
-                "payload": json.loads(row["payload_json"]),
-                "created_at": row["created_at"],
-            }
-        )
+        events.append(event_row_to_dict(row))
     return events
 
 
@@ -246,17 +247,14 @@ async def execute_python_tool(
         call_payload: dict[str, Any] = {"code": body.code, "timeout": body.timeout}
         if body.call_id:
             call_payload["call_id"] = body.call_id
-        call_event_id = append_event(
+        call_event_id = await _append_worldline_event(
             conn,
-            body.worldline_id,
-            parent_event_id,
-            "tool_call_python",
-            call_payload,
+            worldline_id=body.worldline_id,
+            parent_event_id=parent_event_id,
+            event_type="tool_call_python",
+            payload=call_payload,
+            on_event=on_event,
         )
-        set_worldline_head(conn, body.worldline_id, call_event_id)
-        conn.commit()
-        if on_event is not None:
-            await on_event(_load_event_by_id(conn, call_event_id))
 
         try:
             raw_result = await _sandbox_manager.execute(
@@ -305,7 +303,7 @@ async def execute_python_tool(
                 if not artifact["path"]:
                     continue
 
-                _ = conn.execute(
+                conn.execute(
                     """
                         INSERT INTO artifacts (id, worldline_id, event_id, type, name, path)
                         VALUES (?, ?, ?, ?, ?, ?)
@@ -326,17 +324,14 @@ async def execute_python_tool(
                 await on_event(_load_event_by_id(conn, result_event_id))
             return api_result
         except Exception as exc:
-            result_event_id = append_event(
+            await _append_worldline_event(
                 conn,
-                body.worldline_id,
-                call_event_id,
-                "tool_result_python",
-                {"error": str(exc)},
+                worldline_id=body.worldline_id,
+                parent_event_id=call_event_id,
+                event_type="tool_result_python",
+                payload={"error": str(exc)},
+                on_event=on_event,
             )
-            set_worldline_head(conn, body.worldline_id, result_event_id)
-            conn.commit()
-            if on_event is not None:
-                await on_event(_load_event_by_id(conn, result_event_id))
             raise HTTPException(status_code=400, detail=str(exc))
 
 
