@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import HTTPException
@@ -12,7 +12,6 @@ try:
         append_event,
         get_conn,
         get_worldline_row,
-        new_id,
         set_worldline_head,
     )
     from backend.tools import (
@@ -22,9 +21,10 @@ try:
         run_sql,
     )
     from backend.worldlines import get_worldline_events
+    from backend.worldline_service import BranchOptions, WorldlineService
 except ModuleNotFoundError:
     from chat.llm_client import ChatMessage, LlmClient, ToolCall, ToolDefinition
-    from meta import append_event, get_conn, get_worldline_row, new_id, set_worldline_head
+    from meta import append_event, get_conn, get_worldline_row, set_worldline_head
     from tools import (
         PythonToolRequest,
         SqlToolRequest,
@@ -32,6 +32,7 @@ except ModuleNotFoundError:
         run_sql,
     )
     from worldlines import get_worldline_events
+    from worldline_service import BranchOptions, WorldlineService
 
 
 SQL_TOOL_SCHEMA: dict[str, Any] = {
@@ -69,6 +70,7 @@ class ChatEngine:
     llm_client: LlmClient
     max_iterations: int = 6
     max_output_tokens: int | None = 1500
+    worldline_service: WorldlineService = field(default_factory=WorldlineService)
 
     async def run_turn(
         self,
@@ -245,109 +247,30 @@ class ChatEngine:
             branch_name = name_arg if isinstance(name_arg, str) and name_arg else None
 
             try:
-                result = self._perform_time_travel(
-                    source_worldline_id=worldline_id,
-                    from_event_id=from_event_id,
-                    name=branch_name,
-                    carried_user_message=carried_user_message,
+                branch_result = self.worldline_service.branch_from_event(
+                    BranchOptions(
+                        source_worldline_id=worldline_id,
+                        from_event_id=from_event_id,
+                        name=branch_name,
+                        append_events=True,
+                        carried_user_message=carried_user_message,
+                    )
                 )
-                return result, result["new_worldline_id"]
+                return (
+                    {
+                        "new_worldline_id": branch_result.new_worldline_id,
+                        "from_event_id": branch_result.from_event_id,
+                        "name": branch_result.name,
+                        "created_event_ids": list(branch_result.created_event_ids),
+                    },
+                    branch_result.new_worldline_id,
+                )
             except HTTPException as exc:
                 return {"error": str(exc.detail), "status_code": exc.status_code}, None
             except Exception as exc:  # pragma: no cover
                 return {"error": str(exc)}, None
 
         return {"error": f"unknown tool '{name}'"}, None
-
-    def _perform_time_travel(
-        self,
-        *,
-        source_worldline_id: str,
-        from_event_id: str,
-        name: str | None,
-        carried_user_message: str,
-    ) -> dict[str, Any]:
-        with get_conn() as conn:
-            source_worldline = conn.execute(
-                "SELECT id, thread_id FROM worldlines WHERE id = ?",
-                (source_worldline_id,),
-            ).fetchone()
-            if source_worldline is None:
-                raise HTTPException(status_code=404, detail="source worldline not found")
-
-            source_event = conn.execute(
-                "SELECT id, worldline_id FROM events WHERE id = ?",
-                (from_event_id,),
-            ).fetchone()
-            if source_event is None:
-                raise HTTPException(status_code=404, detail="from_event_id not found")
-            if source_event["worldline_id"] != source_worldline_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="from_event_id must belong to current worldline",
-                )
-
-            new_worldline_id = new_id("worldline")
-            branch_name = name or f"branch-{from_event_id[-6:]}"
-
-            conn.execute(
-                """
-                INSERT INTO worldlines
-                (id, thread_id, parent_worldline_id, forked_from_event_id, head_event_id, name)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    new_worldline_id,
-                    source_worldline["thread_id"],
-                    source_worldline_id,
-                    from_event_id,
-                    from_event_id,
-                    branch_name,
-                ),
-            )
-
-            created_event_id = append_event(
-                conn=conn,
-                worldline_id=new_worldline_id,
-                parent_event_id=from_event_id,
-                event_type="worldline_created",
-                payload={
-                    "new_worldline_id": new_worldline_id,
-                    "parent_worldline_id": source_worldline_id,
-                    "forked_from_event_id": from_event_id,
-                    "name": branch_name,
-                },
-            )
-            time_travel_event_id = append_event(
-                conn=conn,
-                worldline_id=new_worldline_id,
-                parent_event_id=created_event_id,
-                event_type="time_travel",
-                payload={
-                    "from_worldline_id": source_worldline_id,
-                    "from_event_id": from_event_id,
-                    "new_worldline_id": new_worldline_id,
-                    "name": branch_name,
-                },
-            )
-            carried_user_event_id = append_event(
-                conn=conn,
-                worldline_id=new_worldline_id,
-                parent_event_id=time_travel_event_id,
-                event_type="user_message",
-                payload={
-                    "text": carried_user_message,
-                    "carried_from_worldline_id": source_worldline_id,
-                },
-            )
-            set_worldline_head(conn, new_worldline_id, carried_user_event_id)
-            conn.commit()
-
-        return {
-            "new_worldline_id": new_worldline_id,
-            "from_event_id": from_event_id,
-            "name": branch_name,
-        }
 
     async def _build_llm_messages(self, worldline_id: str) -> list[ChatMessage]:
         timeline = await get_worldline_events(
