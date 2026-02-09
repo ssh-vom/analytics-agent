@@ -60,6 +60,8 @@
   let feedElement: HTMLDivElement | null = null;
   let shouldAutoScroll = true;
   let pendingScrollRaf = 0;
+  let hasPendingScroll = false;
+  let pendingScrollForce = false;
 
   $: activeEvents = eventsByWorldline[activeWorldlineId] ?? [];
   $: cells = groupEventsIntoCells(activeEvents);
@@ -93,6 +95,8 @@
       cancelAnimationFrame(pendingScrollRaf);
       pendingScrollRaf = 0;
     }
+    hasPendingScroll = false;
+    pendingScrollForce = false;
   });
 
   $: if ($activeThread?.id && isReady && $activeThread.id !== threadId && !isHydratingThread) {
@@ -109,25 +113,36 @@
   }
 
   function scrollFeedToBottom(force = false): void {
-    if (!feedElement) {
-      return;
+    if (force) {
+      pendingScrollForce = true;
     }
     if (!force && !shouldAutoScroll) {
       return;
     }
-    if (pendingScrollRaf) {
+    if (hasPendingScroll || pendingScrollRaf) {
       return;
     }
-    pendingScrollRaf = requestAnimationFrame(() => {
-      pendingScrollRaf = 0;
-      if (!feedElement) {
-        return;
-      }
-      feedElement.scrollTo({
-        top: feedElement.scrollHeight,
-        behavior: "auto",
+    hasPendingScroll = true;
+    void tick()
+      .then(() => {
+        pendingScrollRaf = requestAnimationFrame(() => {
+          pendingScrollRaf = 0;
+          hasPendingScroll = false;
+          const shouldScrollNow = pendingScrollForce || shouldAutoScroll;
+          pendingScrollForce = false;
+          if (!feedElement || !shouldScrollNow) {
+            return;
+          }
+          feedElement.scrollTo({
+            top: feedElement.scrollHeight,
+            behavior: "auto",
+          });
+        });
+      })
+      .catch(() => {
+        hasPendingScroll = false;
+        pendingScrollForce = false;
       });
-    });
   }
 
   function resetStreamingDrafts(): void {

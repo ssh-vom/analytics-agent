@@ -20,7 +20,7 @@
   export let onBranch: (() => void) | null = null;
   export let showArtifacts = true;
   export let artifactLinkMode: "download" | "panel" = "download";
-  let cellCollapsed = false;
+  let cellCollapsed = true;
   let codeCollapsed = false;
   let outputCollapsed = false;
   const dispatch = createEventDispatcher<{ artifactselect: { artifactId: string } }>();

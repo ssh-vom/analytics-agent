@@ -181,6 +181,10 @@ class ChatEngine:
                         active_worldline_id = switched_worldline_id
                         starting_rowid_by_worldline.setdefault(active_worldline_id, 0)
                         messages = await self._build_llm_messages(active_worldline_id)
+                        # Reset per-turn state for the new worldline context
+                        python_succeeded_in_turn = False
+                        successful_tool_signatures.clear()
+                        tool_call_count.clear()
 
                     serialized = json.dumps(
                         tool_result,

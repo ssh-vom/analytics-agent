@@ -15,7 +15,7 @@
   export let callEvent: TimelineEvent | null = null;
   export let resultEvent: TimelineEvent | null = null;
   export let onBranch: (() => void) | null = null;
-  let cellCollapsed = false;
+  let cellCollapsed = true;
   let codeCollapsed = false;
   let outputCollapsed = false;
 
