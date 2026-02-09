@@ -33,8 +33,8 @@ async def chat(body: ChatRequest):
         llm_client=llm_client,
         max_iterations=body.max_iterations,
     )
-    events = await engine.run_turn(
+    active_worldline_id, events = await engine.run_turn(
         worldline_id=body.worldline_id,
         message=body.message,
     )
-    return {"events": events}
+    return {"worldline_id": active_worldline_id, "events": events}

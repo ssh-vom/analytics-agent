@@ -70,6 +70,7 @@ class ChatApiTests(unittest.TestCase):
             )
 
         self.assertEqual(fake_client.calls, 1)
+        self.assertEqual(result["worldline_id"], worldline_id)
         self.assertEqual(
             [event["type"] for event in result["events"]],
             ["user_message", "assistant_message"],
@@ -121,6 +122,7 @@ class ChatApiTests(unittest.TestCase):
             )
 
         self.assertEqual(fake_client.calls, 2)
+        self.assertEqual(result["worldline_id"], worldline_id)
         event_types = [event["type"] for event in result["events"]]
         self.assertEqual(
             event_types,
@@ -139,6 +141,106 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(
             result["events"][-1]["payload"]["text"],
             "The query returned one row.",
+        )
+
+    def test_chat_time_travel_branches_and_continues_on_new_worldline(self) -> None:
+        thread_id = self._create_thread()
+        source_worldline_id = self._create_worldline(thread_id)
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_seed_branch",
+                    source_worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "seed"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_branch", source_worldline_id),
+            )
+            conn.commit()
+
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_tt_1",
+                            name="time_travel",
+                            arguments={
+                                "from_event_id": "event_seed_branch",
+                                "name": "alt-path",
+                            },
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text="Now continuing in the branched worldline.",
+                    tool_calls=[],
+                ),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=source_worldline_id,
+                        message="please branch and continue",
+                        provider="gemini",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 2)
+        event_types = [event["type"] for event in result["events"]]
+        self.assertEqual(
+            event_types,
+            [
+                "worldline_created",
+                "time_travel",
+                "user_message",
+                "assistant_message",
+            ],
+        )
+
+        created = result["events"][0]
+        new_worldline_id = created["payload"]["new_worldline_id"]
+        self.assertEqual(result["worldline_id"], new_worldline_id)
+        self.assertTrue(new_worldline_id.startswith("worldline_"))
+        self.assertNotEqual(new_worldline_id, source_worldline_id)
+        self.assertEqual(created["payload"]["name"], "alt-path")
+
+        with meta.get_conn() as conn:
+            new_worldline = conn.execute(
+                """
+                SELECT id, thread_id, parent_worldline_id, forked_from_event_id, head_event_id, name
+                FROM worldlines
+                WHERE id = ?
+                """,
+                (new_worldline_id,),
+            ).fetchone()
+            head_event = conn.execute(
+                "SELECT type, payload_json FROM events WHERE id = ?",
+                (new_worldline["head_event_id"],),
+            ).fetchone()
+
+        self.assertEqual(new_worldline["thread_id"], thread_id)
+        self.assertEqual(new_worldline["parent_worldline_id"], source_worldline_id)
+        self.assertEqual(new_worldline["forked_from_event_id"], "event_seed_branch")
+        self.assertEqual(new_worldline["name"], "alt-path")
+        self.assertEqual(head_event["type"], "assistant_message")
+        self.assertEqual(
+            json.loads(head_event["payload_json"])["text"],
+            "Now continuing in the branched worldline.",
         )
 
 

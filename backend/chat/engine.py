@@ -8,7 +8,13 @@ from fastapi import HTTPException
 
 try:
     from backend.chat.llm_client import ChatMessage, LlmClient, ToolCall, ToolDefinition
-    from backend.meta import append_event, get_conn, get_worldline_row, set_worldline_head
+    from backend.meta import (
+        append_event,
+        get_conn,
+        get_worldline_row,
+        new_id,
+        set_worldline_head,
+    )
     from backend.tools import (
         PythonToolRequest,
         SqlToolRequest,
@@ -18,7 +24,7 @@ try:
     from backend.worldlines import get_worldline_events
 except ModuleNotFoundError:
     from chat.llm_client import ChatMessage, LlmClient, ToolCall, ToolDefinition
-    from meta import append_event, get_conn, get_worldline_row, set_worldline_head
+    from meta import append_event, get_conn, get_worldline_row, new_id, set_worldline_head
     from tools import (
         PythonToolRequest,
         SqlToolRequest,
@@ -47,6 +53,15 @@ PYTHON_TOOL_SCHEMA: dict[str, Any] = {
     "required": ["code"],
     "additionalProperties": False,
 }
+TIME_TRAVEL_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "from_event_id": {"type": "string"},
+        "name": {"type": "string"},
+    },
+    "required": ["from_event_id"],
+    "additionalProperties": False,
+}
 
 
 @dataclass
@@ -55,18 +70,25 @@ class ChatEngine:
     max_iterations: int = 6
     max_output_tokens: int | None = 1500
 
-    async def run_turn(self, worldline_id: str, message: str) -> list[dict[str, Any]]:
+    async def run_turn(
+        self,
+        worldline_id: str,
+        message: str,
+    ) -> tuple[str, list[dict[str, Any]]]:
         if not message or not message.strip():
             raise HTTPException(status_code=400, detail="message must not be empty")
 
-        starting_rowid = self._max_worldline_rowid(worldline_id)
+        active_worldline_id = worldline_id
+        starting_rowid_by_worldline = {
+            active_worldline_id: self._max_worldline_rowid(active_worldline_id)
+        }
         self._append_worldline_event(
-            worldline_id=worldline_id,
+            worldline_id=active_worldline_id,
             event_type="user_message",
             payload={"text": message},
         )
 
-        messages = await self._build_llm_messages(worldline_id)
+        messages = await self._build_llm_messages(active_worldline_id)
         final_text: str | None = None
 
         for _ in range(self.max_iterations):
@@ -81,10 +103,19 @@ class ChatEngine:
 
             if response.tool_calls:
                 for tool_call in response.tool_calls:
-                    tool_result = await self._execute_tool_call(
-                        worldline_id=worldline_id,
+                    tool_result, switched_worldline_id = await self._execute_tool_call(
+                        worldline_id=active_worldline_id,
                         tool_call=tool_call,
+                        carried_user_message=message,
                     )
+                    if (
+                        switched_worldline_id
+                        and switched_worldline_id != active_worldline_id
+                    ):
+                        active_worldline_id = switched_worldline_id
+                        starting_rowid_by_worldline.setdefault(active_worldline_id, 0)
+                        messages = await self._build_llm_messages(active_worldline_id)
+
                     serialized = json.dumps(
                         tool_result,
                         ensure_ascii=True,
@@ -104,14 +135,22 @@ class ChatEngine:
             break
 
         if final_text is None:
-            final_text = "I reached the tool-loop limit before producing a final answer."
+            final_text = (
+                "I reached the tool-loop limit before producing a final answer."
+            )
 
         self._append_worldline_event(
-            worldline_id=worldline_id,
+            worldline_id=active_worldline_id,
             event_type="assistant_message",
             payload={"text": final_text},
         )
-        return self._events_since_rowid(worldline_id=worldline_id, rowid=starting_rowid)
+        return (
+            active_worldline_id,
+            self._events_since_rowid(
+                worldline_id=active_worldline_id,
+                rowid=starting_rowid_by_worldline[active_worldline_id],
+            ),
+        )
 
     def _tool_definitions(self) -> list[ToolDefinition]:
         return [
@@ -131,20 +170,28 @@ class ChatEngine:
                 ),
                 input_schema=PYTHON_TOOL_SCHEMA,
             ),
+            ToolDefinition(
+                name="time_travel",
+                description=(
+                    "Create a new worldline from a prior event and continue execution there."
+                ),
+                input_schema=TIME_TRAVEL_TOOL_SCHEMA,
+            ),
         ]
 
     async def _execute_tool_call(
         self,
         worldline_id: str,
         tool_call: ToolCall,
-    ) -> dict[str, Any]:
+        carried_user_message: str,
+    ) -> tuple[dict[str, Any], str | None]:
         name = (tool_call.name or "").strip()
         args = tool_call.arguments or {}
 
         if name == "run_sql":
             sql = args.get("sql")
             if not isinstance(sql, str) or not sql.strip():
-                return {"error": "run_sql requires a non-empty 'sql' string"}
+                return {"error": "run_sql requires a non-empty 'sql' string"}, None
 
             raw_limit = args.get("limit", 100)
             try:
@@ -154,18 +201,19 @@ class ChatEngine:
             limit = max(1, min(limit, 10_000))
 
             try:
-                return await run_sql(
+                result = await run_sql(
                     SqlToolRequest(worldline_id=worldline_id, sql=sql, limit=limit)
                 )
+                return result, None
             except HTTPException as exc:
-                return {"error": str(exc.detail), "status_code": exc.status_code}
+                return {"error": str(exc.detail), "status_code": exc.status_code}, None
             except Exception as exc:  # pragma: no cover
-                return {"error": str(exc)}
+                return {"error": str(exc)}, None
 
         if name == "run_python":
             code = args.get("code")
             if not isinstance(code, str) or not code.strip():
-                return {"error": "run_python requires a non-empty 'code' string"}
+                return {"error": "run_python requires a non-empty 'code' string"}, None
 
             raw_timeout = args.get("timeout", 30)
             try:
@@ -175,19 +223,131 @@ class ChatEngine:
             timeout = max(1, min(timeout, 120))
 
             try:
-                return await run_python(
+                result = await run_python(
                     PythonToolRequest(
                         worldline_id=worldline_id,
                         code=code,
                         timeout=timeout,
                     )
                 )
+                return result, None
             except HTTPException as exc:
-                return {"error": str(exc.detail), "status_code": exc.status_code}
+                return {"error": str(exc.detail), "status_code": exc.status_code}, None
             except Exception as exc:  # pragma: no cover
-                return {"error": str(exc)}
+                return {"error": str(exc)}, None
 
-        return {"error": f"unknown tool '{name}'"}
+        if name == "time_travel":
+            from_event_id = args.get("from_event_id")
+            if not isinstance(from_event_id, str) or not from_event_id.strip():
+                return {"error": "time_travel requires 'from_event_id'"}, None
+
+            name_arg = args.get("name")
+            branch_name = name_arg if isinstance(name_arg, str) and name_arg else None
+
+            try:
+                result = self._perform_time_travel(
+                    source_worldline_id=worldline_id,
+                    from_event_id=from_event_id,
+                    name=branch_name,
+                    carried_user_message=carried_user_message,
+                )
+                return result, result["new_worldline_id"]
+            except HTTPException as exc:
+                return {"error": str(exc.detail), "status_code": exc.status_code}, None
+            except Exception as exc:  # pragma: no cover
+                return {"error": str(exc)}, None
+
+        return {"error": f"unknown tool '{name}'"}, None
+
+    def _perform_time_travel(
+        self,
+        *,
+        source_worldline_id: str,
+        from_event_id: str,
+        name: str | None,
+        carried_user_message: str,
+    ) -> dict[str, Any]:
+        with get_conn() as conn:
+            source_worldline = conn.execute(
+                "SELECT id, thread_id FROM worldlines WHERE id = ?",
+                (source_worldline_id,),
+            ).fetchone()
+            if source_worldline is None:
+                raise HTTPException(status_code=404, detail="source worldline not found")
+
+            source_event = conn.execute(
+                "SELECT id, worldline_id FROM events WHERE id = ?",
+                (from_event_id,),
+            ).fetchone()
+            if source_event is None:
+                raise HTTPException(status_code=404, detail="from_event_id not found")
+            if source_event["worldline_id"] != source_worldline_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="from_event_id must belong to current worldline",
+                )
+
+            new_worldline_id = new_id("worldline")
+            branch_name = name or f"branch-{from_event_id[-6:]}"
+
+            conn.execute(
+                """
+                INSERT INTO worldlines
+                (id, thread_id, parent_worldline_id, forked_from_event_id, head_event_id, name)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_worldline_id,
+                    source_worldline["thread_id"],
+                    source_worldline_id,
+                    from_event_id,
+                    from_event_id,
+                    branch_name,
+                ),
+            )
+
+            created_event_id = append_event(
+                conn=conn,
+                worldline_id=new_worldline_id,
+                parent_event_id=from_event_id,
+                event_type="worldline_created",
+                payload={
+                    "new_worldline_id": new_worldline_id,
+                    "parent_worldline_id": source_worldline_id,
+                    "forked_from_event_id": from_event_id,
+                    "name": branch_name,
+                },
+            )
+            time_travel_event_id = append_event(
+                conn=conn,
+                worldline_id=new_worldline_id,
+                parent_event_id=created_event_id,
+                event_type="time_travel",
+                payload={
+                    "from_worldline_id": source_worldline_id,
+                    "from_event_id": from_event_id,
+                    "new_worldline_id": new_worldline_id,
+                    "name": branch_name,
+                },
+            )
+            carried_user_event_id = append_event(
+                conn=conn,
+                worldline_id=new_worldline_id,
+                parent_event_id=time_travel_event_id,
+                event_type="user_message",
+                payload={
+                    "text": carried_user_message,
+                    "carried_from_worldline_id": source_worldline_id,
+                },
+            )
+            set_worldline_head(conn, new_worldline_id, carried_user_event_id)
+            conn.commit()
+
+        return {
+            "new_worldline_id": new_worldline_id,
+            "from_event_id": from_event_id,
+            "name": branch_name,
+        }
 
     async def _build_llm_messages(self, worldline_id: str) -> list[ChatMessage]:
         timeline = await get_worldline_events(
@@ -263,7 +423,9 @@ class ChatEngine:
             ).fetchone()
             return int(row["max_rowid"])
 
-    def _events_since_rowid(self, *, worldline_id: str, rowid: int) -> list[dict[str, Any]]:
+    def _events_since_rowid(
+        self, *, worldline_id: str, rowid: int
+    ) -> list[dict[str, Any]]:
         with get_conn() as conn:
             rows = conn.execute(
                 """
