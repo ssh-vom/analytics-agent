@@ -55,9 +55,12 @@ class ChatApiTests(unittest.TestCase):
             frame = frame.strip()
             if not frame:
                 continue
+            data_lines: list[str] = []
             for line in frame.splitlines():
                 if line.startswith("data: "):
-                    payloads.append(json.loads(line[len("data: ") :]))
+                    data_lines.append(line[len("data: ") :])
+            if data_lines:
+                payloads.append(json.loads("\n".join(data_lines)))
         return payloads
 
     def _create_thread(self, title: str = "chat-test-thread") -> str:
@@ -478,12 +481,20 @@ class ChatApiTests(unittest.TestCase):
             raw_stream = self._run(self._consume_stream(response))
             payloads = self._extract_sse_payloads(raw_stream)
 
-        self.assertGreaterEqual(len(payloads), 3)
-        self.assertEqual(payloads[0]["seq"], 1)
-        self.assertEqual(payloads[0]["worldline_id"], worldline_id)
-        self.assertEqual(payloads[0]["event"]["type"], "user_message")
-        self.assertEqual(payloads[1]["seq"], 2)
-        self.assertEqual(payloads[1]["event"]["type"], "assistant_message")
+        event_payloads = [payload for payload in payloads if "event" in payload]
+        delta_payloads = [payload for payload in payloads if "delta" in payload]
+
+        self.assertGreaterEqual(len(event_payloads), 2)
+        self.assertEqual(event_payloads[0]["seq"], 1)
+        self.assertEqual(event_payloads[0]["worldline_id"], worldline_id)
+        self.assertEqual(event_payloads[0]["event"]["type"], "user_message")
+        self.assertEqual(event_payloads[-1]["event"]["type"], "assistant_message")
+        self.assertTrue(
+            any(
+                payload["delta"]["type"] == "assistant_text"
+                for payload in delta_payloads
+            )
+        )
         self.assertTrue(payloads[-1]["done"])
 
     def test_chat_stream_emits_tool_call_and_tool_result(self) -> None:
@@ -526,6 +537,46 @@ class ChatApiTests(unittest.TestCase):
             ["user_message", "tool_call_sql", "tool_result_sql", "assistant_message"],
         )
         self.assertTrue(payloads[-1]["done"])
+
+    def test_chat_stream_emits_tool_call_deltas(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_stream_delta_sql",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 123 AS value", "limit": 5},
+                        )
+                    ],
+                ),
+                LlmResponse(text="done", tool_calls=[]),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            response = self._run(
+                chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="stream sql deltas",
+                        provider="openai",
+                    )
+                )
+            )
+            raw_stream = self._run(self._consume_stream(response))
+            payloads = self._extract_sse_payloads(raw_stream)
+
+        sql_deltas = [
+            payload["delta"]
+            for payload in payloads
+            if "delta" in payload and payload["delta"]["type"] == "tool_call_sql"
+        ]
+        self.assertTrue(any(delta.get("delta") for delta in sql_deltas))
+        self.assertTrue(any(delta.get("done") for delta in sql_deltas))
 
 
 if __name__ == "__main__":

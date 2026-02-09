@@ -39,6 +39,7 @@ class SqlToolRequest(BaseModel):
     worldline_id: str
     sql: str
     limit: int = Field(default=100, ge=1, le=10_000)
+    call_id: str | None = None
 
 
 def validate_read_only_sql(sql: str) -> None:
@@ -87,12 +88,15 @@ async def execute_sql_tool(
             raise HTTPException(status_code=404, detail="worldline not found")
 
         parent_event_id = worldline["head_event_id"]
+        call_payload: dict[str, Any] = {"sql": body.sql, "limit": body.limit}
+        if body.call_id:
+            call_payload["call_id"] = body.call_id
         call_event_id = append_event(
             conn,
             body.worldline_id,
             parent_event_id,
             "tool_call_sql",
-            {"sql": body.sql, "limit": body.limit},
+            call_payload,
         )
         set_worldline_head(conn, body.worldline_id, call_event_id)
         conn.commit()
@@ -138,6 +142,7 @@ class PythonToolRequest(BaseModel):
     worldline_id: str
     code: str
     timeout: int = Field(default=30, ge=1, le=120)
+    call_id: str | None = None
 
 
 def _load_event_chain(conn, head_event_id: str | None) -> list[dict]:
@@ -238,12 +243,15 @@ async def execute_python_tool(
         prior_python_codes = _extract_successful_python_codes(prior_events)
         execution_code = _build_replay_code(prior_python_codes, body.code)
 
+        call_payload: dict[str, Any] = {"code": body.code, "timeout": body.timeout}
+        if body.call_id:
+            call_payload["call_id"] = body.call_id
         call_event_id = append_event(
             conn,
             body.worldline_id,
             parent_event_id,
             "tool_call_python",
-            {"code": body.code, "timeout": body.timeout},
+            call_payload,
         )
         set_worldline_head(conn, body.worldline_id, call_event_id)
         conn.commit()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -77,6 +78,7 @@ class ChatEngine:
         worldline_id: str,
         message: str,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        on_delta: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         if not message or not message.strip():
             raise HTTPException(status_code=400, detail="message must not be empty")
@@ -110,6 +112,13 @@ class ChatEngine:
                 tools=self._tool_definitions(include_python=not python_succeeded_in_turn),
                 max_output_tokens=self.max_output_tokens,
             )
+
+            if response.text and not response.tool_calls and on_delta is not None:
+                await self._emit_assistant_text_deltas(
+                    worldline_id=active_worldline_id,
+                    text=response.text,
+                    on_delta=on_delta,
+                )
 
             if response.text:
                 messages.append(ChatMessage(role="assistant", content=response.text))
@@ -149,6 +158,13 @@ class ChatEngine:
                         )
                         repeated_call_detected = True
                         break
+
+                    if on_delta is not None:
+                        await self._emit_tool_call_deltas(
+                            worldline_id=active_worldline_id,
+                            tool_call=tool_call,
+                            on_delta=on_delta,
+                        )
 
                     tool_result, switched_worldline_id = await self._execute_tool_call(
                         worldline_id=active_worldline_id,
@@ -268,7 +284,12 @@ class ChatEngine:
 
             try:
                 result = await execute_sql_tool(
-                    SqlToolRequest(worldline_id=worldline_id, sql=sql, limit=limit),
+                    SqlToolRequest(
+                        worldline_id=worldline_id,
+                        sql=sql,
+                        limit=limit,
+                        call_id=tool_call.id or None,
+                    ),
                     on_event=(
                         None
                         if on_event is None
@@ -299,6 +320,7 @@ class ChatEngine:
                         worldline_id=worldline_id,
                         code=code,
                         timeout=timeout,
+                        call_id=tool_call.id or None,
                     ),
                     on_event=(
                         None
@@ -391,6 +413,122 @@ class ChatEngine:
             sort_keys=True,
             default=str,
         )
+
+    async def _emit_assistant_text_deltas(
+        self,
+        *,
+        worldline_id: str,
+        text: str,
+        on_delta: Callable[[str, dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        if not text:
+            return
+
+        for chunk in self._chunk_text(text):
+            await on_delta(
+                worldline_id,
+                {
+                    "type": "assistant_text",
+                    "delta": chunk,
+                },
+            )
+            await asyncio.sleep(0)
+
+        await on_delta(
+            worldline_id,
+            {
+                "type": "assistant_text",
+                "done": True,
+            },
+        )
+
+    async def _emit_tool_call_deltas(
+        self,
+        *,
+        worldline_id: str,
+        tool_call: ToolCall,
+        on_delta: Callable[[str, dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        tool_name = (tool_call.name or "").strip()
+        arguments = tool_call.arguments or {}
+        call_id = tool_call.id or None
+
+        if tool_name == "run_sql":
+            sql = arguments.get("sql")
+            if isinstance(sql, str) and sql:
+                for chunk in self._chunk_code(sql):
+                    await on_delta(
+                        worldline_id,
+                        {
+                            "type": "tool_call_sql",
+                            "call_id": call_id,
+                            "delta": chunk,
+                        },
+                    )
+                    await asyncio.sleep(0)
+            await on_delta(
+                worldline_id,
+                {
+                    "type": "tool_call_sql",
+                    "call_id": call_id,
+                    "done": True,
+                },
+            )
+            return
+
+        if tool_name == "run_python":
+            code = arguments.get("code")
+            if isinstance(code, str) and code:
+                for chunk in self._chunk_code(code):
+                    await on_delta(
+                        worldline_id,
+                        {
+                            "type": "tool_call_python",
+                            "call_id": call_id,
+                            "delta": chunk,
+                        },
+                    )
+                    await asyncio.sleep(0)
+            await on_delta(
+                worldline_id,
+                {
+                    "type": "tool_call_python",
+                    "call_id": call_id,
+                    "done": True,
+                },
+            )
+
+    def _chunk_text(self, text: str, *, max_chunk_chars: int = 28) -> list[str]:
+        chunks: list[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= max_chunk_chars:
+                chunks.append(remaining)
+                break
+
+            split_at = remaining.rfind(" ", 0, max_chunk_chars + 1)
+            if split_at <= 0:
+                split_at = max_chunk_chars
+            else:
+                split_at += 1
+
+            chunks.append(remaining[:split_at])
+            remaining = remaining[split_at:]
+        return chunks
+
+    def _chunk_code(self, code: str, *, max_chunk_chars: int = 28) -> list[str]:
+        chunks: list[str] = []
+        for line in code.splitlines(keepends=True):
+            segment = line
+            while len(segment) > max_chunk_chars:
+                chunks.append(segment[:max_chunk_chars])
+                segment = segment[max_chunk_chars:]
+            if segment:
+                chunks.append(segment)
+
+        if not chunks and code:
+            chunks.append(code)
+        return chunks
 
     def _append_worldline_event(
         self,

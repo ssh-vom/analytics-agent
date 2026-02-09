@@ -94,6 +94,21 @@ async def chat_stream(body: ChatRequest):
                 )
             )
 
+        async def on_delta(worldline_id: str, delta: dict[str, Any]) -> None:
+            nonlocal seq
+            seq += 1
+            await queue.put(
+                _encode_sse_frame(
+                    {
+                        "seq": seq,
+                        "worldline_id": worldline_id,
+                        "delta": delta,
+                    },
+                    event="delta",
+                    event_id=seq,
+                )
+            )
+
         async def run_engine() -> None:
             nonlocal seq
             try:
@@ -101,6 +116,7 @@ async def chat_stream(body: ChatRequest):
                     worldline_id=body.worldline_id,
                     message=body.message,
                     on_event=on_event,
+                    on_delta=on_delta,
                 )
                 seq += 1
                 await queue.put(
