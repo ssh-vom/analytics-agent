@@ -83,7 +83,34 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertEqual(out["stdout"], "ok\n")
         self.assertEqual(out["error"], None)
         self.assertIn("result.md", [artifact["name"] for artifact in out["artifacts"]])
+        self.assertIn("artifacts", [Path(artifact["path"]).parent.name for artifact in out["artifacts"]])
         self.assertFalse((workspace / ".runner_input.py").exists())
+
+    def test_execute_discovers_artifacts_saved_in_workspace_root(self) -> None:
+        runner = DockerSandboxRunner()
+        workspace = runner._workspace_dir("w_root_artifact")
+
+        def fake_run(*args, **kwargs):
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / "line_2x.png").write_bytes(b"png")
+            return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+        with patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"), patch(
+            "sandbox.docker_runner.subprocess.run", side_effect=fake_run
+        ):
+            out = self._run(
+                runner.execute(
+                    sandbox_id="sb_w_root_artifact",
+                    worldline_id="w_root_artifact",
+                    code="print('ok')",
+                    timeout_s=5,
+                )
+            )
+
+        names = [artifact["name"] for artifact in out["artifacts"]]
+        self.assertIn("line_2x.png", names)
+        found = next(artifact for artifact in out["artifacts"] if artifact["name"] == "line_2x.png")
+        self.assertEqual(found["type"], "image")
 
     def test_execute_nonzero_sets_error(self) -> None:
         runner = DockerSandboxRunner()

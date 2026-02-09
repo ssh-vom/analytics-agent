@@ -1,5 +1,6 @@
 import time
 import json
+import textwrap
 from typing import Any, Awaitable, Callable
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -202,9 +203,23 @@ def _build_replay_code(prior_codes: list[str], current_code: str) -> str:
     if not prior_codes:
         return current_code
 
-    chunks: list[str] = []
+    chunks: list[str] = [
+        "import contextlib",
+        "import io",
+    ]
     for idx, code in enumerate(prior_codes, start=1):
-        chunks.append(f"# replay_step_{idx}\n{code}")
+        indented = textwrap.indent(code, "    ")
+        chunks.append(
+            "\n".join(
+                [
+                    f"# replay_step_{idx}",
+                    "_replay_stdout = io.StringIO()",
+                    "_replay_stderr = io.StringIO()",
+                    "with contextlib.redirect_stdout(_replay_stdout), contextlib.redirect_stderr(_replay_stderr):",
+                    indented,
+                ]
+            )
+        )
     chunks.append(f"# current_step\n{current_code}")
     return "\n\n".join(chunks)
 

@@ -96,6 +96,12 @@ class ChatEngine:
         messages = await self._build_llm_messages(active_worldline_id)
         final_text: str | None = None
         successful_tool_signatures: set[str] = set()
+        tool_call_count: dict[str, int] = {}
+        max_tool_calls_per_turn = {
+            "run_sql": 3,
+            "run_python": 2,
+            "time_travel": 1,
+        }
 
         for _ in range(self.max_iterations):
             response = await self.llm_client.generate(
@@ -110,6 +116,18 @@ class ChatEngine:
             if response.tool_calls:
                 repeated_call_detected = False
                 for tool_call in response.tool_calls:
+                    tool_name = (tool_call.name or "").strip()
+                    tool_call_count[tool_name] = tool_call_count.get(tool_name, 0) + 1
+
+                    max_calls = max_tool_calls_per_turn.get(tool_name)
+                    if max_calls is not None and tool_call_count[tool_name] > max_calls:
+                        final_text = (
+                            f"I stopped because `{tool_name}` was called too many times "
+                            "in one turn. Please refine the request and try again."
+                        )
+                        repeated_call_detected = True
+                        break
+
                     signature = self._tool_signature(
                         worldline_id=active_worldline_id,
                         tool_call=tool_call,

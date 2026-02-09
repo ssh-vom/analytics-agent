@@ -103,30 +103,49 @@ class DockerSandboxRunner:
             "/workspace/.runner_input.py",
         ]
 
-    def _scan_artifacts(self, workspace: Path) -> list[dict[str, str]]:
-        artifacts_dir = workspace / "artifacts"
-        artifacts: list[dict[str, str]] = []
-        if not artifacts_dir.exists():
-            return artifacts
+    def _classify_artifact_type(self, file_path: Path) -> str:
+        suffix = file_path.suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}:
+            return "image"
+        if suffix == ".csv":
+            return "csv"
+        if suffix == ".md":
+            return "md"
+        if suffix == ".pdf":
+            return "pdf"
+        return "file"
 
-        for file_path in sorted(artifacts_dir.rglob("*")):
-            if not file_path.is_file():
+    def _is_artifact_candidate(self, workspace: Path, file_path: Path) -> bool:
+        if not file_path.is_file():
+            return False
+
+        if file_path.name.startswith("."):
+            return False
+        if file_path.name == ".runner_input.py":
+            return False
+
+        # Exclude hidden paths under workspace.
+        for part in file_path.relative_to(workspace).parts:
+            if part.startswith("."):
+                return False
+        return True
+
+    def _scan_artifacts(self, workspace: Path) -> list[dict[str, str]]:
+        artifacts: list[dict[str, str]] = []
+        seen_paths: set[str] = set()
+
+        for file_path in sorted(workspace.rglob("*")):
+            if not self._is_artifact_candidate(workspace, file_path):
                 continue
-            suffix = file_path.suffix.lower()
-            if suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}:
-                artifact_type = "image"
-            elif suffix == ".csv":
-                artifact_type = "csv"
-            elif suffix == ".md":
-                artifact_type = "md"
-            elif suffix == ".pdf":
-                artifact_type = "pdf"
-            else:
-                artifact_type = "file"
+
+            normalized_path = str(file_path.resolve())
+            if normalized_path in seen_paths:
+                continue
+            seen_paths.add(normalized_path)
 
             artifacts.append(
                 {
-                    "type": artifact_type,
+                    "type": self._classify_artifact_type(file_path),
                     "name": file_path.name,
                     "path": str(file_path),
                 }

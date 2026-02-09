@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from chat.adapters.gemini_adapter import GeminiAdapter
 from chat.adapters.openai_adapter import OpenAiAdapter
+from chat.adapters.openrouter_adapter import OpenRouterAdapter
 from chat.factory import build_llm_client
 
 
@@ -26,6 +27,16 @@ class LlmFactoryTests(unittest.TestCase):
             client = build_llm_client(provider="gemini", model="gemini-test")
             self.assertIsInstance(client, GeminiAdapter)
             self.assertEqual(client.api_key, "k2")
+
+    def test_build_openrouter_adapter(self) -> None:
+        client = build_llm_client(
+            provider="openrouter",
+            model="openrouter/auto",
+            api_key="k3",
+        )
+        self.assertIsInstance(client, OpenRouterAdapter)
+        self.assertEqual(client.model, "openrouter/auto")
+        self.assertEqual(client.api_key, "k3")
 
     def test_build_invalid_provider_raises(self) -> None:
         with self.assertRaises(ValueError):

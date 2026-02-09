@@ -213,6 +213,84 @@ class ChatApiTests(unittest.TestCase):
             result["events"][-1]["payload"]["text"],
         )
 
+    def test_chat_stops_after_too_many_tool_calls_in_turn(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_many_1",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 1},
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_many_2",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 2},
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_many_3",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 3},
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_many_4",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 4},
+                        )
+                    ],
+                ),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="keep running sql",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 4)
+        self.assertEqual(
+            [event["type"] for event in result["events"]],
+            [
+                "user_message",
+                "tool_call_sql",
+                "tool_result_sql",
+                "tool_call_sql",
+                "tool_result_sql",
+                "tool_call_sql",
+                "tool_result_sql",
+                "assistant_message",
+            ],
+        )
+        self.assertIn(
+            "called too many times",
+            result["events"][-1]["payload"]["text"],
+        )
+
     def test_chat_time_travel_branches_and_continues_on_new_worldline(self) -> None:
         thread_id = self._create_thread()
         source_worldline_id = self._create_worldline(thread_id)
