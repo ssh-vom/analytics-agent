@@ -4,10 +4,13 @@ from dataclasses import dataclass
 
 from fastapi import HTTPException
 
+
 try:
     from backend.meta import append_event, get_conn, new_id, set_worldline_head
+    from backend.duckdb_manager import clone_worldline_db
 except ModuleNotFoundError:
     from meta import append_event, get_conn, new_id, set_worldline_head
+    from duckdb_manager import clone_worldline_db
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,11 @@ class WorldlineService:
                     options.from_event_id,
                     branch_name,
                 ),
+            )
+
+            _ = clone_worldline_db(
+                source_worldline_id=options.source_worldline_id,
+                target_worldline_id=new_worldline_id,
             )
 
             if options.append_events:

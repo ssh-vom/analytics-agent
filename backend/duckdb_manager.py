@@ -1,4 +1,5 @@
 import duckdb
+import shutil
 from pathlib import Path
 
 try:
@@ -17,6 +18,18 @@ def ensure_worldline_db(worldline_id: str) -> Path:
     conn = duckdb.connect(str(db_path))
     conn.close()
     return db_path
+
+
+def clone_worldline_db(source_worldline_id: str, target_worldline_id: str) -> Path:
+    source_path = worldline_db_path(source_worldline_id)
+    target_path = worldline_db_path(target_worldline_id)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if source_path.exists():
+        shutil.copy2(source_path, target_path)
+        return target_path
+
+    return ensure_worldline_db(target_worldline_id)
 
 
 def execute_read_query(worldline_id: str, sql: str, limit: int) -> dict:
