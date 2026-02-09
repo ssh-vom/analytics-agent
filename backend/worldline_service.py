@@ -43,12 +43,39 @@ class BranchResult:
 
 
 class WorldlineService:
+    def _event_in_history(
+        self, conn, *, head_event_id: str | None, event_id: str
+    ) -> bool:
+        if head_event_id is None:
+            return False
+
+        row = conn.execute(
+            """
+            WITH RECURSIVE chain AS (
+                SELECT id, parent_event_id
+                FROM events
+                WHERE id = ?
+                UNION ALL
+                SELECT e.id, e.parent_event_id
+                FROM events e
+                JOIN chain ON chain.parent_event_id = e.id
+            )
+            SELECT 1 AS found
+            FROM chain
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (head_event_id, event_id),
+        ).fetchone()
+
+        return row is not None
+
     def branch_from_event(self, options: BranchOptions) -> BranchResult:
         created_event_ids: list[str] = []
 
         with get_conn() as conn:
             source_worldline = conn.execute(
-                "SELECT id, thread_id FROM worldlines WHERE id = ?",
+                "SELECT id, thread_id, head_event_id FROM worldlines WHERE id = ?",
                 (options.source_worldline_id,),
             ).fetchone()
             if source_worldline is None:
@@ -63,7 +90,11 @@ class WorldlineService:
             if source_event is None:
                 raise HTTPException(status_code=404, detail="from_event_id not found")
 
-            if source_event["worldline_id"] != options.source_worldline_id:
+            if source_event["worldline_id"] != options.source_worldline_id and not self._event_in_history(
+                conn,
+                head_event_id=source_worldline["head_event_id"],
+                event_id=options.from_event_id,
+            ):
                 raise HTTPException(
                     status_code=400,
                     detail="from_event_id does not belong to source worldline",
@@ -83,7 +114,7 @@ class WorldlineService:
                     source_worldline["thread_id"],
                     options.source_worldline_id,
                     options.from_event_id,
-                    options.from_event_id,
+                    None,
                     branch_name,
                 ),
             )
@@ -93,21 +124,21 @@ class WorldlineService:
                 target_worldline_id=new_worldline_id,
             )
 
-            if options.append_events:
-                worldline_created_event_id = append_event(
-                    conn=conn,
-                    worldline_id=new_worldline_id,
-                    parent_event_id=options.from_event_id,
-                    event_type="worldline_created",
-                    payload={
-                        "new_worldline_id": new_worldline_id,
-                        "parent_worldline_id": options.source_worldline_id,
-                        "forked_from_event_id": options.from_event_id,
-                        "name": branch_name,
-                    },
-                )
-                created_event_ids.append(worldline_created_event_id)
+            worldline_created_event_id = append_event(
+                conn=conn,
+                worldline_id=new_worldline_id,
+                parent_event_id=options.from_event_id,
+                event_type="worldline_created",
+                payload={
+                    "new_worldline_id": new_worldline_id,
+                    "parent_worldline_id": options.source_worldline_id,
+                    "forked_from_event_id": options.from_event_id,
+                    "name": branch_name,
+                },
+            )
+            created_event_ids.append(worldline_created_event_id)
 
+            if options.append_events:
                 time_travel_event_id = append_event(
                     conn=conn,
                     worldline_id=new_worldline_id,
@@ -137,6 +168,8 @@ class WorldlineService:
                     set_worldline_head(conn, new_worldline_id, carried_user_event_id)
                 else:
                     set_worldline_head(conn, new_worldline_id, time_travel_event_id)
+            else:
+                set_worldline_head(conn, new_worldline_id, worldline_created_event_id)
 
             conn.commit()
 

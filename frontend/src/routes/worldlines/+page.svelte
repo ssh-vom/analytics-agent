@@ -1,44 +1,127 @@
 <script lang="ts">
-  import { GitBranch } from "lucide-svelte";
-  import { Clock } from "lucide-svelte";
-  import { ArrowRight } from "lucide-svelte";
+  import { goto } from "$app/navigation";
+  import { onMount } from "svelte";
 
-  interface Worldline {
+  import { branchWorldline, fetchThreadWorldlines, fetchWorldlineEvents } from "$lib/api/client";
+  import { activeThread, threads } from "$lib/stores/threads";
+  import type { Thread, TimelineEvent } from "$lib/types";
+  import { AlertCircle, ArrowRight, Clock, GitBranch, Loader2 } from "lucide-svelte";
+
+  interface WorldlineView {
     id: string;
     name: string;
     parentId: string | null;
     createdAt: string;
     messageCount: number;
     isActive: boolean;
+    headEventId: string | null;
   }
 
-  // Sample worldlines - in real app would come from API
-  let worldlines: Worldline[] = [
-    {
-      id: "wl-001",
-      name: "main",
-      parentId: null,
-      createdAt: new Date().toISOString(),
-      messageCount: 42,
-      isActive: true,
-    },
-    {
-      id: "wl-002",
-      name: "branch-1",
-      parentId: "wl-001",
-      createdAt: new Date(Date.now() - 86400000).toISOString(),
-      messageCount: 15,
-      isActive: false,
-    },
-    {
-      id: "wl-003",
-      name: "branch-2",
-      parentId: "wl-001",
-      createdAt: new Date(Date.now() - 172800000).toISOString(),
-      messageCount: 8,
-      isActive: false,
-    },
-  ];
+  let threadId = "";
+  let activeWorldlineId = "";
+  let worldlines: WorldlineView[] = [];
+  let loading = true;
+  let errorMessage = "";
+  let statusText = "";
+  let branchingWorldlineId: string | null = null;
+  let switchingWorldlineId: string | null = null;
+
+  onMount(async () => {
+    await threads.loadThreads();
+    activeThread.loadFromStorage();
+
+    if (!$activeThread) {
+      const firstThread = getFirstThread();
+      if (firstThread) {
+        activeThread.set(firstThread);
+        activeThread.saveToStorage(firstThread);
+      }
+    }
+
+    if ($activeThread?.id) {
+      await loadWorldlinesForThread($activeThread.id);
+      return;
+    }
+
+    loading = false;
+    errorMessage = "No thread selected. Create or open a thread first.";
+  });
+
+  $: if ($activeThread?.id && $activeThread.id !== threadId && !loading) {
+    void loadWorldlinesForThread($activeThread.id);
+  }
+
+  function getFirstThread(): Thread | null {
+    let first: Thread | null = null;
+    const unsubscribe = threads.subscribe((state) => {
+      first = state.threads[0] ?? null;
+    });
+    unsubscribe();
+    return first;
+  }
+
+  async function loadWorldlinesForThread(targetThreadId: string): Promise<void> {
+    loading = true;
+    errorMessage = "";
+    statusText = "";
+    threadId = targetThreadId;
+
+    try {
+      const response = await fetchThreadWorldlines(targetThreadId);
+      const rawWorldlines = response.worldlines;
+
+      if (rawWorldlines.length === 0) {
+        worldlines = [];
+        activeWorldlineId = "";
+        return;
+      }
+
+      const preferred = localStorage.getItem("textql_active_worldline");
+      const preferredValid =
+        typeof preferred === "string" &&
+        rawWorldlines.some((line) => line.id === preferred);
+
+      if (preferredValid) {
+        activeWorldlineId = preferred as string;
+      } else if (!rawWorldlines.some((line) => line.id === activeWorldlineId)) {
+        activeWorldlineId = rawWorldlines[0].id;
+      }
+
+      const messageCounts = await Promise.all(
+        rawWorldlines.map(async (line) => {
+          try {
+            const events = await fetchWorldlineEvents(line.id);
+            return countChatMessages(events);
+          } catch {
+            return 0;
+          }
+        }),
+      );
+
+      worldlines = rawWorldlines.map((line, index) => ({
+        id: line.id,
+        name: line.name || line.id.slice(0, 12),
+        parentId: line.parent_worldline_id,
+        createdAt: line.created_at,
+        messageCount: messageCounts[index],
+        isActive: line.id === activeWorldlineId,
+        headEventId: line.head_event_id,
+      }));
+    } catch (error) {
+      worldlines = [];
+      errorMessage =
+        error instanceof Error ? error.message : "Failed to load worldlines.";
+    } finally {
+      loading = false;
+    }
+  }
+
+  function countChatMessages(events: TimelineEvent[]): number {
+    return events.filter(
+      (event) =>
+        event.type === "user_message" || event.type === "assistant_message",
+    ).length;
+  }
 
   function formatDate(dateString: string): string {
     const date = new Date(dateString);
@@ -49,11 +132,89 @@
     });
   }
 
-  function getBranchDepth(worldline: Worldline): number {
-    if (!worldline.parentId) return 0;
-    const parent = worldlines.find(w => w.id === worldline.parentId);
-    if (!parent) return 0;
-    return 1 + getBranchDepth(parent);
+  function getBranchDepth(worldline: WorldlineView): number {
+    let depth = 0;
+    let currentParentId = worldline.parentId;
+    const seen = new Set<string>();
+
+    while (currentParentId && !seen.has(currentParentId)) {
+      seen.add(currentParentId);
+      const parent = worldlines.find((line) => line.id === currentParentId);
+      if (!parent) {
+        break;
+      }
+      depth += 1;
+      currentParentId = parent.parentId;
+    }
+    return depth;
+  }
+
+  function getParentName(worldline: WorldlineView): string {
+    if (!worldline.parentId) {
+      return "unknown";
+    }
+    return (
+      worldlines.find((line) => line.id === worldline.parentId)?.name ?? "unknown"
+    );
+  }
+
+  function nextBranchName(source: WorldlineView): string {
+    const base = source.name || "branch";
+    const siblingCount = worldlines.filter(
+      (line) => line.parentId === source.id,
+    ).length;
+    return `${base}-branch-${siblingCount + 1}`;
+  }
+
+  async function switchToWorldline(worldlineId: string): Promise<void> {
+    if (!$activeThread) {
+      return;
+    }
+
+    switchingWorldlineId = worldlineId;
+    activeWorldlineId = worldlineId;
+    worldlines = worldlines.map((line) => ({
+      ...line,
+      isActive: line.id === worldlineId,
+    }));
+    localStorage.setItem("textql_active_worldline", worldlineId);
+    activeThread.saveToStorage($activeThread);
+
+    try {
+      await goto("/chat");
+    } finally {
+      switchingWorldlineId = null;
+    }
+  }
+
+  async function branchFromWorldline(source: WorldlineView): Promise<void> {
+    if (!source.headEventId || !threadId) {
+      return;
+    }
+
+    branchingWorldlineId = source.id;
+    statusText = `Branching from ${source.name}...`;
+    errorMessage = "";
+
+    try {
+      const result = await branchWorldline(
+        source.id,
+        source.headEventId,
+        nextBranchName(source),
+      );
+      const newWorldlineId = result.new_worldline_id;
+      activeWorldlineId = newWorldlineId;
+      localStorage.setItem("textql_active_worldline", newWorldlineId);
+      statusText = `Created ${newWorldlineId.slice(0, 12)} from ${source.name}`;
+
+      await loadWorldlinesForThread(threadId);
+    } catch (error) {
+      errorMessage =
+        error instanceof Error ? error.message : "Failed to create branch.";
+      statusText = "";
+    } finally {
+      branchingWorldlineId = null;
+    }
   }
 </script>
 
@@ -62,65 +223,110 @@
     <div class="header-content">
       <div>
         <h1>Worldlines</h1>
-        <p class="subtitle">Explore and manage your analysis branches</p>
+        <p class="subtitle">Branch from any worldline, not just main.</p>
       </div>
+      {#if statusText}
+        <span class="status-chip">{statusText}</span>
+      {/if}
     </div>
   </header>
 
   <main class="worldlines-content">
-    <div class="worldlines-list">
-      {#each worldlines as worldline}
-        <div class="worldline-card" class:active={worldline.isActive}>
-          <div class="worldline-indent" style="width: {getBranchDepth(worldline) * 24}px"></div>
-          
-          <div class="worldline-main">
-            <div class="worldline-header">
-              <div class="worldline-info">
-                <GitBranch size={18} />
-                <span class="worldline-name">{worldline.name}</span>
-                {#if worldline.isActive}
-                  <span class="active-badge">Active</span>
-                {/if}
+    {#if loading}
+      <div class="loading-state">
+        <Loader2 size={18} class="spin" />
+        <span>Loading worldlines...</span>
+      </div>
+    {:else if errorMessage}
+      <div class="error-state">
+        <AlertCircle size={16} />
+        <span>{errorMessage}</span>
+      </div>
+    {:else if worldlines.length === 0}
+      <div class="empty-state">
+        <GitBranch size={18} />
+        <span>No worldlines found for this thread yet.</span>
+      </div>
+    {:else}
+      <div class="worldlines-list">
+        {#each worldlines as worldline (worldline.id)}
+          <div class="worldline-card" class:active={worldline.isActive}>
+            <div
+              class="worldline-indent"
+              style={`width: ${getBranchDepth(worldline) * 24}px`}
+            ></div>
+
+            <div class="worldline-main">
+              <div class="worldline-header">
+                <div class="worldline-info">
+                  <GitBranch size={18} />
+                  <span class="worldline-name">{worldline.name}</span>
+                  {#if worldline.isActive}
+                    <span class="active-badge">Active</span>
+                  {/if}
+                </div>
+
+                <div class="worldline-meta">
+                  <Clock size={14} />
+                  <span>{formatDate(worldline.createdAt)}</span>
+                  <span class="separator">·</span>
+                  <span>{worldline.messageCount} messages</span>
+                </div>
               </div>
-              
-              <div class="worldline-meta">
-                <Clock size={14} />
-                <span>{formatDate(worldline.createdAt)}</span>
-                <span class="separator">·</span>
-                <span>{worldline.messageCount} messages</span>
-              </div>
+
+              {#if worldline.parentId}
+                <div class="parent-info">
+                  <ArrowRight size={14} />
+                  <span>Branched from {getParentName(worldline)}</span>
+                </div>
+              {/if}
             </div>
-            
-            {#if worldline.parentId}
-              <div class="parent-info">
-                <ArrowRight size={14} />
-                <span>Branched from {worldlines.find(w => w.id === worldline.parentId)?.name || "unknown"}</span>
-              </div>
-            {/if}
+
+            <div class="worldline-actions">
+              <button
+                class="action-btn branch"
+                disabled={!worldline.headEventId || branchingWorldlineId === worldline.id}
+                on:click={() => branchFromWorldline(worldline)}
+                title={worldline.headEventId ? "Create a branch from this worldline head" : "Cannot branch from an empty worldline"}
+              >
+                {#if branchingWorldlineId === worldline.id}
+                  <Loader2 size={14} class="spin" />
+                  <span>Branching...</span>
+                {:else}
+                  <GitBranch size={14} />
+                  <span>Branch</span>
+                {/if}
+              </button>
+
+              {#if !worldline.isActive}
+                <button
+                  class="action-btn switch"
+                  disabled={switchingWorldlineId === worldline.id}
+                  on:click={() => switchToWorldline(worldline.id)}
+                >
+                  {#if switchingWorldlineId === worldline.id}
+                    <Loader2 size={14} class="spin" />
+                    <span>Opening...</span>
+                  {:else}
+                    <span>Switch</span>
+                  {/if}
+                </button>
+              {:else}
+                <span class="current-label">Current</span>
+              {/if}
+            </div>
           </div>
-          
-          <div class="worldline-actions">
-            {#if !worldline.isActive}
-              <button class="action-btn switch">Switch</button>
-            {:else}
-              <span class="current-label">Current</span>
-            {/if}
-          </div>
-        </div>
-      {/each}
-    </div>
+        {/each}
+      </div>
+    {/if}
 
     <div class="worldlines-info">
-      <h3>About Worldlines</h3>
+      <h3>Branching Rules</h3>
       <p>
-        Worldlines represent different branches of your analysis session. 
-        You can create branches at any point to explore alternative queries 
-        or analysis paths without losing your previous work.
+        Branch creates a new child worldline from the selected worldline's current head event.
       </p>
       <p>
-        The "main" worldline is your primary session. Create branches when you 
-        want to experiment with different approaches or answer follow-up questions 
-        in isolation.
+        If a worldline has no head event yet, branch is disabled until it has at least one event.
       </p>
     </div>
   </main>
@@ -140,7 +346,11 @@
   }
 
   .header-content {
-    max-width: 900px;
+    max-width: 980px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
   }
 
   h1 {
@@ -157,12 +367,41 @@
     font-size: 15px;
   }
 
+  .status-chip {
+    font-size: 12px;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-full);
+    padding: 6px 10px;
+    background: var(--surface-1);
+    white-space: nowrap;
+  }
+
   .worldlines-content {
     padding: var(--space-6) var(--space-8);
-    max-width: 900px;
+    max-width: 980px;
     display: flex;
     flex-direction: column;
     gap: var(--space-8);
+  }
+
+  .loading-state,
+  .error-state,
+  .empty-state {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-lg);
+    background: var(--surface-0);
+    color: var(--text-muted);
+    padding: var(--space-4);
+  }
+
+  .error-state {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: var(--danger-muted);
   }
 
   .worldlines-list {
@@ -189,11 +428,16 @@
 
   .worldline-card.active {
     border-color: var(--border-accent);
-    background: linear-gradient(135deg, var(--surface-0) 0%, var(--accent-orange-muted) 100%);
+    background: linear-gradient(
+      135deg,
+      var(--surface-0) 0%,
+      var(--accent-orange-muted) 100%
+    );
   }
 
   .worldline-indent {
     flex-shrink: 0;
+    min-height: 1px;
   }
 
   .worldline-main {
@@ -255,6 +499,9 @@
 
   .worldline-actions {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
   }
 
   .action-btn {
@@ -264,14 +511,22 @@
     border-radius: var(--radius-md);
     color: var(--text-secondary);
     font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
     cursor: pointer;
     transition: all var(--transition-fast);
   }
 
-  .action-btn:hover {
+  .action-btn:hover:not(:disabled) {
     background: var(--surface-hover);
     border-color: var(--border-medium);
     color: var(--text-primary);
+  }
+
+  .action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .action-btn.switch {
@@ -280,7 +535,7 @@
     color: var(--accent-cyan);
   }
 
-  .action-btn.switch:hover {
+  .action-btn.switch:hover:not(:disabled) {
     background: var(--accent-cyan);
     color: #111;
   }
@@ -314,5 +569,15 @@
 
   .worldlines-info p:last-child {
     margin-bottom: 0;
+  }
+
+  :global(.spin) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

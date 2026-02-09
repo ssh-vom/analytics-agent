@@ -131,11 +131,26 @@ class Stage1ApiDbTests(unittest.TestCase):
                 """,
                 (new_worldline_id,),
             ).fetchone()
+            head_event = conn.execute(
+                """
+                SELECT id, worldline_id, parent_event_id, type, payload_json
+                FROM events
+                WHERE id = ?
+                """,
+                (row["head_event_id"],),
+            ).fetchone()
 
         self.assertEqual(row["thread_id"], thread_id)
         self.assertEqual(row["parent_worldline_id"], source_worldline_id)
         self.assertEqual(row["forked_from_event_id"], "event_seed_1")
-        self.assertEqual(row["head_event_id"], "event_seed_1")
+        self.assertNotEqual(row["head_event_id"], "event_seed_1")
+        self.assertEqual(head_event["worldline_id"], new_worldline_id)
+        self.assertEqual(head_event["parent_event_id"], "event_seed_1")
+        self.assertEqual(head_event["type"], "worldline_created")
+        self.assertEqual(
+            json.loads(head_event["payload_json"])["new_worldline_id"],
+            new_worldline_id,
+        )
         self.assertEqual(row["name"], "branch-a")
 
     def test_get_worldline_events_returns_chain(self) -> None:
