@@ -17,8 +17,8 @@ try:
     from backend.tools import (
         PythonToolRequest,
         SqlToolRequest,
-        run_python,
-        run_sql,
+        execute_python_tool,
+        execute_sql_tool,
     )
     from backend.worldlines import get_worldline_events
     from backend.worldline_service import BranchOptions, WorldlineService
@@ -28,8 +28,8 @@ except ModuleNotFoundError:
     from tools import (
         PythonToolRequest,
         SqlToolRequest,
-        run_python,
-        run_sql,
+        execute_python_tool,
+        execute_sql_tool,
     )
     from worldlines import get_worldline_events
     from worldline_service import BranchOptions, WorldlineService
@@ -85,11 +85,13 @@ class ChatEngine:
         starting_rowid_by_worldline = {
             active_worldline_id: self._max_worldline_rowid(active_worldline_id)
         }
-        self._append_worldline_event(
+        user_event = self._append_worldline_event(
             worldline_id=active_worldline_id,
             event_type="user_message",
             payload={"text": message},
         )
+        if on_event is not None:
+            await on_event(active_worldline_id, user_event)
 
         messages = await self._build_llm_messages(active_worldline_id)
         final_text: str | None = None
@@ -110,6 +112,7 @@ class ChatEngine:
                         worldline_id=active_worldline_id,
                         tool_call=tool_call,
                         carried_user_message=message,
+                        on_event=on_event,
                     )
                     if (
                         switched_worldline_id
@@ -142,18 +145,18 @@ class ChatEngine:
                 "I reached the tool-loop limit before producing a final answer."
             )
 
-        self._append_worldline_event(
+        assistant_event = self._append_worldline_event(
             worldline_id=active_worldline_id,
             event_type="assistant_message",
             payload={"text": final_text},
         )
+        if on_event is not None:
+            await on_event(active_worldline_id, assistant_event)
+
         events = self._events_since_rowid(
             worldline_id=active_worldline_id,
             rowid=starting_rowid_by_worldline[active_worldline_id],
         )
-        if on_event is not None:
-            for event in events:
-                await on_event(active_worldline_id, event)
 
         return (
             active_worldline_id,
@@ -192,6 +195,7 @@ class ChatEngine:
         worldline_id: str,
         tool_call: ToolCall,
         carried_user_message: str,
+        on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         name = (tool_call.name or "").strip()
         args = tool_call.arguments or {}
@@ -209,8 +213,13 @@ class ChatEngine:
             limit = max(1, min(limit, 10_000))
 
             try:
-                result = await run_sql(
-                    SqlToolRequest(worldline_id=worldline_id, sql=sql, limit=limit)
+                result = await execute_sql_tool(
+                    SqlToolRequest(worldline_id=worldline_id, sql=sql, limit=limit),
+                    on_event=(
+                        None
+                        if on_event is None
+                        else lambda event: on_event(worldline_id, event)
+                    ),
                 )
                 return result, None
             except HTTPException as exc:
@@ -231,12 +240,17 @@ class ChatEngine:
             timeout = max(1, min(timeout, 120))
 
             try:
-                result = await run_python(
+                result = await execute_python_tool(
                     PythonToolRequest(
                         worldline_id=worldline_id,
                         code=code,
                         timeout=timeout,
-                    )
+                    ),
+                    on_event=(
+                        None
+                        if on_event is None
+                        else lambda event: on_event(worldline_id, event)
+                    ),
                 )
                 return result, None
             except HTTPException as exc:
@@ -262,6 +276,10 @@ class ChatEngine:
                         carried_user_message=carried_user_message,
                     )
                 )
+                if on_event is not None:
+                    for event_id in branch_result.created_event_ids:
+                        event = self._load_event_by_id(event_id)
+                        await on_event(branch_result.new_worldline_id, event)
                 return branch_result.to_tool_result(), branch_result.new_worldline_id
             except HTTPException as exc:
                 return {"error": str(exc.detail), "status_code": exc.status_code}, None
@@ -314,7 +332,7 @@ class ChatEngine:
         worldline_id: str,
         event_type: str,
         payload: dict[str, Any],
-    ) -> str:
+    ) -> dict[str, Any]:
         with get_conn() as conn:
             worldline = get_worldline_row(conn, worldline_id)
             if worldline is None:
@@ -330,7 +348,26 @@ class ChatEngine:
             )
             set_worldline_head(conn, worldline_id, event_id)
             conn.commit()
-            return event_id
+            return self._load_event_by_id(event_id)
+
+    def _load_event_by_id(self, event_id: str) -> dict[str, Any]:
+        with get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, parent_event_id, type, payload_json, created_at
+                FROM events
+                WHERE id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+
+        return {
+            "id": row["id"],
+            "parent_event_id": row["parent_event_id"],
+            "type": row["type"],
+            "payload": json.loads(row["payload_json"]),
+            "created_at": row["created_at"],
+        }
 
     def _max_worldline_rowid(self, worldline_id: str) -> int:
         with get_conn() as conn:

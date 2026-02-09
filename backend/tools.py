@@ -1,5 +1,6 @@
 import time
 import json
+from typing import Any, Awaitable, Callable
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -30,6 +31,7 @@ router = APIRouter(prefix="/api/tools", tags=["tools"])
 
 READ_ONLY_PREFIXES = ("select", "with", "show", "describe", "explain")
 _sandbox_manager = SandboxManager(DockerSandboxRunner())
+ToolEventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class SqlToolRequest(BaseModel):
@@ -53,8 +55,28 @@ def get_sandbox_manager() -> SandboxManager:
     return _sandbox_manager
 
 
-@router.post("/sql")
-async def run_sql(body: SqlToolRequest):
+def _load_event_by_id(conn, event_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT id, parent_event_id, type, payload_json, created_at
+        FROM events
+        WHERE id = ?
+        """,
+        (event_id,),
+    ).fetchone()
+    return {
+        "id": row["id"],
+        "parent_event_id": row["parent_event_id"],
+        "type": row["type"],
+        "payload": json.loads(row["payload_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+async def execute_sql_tool(
+    body: SqlToolRequest,
+    on_event: ToolEventCallback | None = None,
+):
     validate_read_only_sql(body.sql)
     started = time.perf_counter()
 
@@ -71,6 +93,10 @@ async def run_sql(body: SqlToolRequest):
             "tool_call_sql",
             {"sql": body.sql, "limit": body.limit},
         )
+        set_worldline_head(conn, body.worldline_id, call_event_id)
+        conn.commit()
+        if on_event is not None:
+            await on_event(_load_event_by_id(conn, call_event_id))
 
         try:
             result = execute_read_query(body.worldline_id, body.sql, body.limit)
@@ -84,6 +110,8 @@ async def run_sql(body: SqlToolRequest):
             )
             set_worldline_head(conn, body.worldline_id, result_event_id)
             conn.commit()
+            if on_event is not None:
+                await on_event(_load_event_by_id(conn, result_event_id))
             return result
         except Exception as exc:
             result_event_id = append_event(
@@ -95,7 +123,14 @@ async def run_sql(body: SqlToolRequest):
             )
             set_worldline_head(conn, body.worldline_id, result_event_id)
             conn.commit()
+            if on_event is not None:
+                await on_event(_load_event_by_id(conn, result_event_id))
             raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/sql")
+async def run_sql(body: SqlToolRequest):
+    return await execute_sql_tool(body)
 
 
 class PythonToolRequest(BaseModel):
@@ -174,8 +209,10 @@ def _build_replay_code(prior_codes: list[str], current_code: str) -> str:
     return "\n\n".join(chunks)
 
 
-@router.post("/python")
-async def run_python(body: PythonToolRequest):
+async def execute_python_tool(
+    body: PythonToolRequest,
+    on_event: ToolEventCallback | None = None,
+):
     started = time.perf_counter()
     with get_conn() as conn:
         worldline = get_worldline_row(conn, body.worldline_id)
@@ -193,6 +230,11 @@ async def run_python(body: PythonToolRequest):
             "tool_call_python",
             {"code": body.code, "timeout": body.timeout},
         )
+        set_worldline_head(conn, body.worldline_id, call_event_id)
+        conn.commit()
+        if on_event is not None:
+            await on_event(_load_event_by_id(conn, call_event_id))
+
         try:
             raw_result = await _sandbox_manager.execute(
                 worldline_id=body.worldline_id,
@@ -257,6 +299,8 @@ async def run_python(body: PythonToolRequest):
 
             set_worldline_head(conn, body.worldline_id, result_event_id)
             conn.commit()
+            if on_event is not None:
+                await on_event(_load_event_by_id(conn, result_event_id))
             return api_result
         except Exception as exc:
             result_event_id = append_event(
@@ -268,4 +312,11 @@ async def run_python(body: PythonToolRequest):
             )
             set_worldline_head(conn, body.worldline_id, result_event_id)
             conn.commit()
+            if on_event is not None:
+                await on_event(_load_event_by_id(conn, result_event_id))
             raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/python")
+async def run_python(body: PythonToolRequest):
+    return await execute_python_tool(body)

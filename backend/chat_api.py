@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -74,41 +76,68 @@ async def chat_stream(body: ChatRequest):
     )
 
     async def event_stream() -> AsyncIterator[str]:
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
         seq = 0
-        try:
-            active_worldline_id, events = await engine.run_turn(
-                worldline_id=body.worldline_id,
-                message=body.message,
-            )
-            for event in events:
-                seq += 1
-                yield _encode_sse_frame(
+
+        async def on_event(worldline_id: str, event: dict[str, Any]) -> None:
+            nonlocal seq
+            seq += 1
+            await queue.put(
+                _encode_sse_frame(
                     {
                         "seq": seq,
-                        "worldline_id": active_worldline_id,
+                        "worldline_id": worldline_id,
                         "event": event,
                     },
                     event="event",
                     event_id=seq,
                 )
+            )
 
-            seq += 1
-            yield _encode_sse_frame(
-                {
-                    "seq": seq,
-                    "worldline_id": active_worldline_id,
-                    "done": True,
-                },
-                event="done",
-                event_id=seq,
-            )
-        except Exception as exc:
-            seq += 1
-            yield _encode_sse_frame(
-                {"seq": seq, "error": str(exc)},
-                event="error",
-                event_id=seq,
-            )
+        async def run_engine() -> None:
+            nonlocal seq
+            try:
+                active_worldline_id, _ = await engine.run_turn(
+                    worldline_id=body.worldline_id,
+                    message=body.message,
+                    on_event=on_event,
+                )
+                seq += 1
+                await queue.put(
+                    _encode_sse_frame(
+                        {
+                            "seq": seq,
+                            "worldline_id": active_worldline_id,
+                            "done": True,
+                        },
+                        event="done",
+                        event_id=seq,
+                    )
+                )
+            except Exception as exc:
+                seq += 1
+                await queue.put(
+                    _encode_sse_frame(
+                        {"seq": seq, "error": str(exc)},
+                        event="error",
+                        event_id=seq,
+                    )
+                )
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(run_engine())
+        try:
+            while True:
+                frame = await queue.get()
+                if frame is None:
+                    break
+                yield frame
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     return StreamingResponse(
         event_stream(),

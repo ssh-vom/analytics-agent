@@ -295,6 +295,47 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(payloads[1]["event"]["type"], "assistant_message")
         self.assertTrue(payloads[-1]["done"])
 
+    def test_chat_stream_emits_tool_call_and_tool_result(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_sse_sql_1",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(text="done", tool_calls=[]),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            response = self._run(
+                chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="stream sql tool",
+                        provider="openai",
+                    )
+                )
+            )
+            raw_stream = self._run(self._consume_stream(response))
+            payloads = self._extract_sse_payloads(raw_stream)
+
+        event_types = [
+            payload["event"]["type"] for payload in payloads if "event" in payload
+        ]
+        self.assertEqual(
+            event_types,
+            ["user_message", "tool_call_sql", "tool_result_sql", "assistant_message"],
+        )
+        self.assertTrue(payloads[-1]["done"])
+
 
 if __name__ == "__main__":
     unittest.main()
