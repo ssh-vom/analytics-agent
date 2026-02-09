@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -24,10 +25,10 @@ class SandboxLimits:
 class DockerSandboxRunner:
     def __init__(
         self,
-        image: str = "python:3.11-slim",
+        image: str | None = None,
         limits: SandboxLimits | None = None,
     ) -> None:
-        self.image = image
+        self.image = image or os.getenv("SANDBOX_IMAGE", "textql-sandbox:py311")
         self.limits = limits or SandboxLimits()
 
     async def execute(
@@ -80,6 +81,8 @@ class DockerSandboxRunner:
             "/tmp:rw,nosuid,nodev,size=64m",
             "-e",
             "MPLBACKEND=Agg",
+            "-e",
+            "MPLCONFIGDIR=/tmp/matplotlib",
             "-e",
             "PYTHONDONTWRITEBYTECODE=1",
             "-v",

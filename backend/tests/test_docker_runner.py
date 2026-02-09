@@ -1,4 +1,5 @@
 import asyncio
+import os
 import subprocess
 import tempfile
 import unittest
@@ -45,6 +46,17 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertIn("--name", cmd)
         self.assertEqual(cmd[cmd.index("--name") + 1], "sb_1")
         self.assertIn("-d", cmd)
+        self.assertIn("MPLCONFIGDIR=/tmp/matplotlib", cmd)
+
+    def test_default_image_is_textql_sandbox(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            runner = DockerSandboxRunner()
+        self.assertEqual(runner.image, "textql-sandbox:py311")
+
+    def test_image_can_be_overridden_by_env(self) -> None:
+        with patch.dict(os.environ, {"SANDBOX_IMAGE": "custom/sandbox:latest"}, clear=True):
+            runner = DockerSandboxRunner()
+        self.assertEqual(runner.image, "custom/sandbox:latest")
 
     def test_execute_success_returns_stdout_and_artifacts(self) -> None:
         runner = DockerSandboxRunner()
