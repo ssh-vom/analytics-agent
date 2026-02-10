@@ -93,6 +93,42 @@ export interface SseDoneFrame {
   done: true;
 }
 
+export type ChatJobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface ChatJob {
+  id: string;
+  thread_id: string;
+  worldline_id: string;
+  status: ChatJobStatus;
+  error: string | null;
+  request: {
+    message?: string;
+    provider?: string | null;
+    model?: string | null;
+    max_iterations?: number;
+  };
+  result_worldline_id: string | null;
+  result_summary: {
+    event_count?: number;
+    assistant_preview?: string;
+  } | null;
+  seen_at: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  queue_position?: number;
+}
+
+export interface ChatJobsResponse {
+  jobs: ChatJob[];
+  count: number;
+}
+
 export interface SqlResultPayload {
   columns?: Array<{ name: string; type: string }>;
   rows?: unknown[][];

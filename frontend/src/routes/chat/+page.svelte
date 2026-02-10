@@ -16,9 +16,12 @@
   import WorldlinePicker from "$lib/components/WorldlinePicker.svelte";
   import { activeThread, threads } from "$lib/stores/threads";
   import {
+    ackChatJob,
     branchWorldline,
+    createChatJob,
     createThread,
     createWorldline,
+    fetchChatJobs,
     fetchThreadWorldlines,
     fetchWorldlineEvents,
     streamChatTurn,
@@ -30,7 +33,7 @@
     insertOptimisticEvent,
     replaceOptimisticWithReal,
   } from "$lib/chat/optimisticState";
-  import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
+  import type { ChatJob, Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
   import { Database } from "lucide-svelte";
@@ -69,6 +72,19 @@
   let hasPendingScroll = false;
   let pendingScrollForce = false;
   let scrollAttemptsQueue: (() => void)[] = [];
+  let chatJobsById: Record<string, ChatJob> = {};
+  let activeWorldlineQueueDepth = 0;
+  let isPollingJobs = false;
+  let jobsPollInterval: ReturnType<typeof setInterval> | null = null;
+  let jobToasts: Array<{
+    id: string;
+    jobId: string;
+    status: "completed" | "failed";
+    title: string;
+    message: string;
+    resultWorldlineId: string | null;
+  }> = [];
+  const notifiedJobIds = new Set<string>();
 
   // CSV Import state
   let uploadedFiles: File[] = [];
@@ -123,6 +139,7 @@
     await tick();
     await refreshWorldlineContextTables();
     scrollFeedToBottom(true);
+    startJobsPolling();
   });
 
   onDestroy(() => {
@@ -133,6 +150,10 @@
     hasPendingScroll = false;
     pendingScrollForce = false;
     scrollAttemptsQueue = [];
+    if (jobsPollInterval) {
+      clearInterval(jobsPollInterval);
+      jobsPollInterval = null;
+    }
   });
 
   $: if ($activeThread?.id && isReady && $activeThread.id !== threadId && !isHydratingThread) {
@@ -229,6 +250,122 @@
     const next = { ...streamingStateByWorldline };
     delete next[worldlineId];
     streamingStateByWorldline = next;
+  }
+
+  function startJobsPolling(): void {
+    if (jobsPollInterval) {
+      return;
+    }
+    void pollChatJobs();
+    jobsPollInterval = setInterval(() => {
+      void pollChatJobs();
+    }, 2000);
+  }
+
+  async function pollChatJobs(): Promise<void> {
+    if (!threadId || isPollingJobs) {
+      return;
+    }
+    isPollingJobs = true;
+    try {
+      const response = await fetchChatJobs({
+        threadId,
+        statuses: ["queued", "running", "completed", "failed"],
+        limit: 200,
+      });
+
+      const previousJobsById = chatJobsById;
+      const nextJobsById: Record<string, ChatJob> = {};
+      for (const job of response.jobs) {
+        nextJobsById[job.id] = job;
+      }
+      chatJobsById = nextJobsById;
+
+      activeWorldlineQueueDepth = response.jobs.filter(
+        (job) =>
+          job.worldline_id === activeWorldlineId &&
+          (job.status === "queued" || job.status === "running"),
+      ).length;
+
+      for (const job of response.jobs) {
+        const previous = previousJobsById[job.id];
+        const transitionedToFinal =
+          (!previous || previous.status !== job.status) &&
+          (job.status === "completed" || job.status === "failed");
+        if (!transitionedToFinal) {
+          continue;
+        }
+        if (job.seen_at || notifiedJobIds.has(job.id)) {
+          continue;
+        }
+        notifiedJobIds.add(job.id);
+        pushJobToast(job);
+        void ackChatJob(job.id, true).catch(() => undefined);
+      }
+    } catch {
+      // Ignore polling errors and retry on next tick.
+    } finally {
+      isPollingJobs = false;
+    }
+  }
+
+  function pushJobToast(job: ChatJob): void {
+    const preview = job.result_summary?.assistant_preview?.trim();
+    const fallbackMessage =
+      job.status === "completed"
+        ? "Background request finished."
+        : job.error || "Background request failed.";
+    jobToasts = [
+      ...jobToasts,
+      {
+        id: `${job.id}-${Date.now()}`,
+        jobId: job.id,
+        status: job.status,
+        title:
+          job.status === "completed"
+            ? "Background analysis complete"
+            : "Background analysis failed",
+        message: preview && job.status === "completed" ? preview : fallbackMessage,
+        resultWorldlineId: job.result_worldline_id,
+      },
+    ].slice(-4);
+  }
+
+  function dismissJobToast(toastId: string): void {
+    jobToasts = jobToasts.filter((toast) => toast.id !== toastId);
+  }
+
+  async function openToastResult(toastId: string, worldlineId: string | null): Promise<void> {
+    dismissJobToast(toastId);
+    if (!worldlineId) {
+      return;
+    }
+    await refreshWorldlines();
+    await selectWorldline(worldlineId);
+    statusText = "Loaded background result";
+    scrollFeedToBottom(true);
+  }
+
+  async function queuePromptAsJob(message: string, worldlineId: string): Promise<void> {
+    try {
+      const contextualMessage = buildContextualMessage(message);
+      const job = await createChatJob({
+        worldlineId,
+        message: contextualMessage,
+        provider,
+        model: model.trim() || undefined,
+        maxIterations: provider === "gemini" ? 10 : 20,
+      });
+      statusText =
+        job.queue_position && job.queue_position > 1
+          ? `Queued request (${job.queue_position} in line)`
+          : "Queued request";
+      prompt = "";
+      closeContextMenus();
+      await pollChatJobs();
+    } catch (error) {
+      statusText = error instanceof Error ? error.message : "Failed to queue request";
+    }
   }
 
   function loadConnectorsFromStorage(): void {
@@ -333,6 +470,10 @@
       activeWorldlineId = "";
       selectedArtifactId = null;
       resetStreamingDrafts();
+      chatJobsById = {};
+      activeWorldlineQueueDepth = 0;
+      jobToasts = [];
+      notifiedJobIds.clear();
 
       await refreshWorldlines();
 
@@ -507,10 +648,15 @@
   async function sendPrompt(): Promise<void> {
     const message = prompt.trim();
     const isCurrentWorldlineSending = Boolean(activeWorldlineId && sendingByWorldline[activeWorldlineId]);
-    if (!message || !activeWorldlineId || isCurrentWorldlineSending) {
+    if (!message || !activeWorldlineId) {
       if (!activeWorldlineId) {
         statusText = "Error: No active worldline. Please refresh the page.";
       }
+      return;
+    }
+
+    if (isCurrentWorldlineSending) {
+      await queuePromptAsJob(message, activeWorldlineId);
       return;
     }
 
@@ -752,6 +898,9 @@
     <div class="top-bar-right">
       <span class="status" class:ready={statusText === "Ready"}>
         {statusText}
+        {#if activeWorldlineQueueDepth > 0}
+          <span class="queue-chip">{activeWorldlineQueueDepth} queued</span>
+        {/if}
       </span>
       
       <button class="db-selector">
@@ -1086,17 +1235,44 @@
       <button 
         type="submit" 
         class="send-btn"
-        disabled={isActiveWorldlineSending || !isReady || !prompt.trim()}
+        disabled={!isReady || !prompt.trim()}
       >
-        {#if isActiveWorldlineSending}
-          <span class="loading"></span>
-        {:else}
-          <Send size={18} />
-        {/if}
+        <Send size={18} />
       </button>
     </form>
   </div>
 </div>
+
+{#if jobToasts.length > 0}
+  <aside class="job-toast-stack" aria-live="polite">
+    {#each jobToasts as toast (toast.id)}
+      <article class="job-toast" class:failed={toast.status === "failed"}>
+        <div class="job-toast-copy">
+          <strong>{toast.title}</strong>
+          <p>{toast.message}</p>
+        </div>
+        <div class="job-toast-actions">
+          {#if toast.status === "completed" && toast.resultWorldlineId}
+            <button
+              type="button"
+              class="toast-btn"
+              on:click={() => openToastResult(toast.id, toast.resultWorldlineId)}
+            >
+              Open
+            </button>
+          {/if}
+          <button
+            type="button"
+            class="toast-btn ghost"
+            on:click={() => dismissJobToast(toast.id)}
+          >
+            Dismiss
+          </button>
+        </div>
+      </article>
+    {/each}
+  </aside>
+{/if}
 
 <style>
   .chat-container {
@@ -1233,6 +1409,17 @@
   .status.ready {
     color: var(--success);
     border-color: var(--accent-green-muted);
+  }
+
+  .queue-chip {
+    margin-left: var(--space-2);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text-secondary);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 
   .db-selector {
@@ -1593,15 +1780,6 @@
     cursor: not-allowed;
   }
 
-  .loading {
-    width: 16px;
-    height: 16px;
-    border: 2px solid rgba(0, 0, 0, 0.2);
-    border-top-color: #111;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-
   @media (max-width: 1100px) {
     .workspace {
       grid-template-columns: 1fr;
@@ -1872,5 +2050,84 @@
   .thinking-label {
     font-size: 12px;
     font-family: var(--font-mono);
+  }
+
+  .job-toast-stack {
+    position: fixed;
+    right: var(--space-4);
+    bottom: calc(92px + var(--space-2));
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    width: min(360px, calc(100vw - 24px));
+    z-index: 70;
+  }
+
+  .job-toast {
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    background: var(--bg-1);
+    box-shadow: var(--shadow-sm);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .job-toast.failed {
+    border-color: var(--danger);
+  }
+
+  .job-toast-copy {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .job-toast-copy strong {
+    font-size: 12px;
+    color: var(--text-primary);
+  }
+
+  .job-toast-copy p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .job-toast-actions {
+    display: flex;
+    gap: var(--space-2);
+  }
+
+  .toast-btn {
+    border: 1px solid var(--accent-green);
+    border-radius: var(--radius-sm);
+    background: var(--accent-green-muted);
+    color: var(--accent-green);
+    font-size: 11px;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+
+  .toast-btn.ghost {
+    border-color: var(--border-soft);
+    background: transparent;
+    color: var(--text-dim);
+  }
+
+  .toast-btn:hover {
+    border-color: var(--border-medium);
+    color: var(--text-primary);
+  }
+
+  @media (max-width: 768px) {
+    .job-toast-stack {
+      right: var(--space-2);
+      left: var(--space-2);
+      width: auto;
+      bottom: calc(84px + var(--space-2));
+    }
   }
 </style>

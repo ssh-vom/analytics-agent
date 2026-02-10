@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
   import { createEventDispatcher } from "svelte";
 
   import type { WorldlineItem } from "$lib/types";
@@ -22,20 +21,12 @@
     worldlines.find((line) => line.id === activeWorldlineId) ?? null;
   $: treeRows = buildTreeRows(worldlines);
 
-  onMount(() => {
-    document.addEventListener("mousedown", handleDocumentMouseDown);
-  });
-
-  onDestroy(() => {
-    document.removeEventListener("mousedown", handleDocumentMouseDown);
-  });
-
-  function handleDocumentMouseDown(event: MouseEvent): void {
+  function handleContainerFocusOut(event: FocusEvent): void {
     if (!isOpen || !containerElement) {
       return;
     }
-    const target = event.target;
-    if (target instanceof Node && !containerElement.contains(target)) {
+    const related = event.relatedTarget;
+    if (!(related instanceof Node) || !containerElement.contains(related)) {
       isOpen = false;
     }
   }
@@ -112,7 +103,7 @@
   }
 </script>
 
-<div class="picker" bind:this={containerElement}>
+<div class="picker" bind:this={containerElement} on:focusout={handleContainerFocusOut}>
   <span class="picker-label">Worldline</span>
   <button type="button" class="picker-trigger" on:click={toggleOpen}>
     <span class="active-name">{activeWorldline?.name || activeWorldline?.id || "Select worldline"}</span>

@@ -10,7 +10,11 @@ try:
     from backend.worldlines import router as wordlines_router
     from backend.tools import router as tools_router, get_sandbox_manager
     from backend.artifacts import router as artifacts_router
-    from backend.chat_api import router as chat_router
+    from backend.chat_api import (
+        router as chat_router,
+        start_chat_runtime,
+        shutdown_chat_runtime,
+    )
     from backend.seed_data_api import router as seed_data_router
 except ModuleNotFoundError:
     from env_loader import load_env_once
@@ -19,7 +23,11 @@ except ModuleNotFoundError:
     from worldlines import router as wordlines_router
     from tools import router as tools_router, get_sandbox_manager
     from artifacts import router as artifacts_router
-    from chat_api import router as chat_router
+    from chat_api import (
+        router as chat_router,
+        start_chat_runtime,
+        shutdown_chat_runtime,
+    )
     from seed_data_api import router as seed_data_router
 
 REAPER_INTERVAL_SECONDS = int(os.getenv("SANDBOX_REAPER_INTERVAL_SECONDS", "60"))
@@ -51,6 +59,7 @@ async def startup() -> None:
     app.state.sandbox_reaper_task = asyncio.create_task(
         _sandbox_reaper_loop(stop_event)
     )
+    await start_chat_runtime()
 
 
 @app.on_event("shutdown")
@@ -65,6 +74,7 @@ async def shutdown() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
+    await shutdown_chat_runtime()
     await get_sandbox_manager().shutdown_all()
 
 

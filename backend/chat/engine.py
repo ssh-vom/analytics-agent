@@ -240,7 +240,6 @@ class ChatEngine:
                         tool_call=tool_call,
                     )
                     if signature in successful_tool_signatures:
-                        cached_result = successful_tool_results.get(signature)
                         if on_delta is not None and delta_type is not None:
                             await on_delta(
                                 active_worldline_id,
@@ -248,27 +247,9 @@ class ChatEngine:
                                     "type": delta_type,
                                     "call_id": tool_call.id or None,
                                     "skipped": True,
-                                    "reason": "reused_cached_tool_result",
+                                    "reason": "repeated_identical_tool_call",
                                 },
                             )
-                        if cached_result is not None:
-                            serialized_cached = json.dumps(
-                                cached_result,
-                                ensure_ascii=True,
-                                default=str,
-                            )
-                            if len(serialized_cached) > 12_000:
-                                serialized_cached = (
-                                    serialized_cached[:12_000] + "...(truncated)"
-                                )
-                            messages.append(
-                                ChatMessage(
-                                    role="tool",
-                                    content=serialized_cached,
-                                    tool_call_id=tool_call.id or None,
-                                )
-                            )
-                            continue
                         final_text = (
                             "I stopped because the model repeated the same tool call "
                             "with identical arguments in this turn."

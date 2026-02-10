@@ -68,6 +68,36 @@ SCHEMA_STATEMENTS = (
         FOREIGN KEY (event_id) REFERENCES events(id)
     );
     """,
+    """
+    CREATE TABLE IF NOT EXISTS chat_turn_jobs (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        worldline_id TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT NULL,
+        result_worldline_id TEXT NULL,
+        result_summary_json TEXT NULL,
+        seen_at DATETIME NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        started_at DATETIME NULL,
+        finished_at DATETIME NULL,
+        FOREIGN KEY (thread_id) REFERENCES threads(id),
+        FOREIGN KEY (worldline_id) REFERENCES worldlines(id)
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_chat_turn_jobs_worldline_status_created
+    ON chat_turn_jobs (worldline_id, status, created_at);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_chat_turn_jobs_thread_created
+    ON chat_turn_jobs (thread_id, created_at);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_chat_turn_jobs_status_created
+    ON chat_turn_jobs (status, created_at);
+    """,
 )
 
 

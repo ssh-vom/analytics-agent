@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import time
 
 import chat_api
 import meta
@@ -114,6 +115,21 @@ class ChatApiTests(unittest.TestCase):
             )
         )
         return response["worldline_id"]
+
+    async def _wait_for_job_status(
+        self,
+        job_id: str,
+        *,
+        expected: set[str],
+        timeout_s: float = 2.0,
+    ) -> dict:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            job = await chat_api.get_chat_job(job_id)
+            if job["status"] in expected:
+                return job
+            await asyncio.sleep(0.03)
+        raise AssertionError(f"job {job_id} did not reach expected statuses {expected}")
 
     # ---- non-streaming endpoint tests (unchanged logic) ---------------------
 
@@ -829,6 +845,127 @@ class ChatApiTests(unittest.TestCase):
 
         # The final payload should be done
         self.assertTrue(payloads[-1]["done"])
+
+    # ---- job queue endpoint tests --------------------------------------------
+
+    def test_create_chat_job_processes_in_background(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[LlmResponse(text="Background complete.", tool_calls=[])]
+        )
+
+        async def scenario() -> tuple[dict, dict]:
+            with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+                created = await chat_api.create_chat_job(
+                    chat_api.ChatJobRequest(
+                        worldline_id=worldline_id,
+                        message="run this in background",
+                        provider="openai",
+                    )
+                )
+                done = await self._wait_for_job_status(
+                    created["id"],
+                    expected={"completed", "failed"},
+                    timeout_s=3.0,
+                )
+                return created, done
+
+        created, done = self._run(scenario())
+
+        self.assertEqual(created["status"], "queued")
+        self.assertIn(created["queue_position"], {1, 2})
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(done["result_worldline_id"], worldline_id)
+        self.assertIn(
+            "Background complete.", done["result_summary"]["assistant_preview"]
+        )
+
+    def test_chat_job_list_and_ack(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[LlmResponse(text="Done for ack.", tool_calls=[])]
+        )
+
+        async def scenario() -> tuple[dict, dict, dict]:
+            with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+                created = await chat_api.create_chat_job(
+                    chat_api.ChatJobRequest(
+                        worldline_id=worldline_id,
+                        message="job to ack",
+                        provider="gemini",
+                    )
+                )
+                await self._wait_for_job_status(
+                    created["id"],
+                    expected={"completed", "failed"},
+                    timeout_s=3.0,
+                )
+                listed = await chat_api.list_chat_jobs(
+                    thread_id=thread_id,
+                    status="completed",
+                    limit=50,
+                )
+                acked = await chat_api.ack_chat_job(
+                    created["id"],
+                    chat_api.ChatJobAckRequest(seen=True),
+                )
+                return created, listed, acked
+
+        created, listed, acked = self._run(scenario())
+        self.assertTrue(any(job["id"] == created["id"] for job in listed["jobs"]))
+        self.assertEqual(acked["status"], "completed")
+        self.assertIsNotNone(acked["seen_at"])
+
+    def test_chat_jobs_same_worldline_execute_fifo(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(text="first done", tool_calls=[]),
+                LlmResponse(text="second done", tool_calls=[]),
+            ]
+        )
+
+        async def scenario() -> list[str]:
+            with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+                first = await chat_api.create_chat_job(
+                    chat_api.ChatJobRequest(
+                        worldline_id=worldline_id,
+                        message="first message",
+                        provider="openai",
+                    )
+                )
+                second = await chat_api.create_chat_job(
+                    chat_api.ChatJobRequest(
+                        worldline_id=worldline_id,
+                        message="second message",
+                        provider="openai",
+                    )
+                )
+                await self._wait_for_job_status(
+                    first["id"],
+                    expected={"completed", "failed"},
+                    timeout_s=3.0,
+                )
+                await self._wait_for_job_status(
+                    second["id"],
+                    expected={"completed", "failed"},
+                    timeout_s=3.0,
+                )
+                events_payload = await worldlines.get_worldline_events(
+                    worldline_id, limit=50
+                )
+                messages = [
+                    event["payload"].get("text")
+                    for event in events_payload["events"]
+                    if event["type"] == "user_message"
+                ]
+                return [text for text in messages if isinstance(text, str)]
+
+        user_messages = self._run(scenario())
+        self.assertEqual(user_messages[-2:], ["first message", "second message"])
 
 
 if __name__ == "__main__":

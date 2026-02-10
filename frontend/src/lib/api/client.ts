@@ -1,5 +1,7 @@
 import type {
   ArtifactPreviewResponse,
+  ChatJob,
+  ChatJobsResponse,
   EventsResponse,
   SseDeltaFrame,
   SseDoneFrame,
@@ -315,6 +317,72 @@ export async function fetchArtifactPreview(
     `/api/artifacts/${artifactId}/preview?limit=${limit}`,
     undefined,
     "Failed to fetch artifact preview",
+    true,
+  );
+}
+
+export async function createChatJob(options: {
+  worldlineId: string;
+  message: string;
+  provider?: string;
+  model?: string;
+  maxIterations?: number;
+}): Promise<ChatJob> {
+  return requestJson<ChatJob>(
+    "/api/chat/jobs",
+    {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        worldline_id: options.worldlineId,
+        message: options.message,
+        provider: options.provider,
+        model: options.model,
+        max_iterations: options.maxIterations ?? 20,
+      }),
+    },
+    "Failed to queue chat job",
+    true,
+  );
+}
+
+export async function fetchChatJobs(options: {
+  threadId?: string;
+  worldlineId?: string;
+  statuses?: string[];
+  limit?: number;
+}): Promise<ChatJobsResponse> {
+  const url = new URL("/api/chat/jobs", window.location.origin);
+  if (options.threadId) {
+    url.searchParams.set("thread_id", options.threadId);
+  }
+  if (options.worldlineId) {
+    url.searchParams.set("worldline_id", options.worldlineId);
+  }
+  if (options.statuses && options.statuses.length > 0) {
+    url.searchParams.set("status", options.statuses.join(","));
+  }
+  if (typeof options.limit === "number") {
+    url.searchParams.set("limit", String(options.limit));
+  }
+
+  return requestJson<ChatJobsResponse>(
+    url.toString(),
+    undefined,
+    "Failed to fetch chat jobs",
+    true,
+  );
+}
+
+export async function ackChatJob(jobId: string, seen = true): Promise<ChatJob> {
+  return requestJson<ChatJob>(
+    `/api/chat/jobs/${jobId}/ack`,
+    {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ seen }),
+    },
+    "Failed to acknowledge chat job",
     true,
   );
 }
