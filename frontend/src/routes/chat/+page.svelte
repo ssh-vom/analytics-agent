@@ -49,14 +49,15 @@
   let provider: Provider = "openrouter";
   let model = "";
   let statusText = "Initializing...";
-  let isSending = false;
+  let sendingByWorldline: Record<string, boolean> = {};
   let isReady = false;
   let showProviderMenu = false;
   let composerExpanded = false;
   let isHydratingThread = false;
   let artifactsPanelCollapsed = false;
   let selectedArtifactId: string | null = null;
-  let streamingState: StreamingState = createStreamingState();
+  let streamingStateByWorldline: Record<string, StreamingState> = {};
+  let activeStreamingState: StreamingState = createStreamingState();
   let feedElement: HTMLDivElement | null = null;
   let shouldAutoScroll = true;
   let pendingScrollRaf = 0;
@@ -87,11 +88,13 @@
   };
 
   $: activeEvents = eventsByWorldline[activeWorldlineId] ?? [];
-  $: displayItems = buildDisplayItems(activeEvents, streamingState);
+  $: activeStreamingState = streamingStateByWorldline[activeWorldlineId] ?? createStreamingState();
+  $: displayItems = buildDisplayItems(activeEvents, activeStreamingState);
   $: cells = groupDisplayItemsIntoCells(displayItems);
   $: currentThread = $activeThread;
+  $: isActiveWorldlineSending = Boolean(activeWorldlineId && sendingByWorldline[activeWorldlineId]);
   $: hasDraftOutput =
-    streamingState.text.length > 0 || streamingState.toolCalls.size > 0;
+    activeStreamingState.text.length > 0 || activeStreamingState.toolCalls.size > 0;
 
   onMount(async () => {
     await threads.loadThreads();
@@ -184,8 +187,43 @@
     });
   }
 
-  function resetStreamingDrafts(): void {
-    streamingState = createStreamingState();
+  function setStreamingState(worldlineId: string, state: StreamingState): void {
+    streamingStateByWorldline = {
+      ...streamingStateByWorldline,
+      [worldlineId]: state,
+    };
+  }
+
+  function setWorldlineSending(worldlineId: string, isSending: boolean): void {
+    if (!worldlineId) {
+      return;
+    }
+    if (isSending) {
+      sendingByWorldline = {
+        ...sendingByWorldline,
+        [worldlineId]: true,
+      };
+      return;
+    }
+    if (!(worldlineId in sendingByWorldline)) {
+      return;
+    }
+    const next = { ...sendingByWorldline };
+    delete next[worldlineId];
+    sendingByWorldline = next;
+  }
+
+  function resetStreamingDrafts(worldlineId?: string): void {
+    if (!worldlineId) {
+      streamingStateByWorldline = {};
+      return;
+    }
+    if (!(worldlineId in streamingStateByWorldline)) {
+      return;
+    }
+    const next = { ...streamingStateByWorldline };
+    delete next[worldlineId];
+    streamingStateByWorldline = next;
   }
 
   function loadConnectorsFromStorage(): void {
@@ -422,7 +460,6 @@
 
   async function selectWorldline(worldlineId: string): Promise<void> {
     activeWorldlineId = worldlineId;
-    resetStreamingDrafts();
     selectedArtifactId = null;
     if (!eventsByWorldline[worldlineId]) {
       await loadWorldline(worldlineId);
@@ -464,19 +501,21 @@
 
   async function sendPrompt(): Promise<void> {
     const message = prompt.trim();
-    if (!message || !activeWorldlineId || isSending) {
+    const isCurrentWorldlineSending = Boolean(activeWorldlineId && sendingByWorldline[activeWorldlineId]);
+    if (!message || !activeWorldlineId || isCurrentWorldlineSending) {
       if (!activeWorldlineId) {
         statusText = "Error: No active worldline. Please refresh the page.";
       }
       return;
     }
 
-    isSending = true;
+    const requestWorldlineId = activeWorldlineId;
+    setWorldlineSending(requestWorldlineId, true);
     prompt = "";
     closeContextMenus();
     statusText = "Agent is thinking...";
     shouldAutoScroll = true;
-    resetStreamingDrafts();
+    resetStreamingDrafts(requestWorldlineId);
     selectedArtifactId = null;
 
     // Optimistic user message — show immediately in the feed
@@ -488,66 +527,76 @@
       payload: { text: message },
       created_at: new Date().toISOString(),
     };
-    appendEvent(activeWorldlineId, optimisticEvent);
+    appendEvent(requestWorldlineId, optimisticEvent);
     scrollFeedToBottom(true);
 
     try {
       const contextualMessage = buildContextualMessage(message);
       await streamChatTurn({
-        worldlineId: activeWorldlineId,
+        worldlineId: requestWorldlineId,
         message: contextualMessage,
         provider,
         model: model.trim() || undefined,
         maxIterations: provider === "gemini" ? 10 : 20,
         onEvent: (frame) => {
-          ensureWorldlineVisible(frame.worldline_id);
-          streamingState = clearFromEvent(streamingState, frame.event);
+          const frameWorldlineId = frame.worldline_id;
+          ensureWorldlineVisible(frameWorldlineId);
+          const frameStreamingState = streamingStateByWorldline[frameWorldlineId] ?? createStreamingState();
+          setStreamingState(frameWorldlineId, clearFromEvent(frameStreamingState, frame.event));
 
           // Remove optimistic user message when real one arrives
           if (frame.event.type === "user_message") {
-            const existing = eventsByWorldline[frame.worldline_id] ?? [];
+            const existing = eventsByWorldline[frameWorldlineId] ?? [];
             const filtered = existing.filter((e) => e.id !== optimisticId);
-            setWorldlineEvents(frame.worldline_id, [...filtered, frame.event]);
+            setWorldlineEvents(frameWorldlineId, [...filtered, frame.event]);
           } else {
-            appendEvent(frame.worldline_id, frame.event);
+            appendEvent(frameWorldlineId, frame.event);
           }
 
-          activeWorldlineId = frame.worldline_id;
-          scrollFeedToBottom();
+          if (activeWorldlineId === frameWorldlineId) {
+            scrollFeedToBottom();
+          }
 
-          if (frame.event.type === "tool_call_sql") {
-            statusText = "Running SQL...";
-          } else if (frame.event.type === "tool_call_python") {
-            statusText = "Running Python...";
-          } else if (frame.event.type === "assistant_message") {
-            statusText = "Done";
-          } else {
-            statusText = "Working...";
+          if (activeWorldlineId === frameWorldlineId) {
+            if (frame.event.type === "tool_call_sql") {
+              statusText = "Running SQL...";
+            } else if (frame.event.type === "tool_call_python") {
+              statusText = "Running Python...";
+            } else if (frame.event.type === "assistant_message") {
+              statusText = "Done";
+            } else {
+              statusText = "Working...";
+            }
           }
         },
         onDelta: (frame) => {
-          ensureWorldlineVisible(frame.worldline_id);
-          activeWorldlineId = frame.worldline_id;
-          streamingState = applyDelta(streamingState, frame.delta);
-          if (frame.delta.skipped) {
-            statusText = "Skipped repeated tool call...";
-          } else if (frame.delta.type === "assistant_text" && !frame.delta.done) {
-            statusText = "Composing response...";
-          } else if (frame.delta.type === "tool_call_sql" && !frame.delta.done) {
-            statusText = "Drafting SQL...";
-          } else if (frame.delta.type === "tool_call_python" && !frame.delta.done) {
-            statusText = "Drafting Python...";
+          const frameWorldlineId = frame.worldline_id;
+          ensureWorldlineVisible(frameWorldlineId);
+          const frameStreamingState = streamingStateByWorldline[frameWorldlineId] ?? createStreamingState();
+          setStreamingState(frameWorldlineId, applyDelta(frameStreamingState, frame.delta));
+          if (activeWorldlineId === frameWorldlineId) {
+            if (frame.delta.skipped) {
+              statusText = "Skipped repeated tool call...";
+            } else if (frame.delta.type === "assistant_text" && !frame.delta.done) {
+              statusText = "Composing response...";
+            } else if (frame.delta.type === "tool_call_sql" && !frame.delta.done) {
+              statusText = "Drafting SQL...";
+            } else if (frame.delta.type === "tool_call_python" && !frame.delta.done) {
+              statusText = "Drafting Python...";
+            }
+            scrollFeedToBottom();
           }
-          scrollFeedToBottom();
         },
         onDone: async (done) => {
-          activeWorldlineId = done.worldline_id;
+          resetStreamingDrafts(done.worldline_id);
           await refreshWorldlines();
-          if (activeWorldlineId) {
-            await loadWorldline(activeWorldlineId);
+          if (done.worldline_id) {
+            await loadWorldline(done.worldline_id);
           }
-          statusText = "Done";
-          scrollFeedToBottom();
+          if (activeWorldlineId === done.worldline_id) {
+            statusText = "Done";
+            scrollFeedToBottom();
+          }
           
           // Update thread message count
           if ($activeThread) {
@@ -558,15 +607,19 @@
           }
         },
         onError: (error) => {
-          resetStreamingDrafts();
-          statusText = `Error: ${error}`;
+          resetStreamingDrafts(requestWorldlineId);
+          if (activeWorldlineId === requestWorldlineId) {
+            statusText = `Error: ${error}`;
+          }
         },
       });
     } catch (error) {
-      resetStreamingDrafts();
-      statusText = error instanceof Error ? error.message : "Request failed";
+      resetStreamingDrafts(requestWorldlineId);
+      if (activeWorldlineId === requestWorldlineId) {
+        statusText = error instanceof Error ? error.message : "Request failed";
+      }
     } finally {
-      isSending = false;
+      setWorldlineSending(requestWorldlineId, false);
     }
   }
 
@@ -760,7 +813,7 @@
           {/if}
         {/each}
 
-        {#if isSending && !hasDraftOutput}
+        {#if isActiveWorldlineSending && !hasDraftOutput}
           <div class="thinking-indicator">
             <div class="thinking-dots">
               <span class="dot"></span>
@@ -1027,9 +1080,9 @@
       <button 
         type="submit" 
         class="send-btn"
-        disabled={isSending || !isReady || !prompt.trim()}
+        disabled={isActiveWorldlineSending || !isReady || !prompt.trim()}
       >
-        {#if isSending}
+        {#if isActiveWorldlineSending}
           <span class="loading"></span>
         {:else}
           <Send size={18} />
