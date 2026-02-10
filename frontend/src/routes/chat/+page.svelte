@@ -783,129 +783,137 @@
   <!-- Composer -->
   <div class="composer-container">
     <div class="context-toolbar">
-      <button
-        type="button"
-        class="context-btn"
-        on:click={() => {
-          showOutputTypeMenu = !showOutputTypeMenu;
-          showConnectorsMenu = false;
-          showSettingsMenu = false;
-          showDataContextMenu = false;
-        }}
-      >
-        <span>{outputType === "report" ? "Report" : "Dashboard"}</span>
-        <ChevronDown size={13} />
-      </button>
-      {#if showOutputTypeMenu}
-        <div class="context-menu">
-          <div class="context-menu-title">Output Type</div>
-          <button type="button" class="context-option" on:click={() => { outputType = "report"; showOutputTypeMenu = false; }}>
-            {outputType === "report" ? "✓ " : ""}Report
-          </button>
-          <button type="button" class="context-option" on:click={() => { outputType = "dashboard"; showOutputTypeMenu = false; }}>
-            {outputType === "dashboard" ? "✓ " : ""}Dashboard
-          </button>
-        </div>
-      {/if}
+      <div class="context-dropdown">
+        <button
+          type="button"
+          class="context-btn"
+          on:click={() => {
+            showOutputTypeMenu = !showOutputTypeMenu;
+            showConnectorsMenu = false;
+            showSettingsMenu = false;
+            showDataContextMenu = false;
+          }}
+        >
+          <span>{outputType === "report" ? "Report" : "Dashboard"}</span>
+          <ChevronDown size={13} />
+        </button>
+        {#if showOutputTypeMenu}
+          <div class="context-menu">
+            <div class="context-menu-title">Output Type</div>
+            <button type="button" class="context-option" on:click={() => { outputType = "report"; showOutputTypeMenu = false; }}>
+              {outputType === "report" ? "✓ " : ""}Report
+            </button>
+            <button type="button" class="context-option" on:click={() => { outputType = "dashboard"; showOutputTypeMenu = false; }}>
+              {outputType === "dashboard" ? "✓ " : ""}Dashboard
+            </button>
+          </div>
+        {/if}
+      </div>
 
-      <button
-        type="button"
-        class="context-btn"
-        on:click={() => {
-          showConnectorsMenu = !showConnectorsMenu;
-          showOutputTypeMenu = false;
-          showSettingsMenu = false;
-          showDataContextMenu = false;
-        }}
-      >
-        <Database size={14} />
-        <span>{selectedConnectorIds.length > 0 ? `${selectedConnectorIds.length} connectors` : "Connectors"}</span>
-        <ChevronDown size={13} />
-      </button>
-      {#if showConnectorsMenu}
-        <div class="context-menu connectors-menu">
-          <div class="context-menu-title">Connectors</div>
-          {#if availableConnectors.length === 0}
-            <div class="context-empty">No connectors configured</div>
-          {:else}
-            {#each availableConnectors as connector}
-              <button type="button" class="context-option" on:click={() => toggleConnector(connector.id)}>
-                {selectedConnectorIds.includes(connector.id) ? "✓ " : ""}{connector.name}
-              </button>
-            {/each}
-          {/if}
-        </div>
-      {/if}
+      <div class="context-dropdown">
+        <button
+          type="button"
+          class="context-btn"
+          on:click={() => {
+            showConnectorsMenu = !showConnectorsMenu;
+            showOutputTypeMenu = false;
+            showSettingsMenu = false;
+            showDataContextMenu = false;
+          }}
+        >
+          <Database size={14} />
+          <span>{selectedConnectorIds.length > 0 ? `${selectedConnectorIds.length} connectors` : "Connectors"}</span>
+          <ChevronDown size={13} />
+        </button>
+        {#if showConnectorsMenu}
+          <div class="context-menu connectors-menu">
+            <div class="context-menu-title">Connectors</div>
+            {#if availableConnectors.length === 0}
+              <div class="context-empty">No connectors configured</div>
+            {:else}
+              {#each availableConnectors as connector}
+                <button type="button" class="context-option" on:click={() => toggleConnector(connector.id)}>
+                  {selectedConnectorIds.includes(connector.id) ? "✓ " : ""}{connector.name}
+                </button>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      </div>
 
-      <button
-        type="button"
-        class="context-btn"
-        on:click={() => {
-          showSettingsMenu = !showSettingsMenu;
-          showOutputTypeMenu = false;
-          showConnectorsMenu = false;
-          showDataContextMenu = false;
-        }}
-      >
-        <Wrench size={14} />
-        <span>Settings</span>
-        <ChevronDown size={13} />
-      </button>
-      {#if showSettingsMenu}
-        <div class="context-menu settings-menu">
-          <div class="context-menu-title">Settings</div>
-          <label class="toggle-row">
-            <span>Web Search</span>
-            <input type="checkbox" bind:checked={contextSettings.webSearch} />
-          </label>
-          <label class="toggle-row">
-            <span>Dashboards</span>
-            <input type="checkbox" bind:checked={contextSettings.dashboards} />
-          </label>
-          <label class="toggle-row">
-            <span>Text to SQL</span>
-            <input type="checkbox" bind:checked={contextSettings.textToSql} />
-          </label>
-          <label class="toggle-row">
-            <span>Ontology</span>
-            <input type="checkbox" bind:checked={contextSettings.ontology} />
-          </label>
-        </div>
-      {/if}
+      <div class="context-dropdown">
+        <button
+          type="button"
+          class="context-btn"
+          on:click={() => {
+            showSettingsMenu = !showSettingsMenu;
+            showOutputTypeMenu = false;
+            showConnectorsMenu = false;
+            showDataContextMenu = false;
+          }}
+        >
+          <Wrench size={14} />
+          <span>Settings</span>
+          <ChevronDown size={13} />
+        </button>
+        {#if showSettingsMenu}
+          <div class="context-menu settings-menu">
+            <div class="context-menu-title">Settings</div>
+            <label class="toggle-row">
+              <span>Web Search</span>
+              <input type="checkbox" bind:checked={contextSettings.webSearch} />
+            </label>
+            <label class="toggle-row">
+              <span>Dashboards</span>
+              <input type="checkbox" bind:checked={contextSettings.dashboards} />
+            </label>
+            <label class="toggle-row">
+              <span>Text to SQL</span>
+              <input type="checkbox" bind:checked={contextSettings.textToSql} />
+            </label>
+            <label class="toggle-row">
+              <span>Ontology</span>
+              <input type="checkbox" bind:checked={contextSettings.ontology} />
+            </label>
+          </div>
+        {/if}
+      </div>
 
-      <button
-        type="button"
-        class="context-btn"
-        on:click={() => {
-          showDataContextMenu = !showDataContextMenu;
-          showOutputTypeMenu = false;
-          showConnectorsMenu = false;
-          showSettingsMenu = false;
-        }}
-      >
-        <Plus size={14} />
-        <span>{selectedContextTables.length > 0 ? `${selectedContextTables.length} table(s)` : "Attach Context"}</span>
-        <ChevronDown size={13} />
-      </button>
-      {#if showDataContextMenu}
-        <div class="context-menu data-menu">
-          <div class="context-menu-title">Datasets</div>
-          <button type="button" class="context-option" on:click={() => document.getElementById('csv-upload')?.click()}>
-            Attach a file
-          </button>
-          <div class="context-sep"></div>
-          <div class="context-menu-title small">Worldline Tables</div>
-          {#if worldlineTables && worldlineTables.tables.length > 0}
-            {#each worldlineTables.tables.slice(0, 12) as table}
-              <button type="button" class="context-option" on:click={() => toggleContextTable(table.name)}>
-                {selectedContextTables.includes(table.name) ? "✓ " : ""}{table.name}
-              </button>
-            {/each}
-          {:else}
-            <div class="context-empty">No tables available</div>
-          {/if}
-        </div>
-      {/if}
+      <div class="context-dropdown">
+        <button
+          type="button"
+          class="context-btn"
+          on:click={() => {
+            showDataContextMenu = !showDataContextMenu;
+            showOutputTypeMenu = false;
+            showConnectorsMenu = false;
+            showSettingsMenu = false;
+          }}
+        >
+          <Plus size={14} />
+          <span>{selectedContextTables.length > 0 ? `${selectedContextTables.length} table(s)` : "Attach Context"}</span>
+          <ChevronDown size={13} />
+        </button>
+        {#if showDataContextMenu}
+          <div class="context-menu data-menu align-right">
+            <div class="context-menu-title">Datasets</div>
+            <button type="button" class="context-option" on:click={() => document.getElementById('csv-upload')?.click()}>
+              Attach a file
+            </button>
+            <div class="context-sep"></div>
+            <div class="context-menu-title small">Worldline Tables</div>
+            {#if worldlineTables && worldlineTables.tables.length > 0}
+              {#each worldlineTables.tables.slice(0, 12) as table}
+                <button type="button" class="context-option" on:click={() => toggleContextTable(table.name)}>
+                  {selectedContextTables.includes(table.name) ? "✓ " : ""}{table.name}
+                </button>
+              {/each}
+            {:else}
+              <div class="context-empty">No tables available</div>
+            {/if}
+          </div>
+        {/if}
+      </div>
     </div>
 
     <!-- CSV Import Panel -->
@@ -1309,6 +1317,9 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
+  }
+
+  .context-dropdown {
     position: relative;
   }
 
@@ -1333,7 +1344,8 @@
 
   .context-menu {
     position: absolute;
-    top: calc(100% + 6px);
+    bottom: calc(100% + 6px);
+    left: 0;
     min-width: 220px;
     background: var(--surface-0);
     border: 1px solid var(--border-medium);
@@ -1346,18 +1358,24 @@
     gap: 2px;
     max-height: 280px;
     overflow-y: auto;
+    max-width: min(320px, calc(100vw - 2 * var(--space-4)));
   }
 
   .connectors-menu {
-    left: 130px;
+    min-width: 240px;
   }
 
   .settings-menu {
-    left: 300px;
+    min-width: 220px;
   }
 
   .data-menu {
-    left: 430px;
+    min-width: 260px;
+  }
+
+  .align-right {
+    left: auto;
+    right: 0;
   }
 
   .context-menu-title {

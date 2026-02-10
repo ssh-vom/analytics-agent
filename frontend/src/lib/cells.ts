@@ -49,6 +49,12 @@ function payloadText(payload: Record<string, unknown>): string {
   return JSON.stringify(payload);
 }
 
+function stripContextBlock(text: string): string {
+  return text
+    .replace(/\n\n<context>[\s\S]*?<\/context>\s*$/i, "")
+    .trimEnd();
+}
+
 export function readSqlResult(event: TimelineEvent | null): SqlResultPayload | null {
   if (!event) {
     return null;
@@ -79,7 +85,7 @@ export function groupEventsIntoCells(events: TimelineEvent[]): RenderCell[] {
           kind: "message",
           id: `msg-${event.id}`,
           role: "user",
-          text: payloadText(event.payload),
+          text: stripContextBlock(payloadText(event.payload)),
           event,
         });
         break;
