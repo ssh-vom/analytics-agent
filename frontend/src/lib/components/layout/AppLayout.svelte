@@ -2,7 +2,7 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { threads, activeThread, createNewThread, loadThread } from "$lib/stores/threads";
-  import { createWorldline } from "$lib/api/client";
+  import { createWorldline, fetchThreadWorldlines } from "$lib/api/client";
   import { GitBranch } from "lucide-svelte";
   import { Database } from "lucide-svelte";
   import { FileSpreadsheet } from "lucide-svelte";
@@ -40,15 +40,24 @@
     activeThread.loadFromStorage();
   });
 
+  async function ensureThreadHasWorldline(threadId: string): Promise<string> {
+    const existing = await fetchThreadWorldlines(threadId);
+    if (existing.worldlines.length > 0) {
+      return existing.worldlines[0].id;
+    }
+
+    const created = await createWorldline(threadId, "main");
+    return created.worldline_id;
+  }
+
   async function handleCreateNewThread() {
     try {
       const thread = await createNewThread();
-      
-      // Create a worldline for this thread
-      const worldline = await createWorldline(thread.id, "main");
+
+      const worldlineId = await ensureThreadHasWorldline(thread.id);
       
       // Store the worldline ID in localStorage so chat page can pick it up
-      localStorage.setItem("textql_active_worldline", worldline.worldline_id);
+      localStorage.setItem("textql_active_worldline", worldlineId);
       
       // Navigate to chat page
       await goto("/chat");
@@ -60,6 +69,8 @@
 
   async function handleThreadSelect(threadId: string): Promise<void> {
     await loadThread(threadId);
+    const worldlineId = await ensureThreadHasWorldline(threadId);
+    localStorage.setItem("textql_active_worldline", worldlineId);
     await goto("/chat");
   }
 

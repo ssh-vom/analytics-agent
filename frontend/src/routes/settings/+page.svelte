@@ -13,6 +13,8 @@
     defaultProvider: string;
   }
 
+  type PersistedSettings = Omit<SettingsState, "apiKey">;
+
   let settings: SettingsState = {
     theme: "dark",
     notifications: true,
@@ -22,15 +24,62 @@
 
   let hasChanges = false;
 
+  function parsePersistedSettings(raw: string): {
+    settings: Partial<PersistedSettings>;
+    hadLegacyApiKey: boolean;
+  } | null {
+    try {
+      const parsed = JSON.parse(raw) as Partial<SettingsState>;
+      const next: Partial<PersistedSettings> = {};
+
+      if (parsed.theme === "dark" || parsed.theme === "light" || parsed.theme === "auto") {
+        next.theme = parsed.theme;
+      }
+      if (typeof parsed.notifications === "boolean") {
+        next.notifications = parsed.notifications;
+      }
+      if (
+        parsed.defaultProvider === "gemini" ||
+        parsed.defaultProvider === "openai" ||
+        parsed.defaultProvider === "openrouter"
+      ) {
+        next.defaultProvider = parsed.defaultProvider;
+      }
+
+      return {
+        settings: next,
+        hadLegacyApiKey: typeof parsed.apiKey === "string" && parsed.apiKey.length > 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   onMount(() => {
     const saved = localStorage.getItem("textql_settings");
-    if (saved) {
-      settings = { ...settings, ...JSON.parse(saved) };
+    if (!saved) {
+      return;
+    }
+
+    const parsed = parsePersistedSettings(saved);
+    if (!parsed) {
+      localStorage.removeItem("textql_settings");
+      return;
+    }
+
+    settings = { ...settings, ...parsed.settings, apiKey: "" };
+    if (parsed.hadLegacyApiKey) {
+      localStorage.setItem("textql_settings", JSON.stringify(parsed.settings));
     }
   });
 
   function saveSettings() {
-    localStorage.setItem("textql_settings", JSON.stringify(settings));
+    const persisted: PersistedSettings = {
+      theme: settings.theme,
+      notifications: settings.notifications,
+      defaultProvider: settings.defaultProvider,
+    };
+    localStorage.setItem("textql_settings", JSON.stringify(persisted));
     hasChanges = false;
   }
 
@@ -100,7 +149,7 @@
       <div class="setting-item">
         <div class="setting-info">
           <label>API Key</label>
-          <p>Your API key for authentication (stored locally)</p>
+          <p>Your API key is used for this session only and is never saved to local storage</p>
         </div>
         <div class="setting-control">
           <input 

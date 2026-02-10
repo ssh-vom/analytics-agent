@@ -2,46 +2,57 @@
 API endpoints for seed data operations - CSV import and external DB attachment.
 """
 
-import shutil
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Query
+import importlib
+from pathlib import Path
+
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 try:
-    from backend.meta import (
-        get_conn,
-        new_id,
-        append_event,
-        set_worldline_head,
-        get_worldline_row,
-    )
-    from backend.seed_data import (
-        import_csv_to_worldline,
-        attach_external_duckdb,
-        detach_external_duckdb,
-        list_imported_tables,
-        list_attached_databases,
-        get_worldline_schema,
-        TEMP_UPLOAD_DIR,
-    )
+    meta_module = importlib.import_module("backend.meta")
+    seed_data_module = importlib.import_module("backend.seed_data")
 except ModuleNotFoundError:
-    from meta import (
-        get_conn,
-        new_id,
-        append_event,
-        set_worldline_head,
-        get_worldline_row,
-    )
-    from seed_data import (
-        import_csv_to_worldline,
-        attach_external_duckdb,
-        detach_external_duckdb,
-        list_imported_tables,
-        list_attached_databases,
-        get_worldline_schema,
-        TEMP_UPLOAD_DIR,
-    )
+    meta_module = importlib.import_module("meta")
+    seed_data_module = importlib.import_module("seed_data")
+
+get_conn = meta_module.get_conn
+new_id = meta_module.new_id
+append_event = meta_module.append_event
+set_worldline_head = meta_module.set_worldline_head
+get_worldline_row = meta_module.get_worldline_row
+
+import_csv_to_worldline = seed_data_module.import_csv_to_worldline
+attach_external_duckdb = seed_data_module.attach_external_duckdb
+detach_external_duckdb = seed_data_module.detach_external_duckdb
+list_imported_tables = seed_data_module.list_imported_tables
+list_attached_databases = seed_data_module.list_attached_databases
+get_worldline_schema = seed_data_module.get_worldline_schema
+MAX_CSV_FILE_SIZE = seed_data_module.MAX_CSV_FILE_SIZE
+TEMP_UPLOAD_DIR = seed_data_module.TEMP_UPLOAD_DIR
 
 router = APIRouter(prefix="/api/seed-data", tags=["seed-data"])
+
+
+def _max_csv_size_label() -> str:
+    return f"{MAX_CSV_FILE_SIZE / 1024 / 1024:.1f}MB"
+
+
+async def _write_upload_with_size_cap(file: UploadFile, *, destination: Path) -> None:
+    bytes_written = 0
+    chunk_size = 1024 * 1024
+
+    with open(destination, "wb") as output:
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            bytes_written += len(chunk)
+            if bytes_written > MAX_CSV_FILE_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File too large. Max size: {_max_csv_size_label()}",
+                )
+            output.write(chunk)
 
 
 def _require_worldline(conn, worldline_id: str):
@@ -99,8 +110,7 @@ async def import_csv_endpoint(
         temp_path = TEMP_UPLOAD_DIR / f"{new_id('temp')}_{file.filename}"
 
         try:
-            with open(temp_path, "wb") as f:
-                shutil.copyfileobj(file.file, f)
+            await _write_upload_with_size_cap(file, destination=temp_path)
 
             # Import the CSV
             result = import_csv_to_worldline(
@@ -140,6 +150,7 @@ async def import_csv_endpoint(
             # Clean up temp file
             if temp_path.exists():
                 temp_path.unlink()
+            await file.close()
 
 
 @router.post("/worldlines/{worldline_id}/attach-duckdb")

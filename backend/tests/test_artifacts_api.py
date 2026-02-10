@@ -29,7 +29,9 @@ class ArtifactsApiTests(unittest.TestCase):
 
     def _create_worldline(self) -> tuple[str, str]:
         thread_id = self._run(
-            threads.create_thread(threads.CreateThreadRequest(title="artifacts-test-thread"))
+            threads.create_thread(
+                threads.CreateThreadRequest(title="artifacts-test-thread")
+            )
         )["thread_id"]
         worldline_id = self._run(
             worldlines.create_worldline(
@@ -52,7 +54,14 @@ class ArtifactsApiTests(unittest.TestCase):
 
     def test_get_artifact_returns_file_response(self) -> None:
         worldline_id, event_id = self._create_worldline()
-        file_path = meta.DB_DIR / "worldlines" / worldline_id / "workspace" / "artifacts" / "note.md"
+        file_path = (
+            meta.DB_DIR
+            / "worldlines"
+            / worldline_id
+            / "workspace"
+            / "artifacts"
+            / "note.md"
+        )
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text("hello", encoding="utf-8")
         artifact_id = meta.new_id("artifact")
@@ -69,7 +78,37 @@ class ArtifactsApiTests(unittest.TestCase):
 
         response = self._run(artifacts.get_artifact(artifact_id))
         self.assertIsInstance(response, FileResponse)
-        self.assertEqual(response.path, str(file_path))
+        self.assertEqual(Path(response.path).resolve(), file_path.resolve())
+
+    def test_get_artifact_allows_workspace_root_file(self) -> None:
+        worldline_id, event_id = self._create_worldline()
+        file_path = (
+            meta.DB_DIR / "worldlines" / worldline_id / "workspace" / "report.csv"
+        )
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("x\n1\n", encoding="utf-8")
+        artifact_id = meta.new_id("artifact")
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO artifacts (id, worldline_id, event_id, type, name, path)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    worldline_id,
+                    event_id,
+                    "csv",
+                    "report.csv",
+                    str(file_path),
+                ),
+            )
+            conn.commit()
+
+        response = self._run(artifacts.get_artifact(artifact_id))
+        self.assertIsInstance(response, FileResponse)
+        self.assertEqual(Path(response.path).resolve(), file_path.resolve())
 
     def test_get_artifact_missing_id_returns_404(self) -> None:
         with self.assertRaises(HTTPException) as ctx:
@@ -80,7 +119,14 @@ class ArtifactsApiTests(unittest.TestCase):
 
     def test_get_artifact_missing_file_returns_404(self) -> None:
         worldline_id, event_id = self._create_worldline()
-        missing_path = meta.DB_DIR / "worldlines" / worldline_id / "workspace" / "artifacts" / "gone.md"
+        missing_path = (
+            meta.DB_DIR
+            / "worldlines"
+            / worldline_id
+            / "workspace"
+            / "artifacts"
+            / "gone.md"
+        )
         artifact_id = meta.new_id("artifact")
 
         with meta.get_conn() as conn:
@@ -89,7 +135,14 @@ class ArtifactsApiTests(unittest.TestCase):
                 INSERT INTO artifacts (id, worldline_id, event_id, type, name, path)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (artifact_id, worldline_id, event_id, "md", "gone.md", str(missing_path)),
+                (
+                    artifact_id,
+                    worldline_id,
+                    event_id,
+                    "md",
+                    "gone.md",
+                    str(missing_path),
+                ),
             )
             conn.commit()
 
@@ -98,6 +151,35 @@ class ArtifactsApiTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertIn("artifact file not found", str(ctx.exception.detail))
+
+    def test_get_artifact_rejects_path_outside_worldline_workspace(self) -> None:
+        worldline_id, event_id = self._create_worldline()
+        outside_file = Path(self.temp_dir.name) / "outside.txt"
+        outside_file.write_text("sensitive", encoding="utf-8")
+        artifact_id = meta.new_id("artifact")
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO artifacts (id, worldline_id, event_id, type, name, path)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    worldline_id,
+                    event_id,
+                    "txt",
+                    "outside.txt",
+                    str(outside_file),
+                ),
+            )
+            conn.commit()
+
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(artifacts.get_artifact(artifact_id))
+
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertIn("artifact path not allowed", str(ctx.exception.detail))
 
 
 if __name__ == "__main__":

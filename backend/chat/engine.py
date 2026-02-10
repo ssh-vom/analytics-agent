@@ -7,6 +7,30 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
+from fastapi import HTTPException
+
+from chat.llm_client import (
+    ChatMessage,
+    LlmClient,
+    LlmResponse,
+    ToolCall,
+    ToolDefinition,
+)
+from meta import (
+    append_event,
+    event_row_to_dict,
+    get_conn,
+    get_worldline_row,
+    set_worldline_head,
+)
+from tools import (
+    PythonToolRequest,
+    SqlToolRequest,
+    execute_python_tool,
+    execute_sql_tool,
+)
+from worldlines import get_worldline_events
+from worldline_service import BranchOptions, WorldlineService
 
 logger = logging.getLogger(__name__)
 DEBUG_LOG_PATH = "/Users/shivom/take_homes/textql/.cursor/debug.log"
@@ -34,55 +58,6 @@ def _debug_log(
             debug_file.write(json.dumps(payload, ensure_ascii=True, default=str) + "\n")
     except Exception:
         pass
-
-from fastapi import HTTPException
-
-try:
-    from backend.chat.llm_client import (
-        ChatMessage,
-        LlmClient,
-        LlmResponse,
-        ToolCall,
-        ToolDefinition,
-    )
-    from backend.meta import (
-        append_event,
-        event_row_to_dict,
-        get_conn,
-        get_worldline_row,
-        set_worldline_head,
-    )
-    from backend.tools import (
-        PythonToolRequest,
-        SqlToolRequest,
-        execute_python_tool,
-        execute_sql_tool,
-    )
-    from backend.worldlines import get_worldline_events
-    from backend.worldline_service import BranchOptions, WorldlineService
-except ModuleNotFoundError:
-    from chat.llm_client import (
-        ChatMessage,
-        LlmClient,
-        LlmResponse,
-        ToolCall,
-        ToolDefinition,
-    )
-    from meta import (
-        append_event,
-        event_row_to_dict,
-        get_conn,
-        get_worldline_row,
-        set_worldline_head,
-    )
-    from tools import (
-        PythonToolRequest,
-        SqlToolRequest,
-        execute_python_tool,
-        execute_sql_tool,
-    )
-    from worldlines import get_worldline_events
-    from worldline_service import BranchOptions, WorldlineService
 
 
 SQL_TOOL_SCHEMA: dict[str, Any] = {
@@ -572,7 +547,9 @@ class ChatEngine:
             return False
 
     @staticmethod
-    def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_tool_arguments(
+        tool_name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
         """Extract sql/code from _raw when JSON parse failed, so tools get valid args."""
         if "_raw" not in arguments:
             return arguments
@@ -593,7 +570,7 @@ class ChatEngine:
                 else:
                     result.setdefault("timeout", 30)
                 return result
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError, ValueError:
                 pass
         return arguments
 
@@ -655,7 +632,11 @@ class ChatEngine:
                         worldline_id,
                         "tool_call_sql",
                         "tool_result_sql",
-                        {"sql": str(sql) if sql else "", "limit": 100, "call_id": tool_call.id},
+                        {
+                            "sql": str(sql) if sql else "",
+                            "limit": 100,
+                            "call_id": tool_call.id,
+                        },
                         err_result,
                         on_event,
                     )
@@ -664,7 +645,7 @@ class ChatEngine:
             raw_limit = args.get("limit", 100)
             try:
                 limit = int(raw_limit)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 limit = 100
             limit = max(1, min(limit, 10_000))
 
@@ -701,7 +682,9 @@ class ChatEngine:
                         "worldline_id": worldline_id,
                         "call_id": tool_call.id,
                         "args_keys": sorted(list(args.keys())),
-                        "args_preview": json.dumps(args, ensure_ascii=True, default=str)[:220],
+                        "args_preview": json.dumps(
+                            args, ensure_ascii=True, default=str
+                        )[:220],
                     },
                 )
                 # #endregion
@@ -711,7 +694,11 @@ class ChatEngine:
                         worldline_id,
                         "tool_call_python",
                         "tool_result_python",
-                        {"code": str(code) if code else "", "timeout": 30, "call_id": tool_call.id},
+                        {
+                            "code": str(code) if code else "",
+                            "timeout": 30,
+                            "call_id": tool_call.id,
+                        },
                         err_result,
                         on_event,
                     )
@@ -720,7 +707,7 @@ class ChatEngine:
             raw_timeout = args.get("timeout", 30)
             try:
                 timeout = int(raw_timeout)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 timeout = 30
             timeout = max(1, min(timeout, 120))
 
