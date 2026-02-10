@@ -3,6 +3,8 @@ import type {
   SqlResultPayload,
   TimelineEvent,
 } from "$lib/types";
+import type { DisplayItem } from "$lib/streaming";
+import { streamingToolToEvent } from "$lib/streaming";
 
 export type RenderCell =
   | MessageRenderCell
@@ -184,6 +186,55 @@ export function groupEventsIntoCells(events: TimelineEvent[]): RenderCell[] {
       call: null,
       result: resultEvent,
     });
+  }
+
+  return cells;
+}
+
+/**
+ * Build render cells from display items (events + streaming placeholders).
+ * Streaming items are appended after event-derived cells in order.
+ */
+export function groupDisplayItemsIntoCells(items: DisplayItem[]): RenderCell[] {
+  const events = items
+    .filter((i): i is DisplayItem & { kind: "event" } => i.kind === "event")
+    .map((i) => i.event);
+  const cells = groupEventsIntoCells(events);
+
+  for (const item of items) {
+    if (item.kind === "streaming_text") {
+      const draftEvent: TimelineEvent = {
+        id: `draft-text-${item.createdAt}`,
+        parent_event_id: null,
+        type: "assistant_message",
+        payload: { text: item.text },
+        created_at: item.createdAt,
+      };
+      cells.push({
+        kind: "message",
+        id: `draft-text-${item.createdAt}`,
+        role: "assistant",
+        text: item.text,
+        event: draftEvent,
+      });
+    } else if (item.kind === "streaming_tool") {
+      const ev = streamingToolToEvent(item);
+      if (item.type === "sql") {
+        cells.push({
+          kind: "sql",
+          id: `sql-draft-${item.callId}`,
+          call: ev,
+          result: null,
+        });
+      } else {
+        cells.push({
+          kind: "python",
+          id: `py-draft-${item.callId}`,
+          call: ev,
+          result: null,
+        });
+      }
+    }
   }
 
   return cells;

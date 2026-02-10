@@ -1,7 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
 
-  import { groupEventsIntoCells } from "$lib/cells";
+  import { groupDisplayItemsIntoCells } from "$lib/cells";
+  import {
+    buildDisplayItems,
+    createStreamingState,
+    applyDelta,
+    clearFromEvent,
+    type StreamingState,
+  } from "$lib/streaming";
   import MessageCell from "$lib/components/MessageCell.svelte";
   import PythonCell from "$lib/components/PythonCell.svelte";
   import SqlCell from "$lib/components/SqlCell.svelte";
@@ -18,12 +25,7 @@
     importCSV,
     fetchWorldlineTables,
   } from "$lib/api/client";
-  import type {
-    StreamDeltaPayload,
-    Thread,
-    TimelineEvent,
-    WorldlineItem,
-  } from "$lib/types";
+  import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
   import { Database } from "lucide-svelte";
@@ -35,15 +37,6 @@
   import { X } from "lucide-svelte";
 
   type Provider = "gemini" | "openai" | "openrouter";
-  type DraftToolKind = "sql" | "python";
-
-  interface DraftToolCall {
-    id: string;
-    kind: DraftToolKind;
-    code: string;
-    rawArgs: string;
-    createdAt: string;
-  }
 
   let threadId = "";
   let activeWorldlineId = "";
@@ -60,9 +53,7 @@
   let isHydratingThread = false;
   let artifactsPanelCollapsed = false;
   let selectedArtifactId: string | null = null;
-  let assistantDraftText = "";
-  let assistantDraftCreatedAt = "";
-  let toolCallDrafts: DraftToolCall[] = [];
+  let streamingState: StreamingState = createStreamingState();
   let feedElement: HTMLDivElement | null = null;
   let shouldAutoScroll = true;
   let pendingScrollRaf = 0;
@@ -79,44 +70,11 @@
   let worldlineTables: Awaited<ReturnType<typeof fetchWorldlineTables>> | null = null;
 
   $: activeEvents = eventsByWorldline[activeWorldlineId] ?? [];
-  $: cells = groupEventsIntoCells(activeEvents);
+  $: displayItems = buildDisplayItems(activeEvents, streamingState);
+  $: cells = groupDisplayItemsIntoCells(displayItems);
   $: currentThread = $activeThread;
-  $: hasDraftOutput = assistantDraftText.length > 0 || toolCallDrafts.length > 0;
-
-  /**
-   * Try to extract the SQL/Python code from accumulated raw JSON arguments.
-   * The backend streams raw JSON fragments like `{"sql": "SELECT 1", "limit": 10}`.
-   * We try to parse and extract the relevant field; if parsing fails (incomplete
-   * JSON), we fall back to a regex extraction for partial display.
-   */
-  function extractCodeFromArgs(rawArgs: string, kind: DraftToolKind): string {
-    const codeField = kind === "sql" ? "sql" : "code";
-    // Try full JSON parse first
-    try {
-      const parsed = JSON.parse(rawArgs);
-      if (typeof parsed === "object" && parsed !== null && typeof parsed[codeField] === "string") {
-        return parsed[codeField];
-      }
-    } catch {
-      // JSON is incomplete — try regex extraction for partial content
-    }
-
-    // Regex fallback: find `"sql": "...` or `"code": "...` and extract what we have so far
-    // This handles the case where JSON is still streaming and not yet complete
-    const pattern = new RegExp(`"${codeField}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`, "s");
-    const match = rawArgs.match(pattern);
-    if (match) {
-      // Unescape JSON string escapes
-      try {
-        return JSON.parse(`"${match[1]}"`);
-      } catch {
-        // If the escape sequence is incomplete, just return the raw match
-        return match[1].replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-      }
-    }
-
-    return "";
-  }
+  $: hasDraftOutput =
+    streamingState.text.length > 0 || streamingState.toolCalls.size > 0;
 
   onMount(async () => {
     await threads.loadThreads();
@@ -208,181 +166,7 @@
   }
 
   function resetStreamingDrafts(): void {
-    assistantDraftText = "";
-    assistantDraftCreatedAt = "";
-    toolCallDrafts = [];
-  }
-
-  function upsertToolCallDraft(
-    kind: DraftToolKind,
-    callId: string | undefined,
-    delta: string,
-  ): void {
-    if (!delta) {
-      return;
-    }
-    const draftId = callId && callId.trim() ? callId : `${kind}-draft`;
-    const existingIndex = toolCallDrafts.findIndex((draft) => draft.id === draftId);
-    if (existingIndex === -1) {
-      const rawArgs = delta;
-      toolCallDrafts = [
-        ...toolCallDrafts,
-        {
-          id: draftId,
-          kind,
-          rawArgs,
-          code: extractCodeFromArgs(rawArgs, kind),
-          createdAt: new Date().toISOString(),
-        },
-      ];
-      return;
-    }
-
-    const existing = toolCallDrafts[existingIndex];
-    const rawArgs = existing.rawArgs + delta;
-    const updated = {
-      ...existing,
-      rawArgs,
-      code: extractCodeFromArgs(rawArgs, kind),
-    };
-    toolCallDrafts = [
-      ...toolCallDrafts.slice(0, existingIndex),
-      updated,
-      ...toolCallDrafts.slice(existingIndex + 1),
-    ];
-  }
-
-  function removeToolCallDraft(kind: DraftToolKind, callId: string | null): void {
-    if (callId && callId.trim()) {
-      toolCallDrafts = toolCallDrafts.filter((draft) => draft.id !== callId);
-      return;
-    }
-    // Fallback when call_id missing: remove most recent draft of this kind
-    const matches = toolCallDrafts.filter((draft) => draft.kind === kind);
-    if (matches.length === 0) return;
-    const mostRecent = matches.sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    )[0];
-    toolCallDrafts = toolCallDrafts.filter((draft) => draft.id !== mostRecent.id);
-  }
-
-  function callIdFromPayload(payload: Record<string, unknown>): string | null {
-    const callId = payload.call_id;
-    if (typeof callId === "string" && callId.trim()) {
-      return callId;
-    }
-    return null;
-  }
-
-  function clearDraftFromPersistedEvent(event: TimelineEvent): void {
-    if (event.type === "assistant_message" || event.type === "assistant_plan") {
-      assistantDraftText = "";
-      assistantDraftCreatedAt = "";
-      return;
-    }
-
-    if (event.type === "tool_call_sql") {
-      removeToolCallDraft("sql", callIdFromPayload(event.payload));
-      return;
-    }
-
-    if (event.type === "tool_call_python") {
-      removeToolCallDraft("python", callIdFromPayload(event.payload));
-    }
-  }
-
-  function handleStreamDelta(delta: StreamDeltaPayload): void {
-    if (delta.type === "assistant_text") {
-      if (delta.done) {
-        // Text stream closed — text will become an assistant_plan event
-        // if tool calls follow (backend persists it). Nothing to do here;
-        // clearDraftFromPersistedEvent will handle cleanup.
-        return;
-      }
-      if (typeof delta.delta === "string" && delta.delta.length > 0) {
-        if (!assistantDraftText) {
-          assistantDraftCreatedAt = new Date().toISOString();
-        }
-        assistantDraftText += delta.delta;
-        statusText = "Composing response...";
-      }
-      scrollFeedToBottom();
-      return;
-    }
-
-    if (delta.type === "tool_call_sql" || delta.type === "tool_call_python") {
-      const kind: DraftToolKind = delta.type === "tool_call_sql" ? "sql" : "python";
-
-      if (delta.done) {
-        // Final parse: do one last extraction to ensure code is fully parsed
-        finalizeDraft(kind, delta.call_id);
-        scrollFeedToBottom();
-        return;
-      }
-
-      // Clear text draft when a tool call starts streaming — the backend
-      // will have already closed the text stream and will persist it as
-      // an assistant_plan event.
-      if (assistantDraftText && !toolCallDrafts.some((d) => d.id === (delta.call_id ?? `${kind}-draft`))) {
-        // This is the first delta for a new tool call; clear text draft
-        assistantDraftText = "";
-        assistantDraftCreatedAt = "";
-      }
-
-      upsertToolCallDraft(kind, delta.call_id, delta.delta ?? "");
-      statusText = kind === "sql" ? "Drafting SQL..." : "Drafting Python...";
-      scrollFeedToBottom();
-    }
-  }
-
-  /**
-   * On `done` signal, do a final JSON parse to ensure the extracted code is
-   * fully correct. This handles edge cases where the regex fallback missed
-   * trailing content.
-   */
-  function finalizeDraft(kind: DraftToolKind, callId: string | undefined): void {
-    const draftId = callId && callId.trim() ? callId : `${kind}-draft`;
-    const idx = toolCallDrafts.findIndex((d) => d.id === draftId);
-    if (idx === -1) return;
-
-    const draft = toolCallDrafts[idx];
-    const finalCode = extractCodeFromArgs(draft.rawArgs, kind);
-    if (finalCode !== draft.code) {
-      const updated = { ...draft, code: finalCode };
-      toolCallDrafts = [
-        ...toolCallDrafts.slice(0, idx),
-        updated,
-        ...toolCallDrafts.slice(idx + 1),
-      ];
-    }
-  }
-
-  function toDraftCallEvent(draft: DraftToolCall): TimelineEvent {
-    if (draft.kind === "sql") {
-      return {
-        id: `draft-sql-${draft.id}`,
-        parent_event_id: null,
-        type: "tool_call_sql",
-        payload: {
-          sql: draft.code,
-          limit: 100,
-          call_id: draft.id,
-        },
-        created_at: draft.createdAt,
-      };
-    }
-
-    return {
-      id: `draft-python-${draft.id}`,
-      parent_event_id: null,
-      type: "tool_call_python",
-      payload: {
-        code: draft.code,
-        timeout: 30,
-        call_id: draft.id,
-      },
-      created_at: draft.createdAt,
-    };
+    streamingState = createStreamingState();
   }
 
   async function hydrateThread(targetThreadId: string, preferredWorldlineId?: string): Promise<void> {
@@ -604,7 +388,7 @@
         maxIterations: provider === "gemini" ? 10 : 20,
         onEvent: (frame) => {
           ensureWorldlineVisible(frame.worldline_id);
-          clearDraftFromPersistedEvent(frame.event);
+          streamingState = clearFromEvent(streamingState, frame.event);
 
           // Remove optimistic user message when real one arrives
           if (frame.event.type === "user_message") {
@@ -631,7 +415,15 @@
         onDelta: (frame) => {
           ensureWorldlineVisible(frame.worldline_id);
           activeWorldlineId = frame.worldline_id;
-          handleStreamDelta(frame.delta);
+          streamingState = applyDelta(streamingState, frame.delta);
+          if (frame.delta.type === "assistant_text" && !frame.delta.done) {
+            statusText = "Composing response...";
+          } else if (frame.delta.type === "tool_call_sql" && !frame.delta.done) {
+            statusText = "Drafting SQL...";
+          } else if (frame.delta.type === "tool_call_python" && !frame.delta.done) {
+            statusText = "Drafting Python...";
+          }
+          scrollFeedToBottom();
         },
         onDone: async (done) => {
           activeWorldlineId = done.worldline_id;
@@ -849,30 +641,6 @@
               </header>
               <pre>{JSON.stringify(cell.event.payload, null, 2)}</pre>
             </article>
-          {/if}
-        {/each}
-
-        {#if assistantDraftText}
-          <MessageCell
-            role="assistant"
-            text={assistantDraftText}
-            createdAt={assistantDraftCreatedAt}
-          />
-        {/if}
-
-        {#each toolCallDrafts as draft (draft.id)}
-          {@const callEvent = toDraftCallEvent(draft)}
-          {#if draft.kind === "sql"}
-            <SqlCell callEvent={callEvent} resultEvent={null} initialCollapsed={false} />
-          {:else}
-            <PythonCell
-              callEvent={callEvent}
-              resultEvent={null}
-              initialCollapsed={false}
-              showArtifacts={false}
-              artifactLinkMode="panel"
-              on:artifactselect={handleArtifactSelect}
-            />
           {/if}
         {/each}
 
@@ -1196,7 +964,6 @@
     min-height: 0;
     overscroll-behavior: contain;
     scroll-behavior: smooth;
-    contain: layout style;
   }
 
   /* When user is actively scrolling, disable smooth scroll for immediate response */
@@ -1204,11 +971,11 @@
     scroll-behavior: auto;
   }
 
-  /* Optimize message cells for better scroll performance */
+  /* Prevent cells from shrinking below content; allow feed to scroll */
   :global(.message),
   :global(.sql-cell),
   :global(.python-cell) {
-    contain: layout style paint;
+    flex-shrink: 0;
   }
 
   .empty-state {

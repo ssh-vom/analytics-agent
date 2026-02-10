@@ -174,6 +174,7 @@
     border-radius: var(--radius-lg);
     overflow: hidden;
     transition: all var(--transition-fast);
+    flex-shrink: 0;
   }
 
   .sql-cell:hover {
@@ -189,6 +190,8 @@
     padding: var(--space-3) var(--space-4);
     background: var(--surface-1);
     border-bottom: 1px solid var(--border-soft);
+    min-height: 44px;
+    flex-shrink: 0;
   }
 
   .header-left {
