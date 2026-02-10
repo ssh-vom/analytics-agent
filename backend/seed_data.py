@@ -486,46 +486,42 @@ def get_worldline_schema(worldline_id: str) -> dict[str, Any]:
     conn = duckdb.connect(str(db_path))
 
     try:
-        # Get all schemas
-        schemas = conn.execute(
-            "SELECT schema_name FROM information_schema.schemata"
-        ).fetchall()
-        schema_names = [s[0] for s in schemas]
-
-        # Get native tables (exclude system tables and metadata tables)
+        # Get native tables from main schema only and dedupe by table name.
+        # Some DuckDB versions can expose duplicate rows via information_schema views.
         native_tables = []
-        for schema in schema_names:
-            if schema in ("pg_catalog", "information_schema"):
+        table_rows = conn.execute(
+            """
+            SELECT DISTINCT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'main'
+              AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+            """
+        ).fetchall()
+
+        for row in table_rows:
+            table_name = row[0]
+            if table_name.startswith("_"):
                 continue
 
-            try:
-                tables = conn.execute(f"""
-                    SELECT table_name 
-                    FROM information_schema.tables 
-                    WHERE table_schema = '{schema}'
-                    AND table_name NOT LIKE '\\_%'  -- Exclude metadata tables
-                """).fetchall()
+            columns = conn.execute(
+                """
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'main'
+                  AND table_name = ?
+                ORDER BY ordinal_position
+                """,
+                (table_name,),
+            ).fetchall()
 
-                for t in tables:
-                    table_name = t[0]
-                    # Get columns for this table
-                    columns = conn.execute(f"""
-                        SELECT column_name, data_type
-                        FROM information_schema.columns
-                        WHERE table_schema = '{schema}'
-                        AND table_name = '{table_name}'
-                        ORDER BY ordinal_position
-                    """).fetchall()
-
-                    native_tables.append(
-                        {
-                            "schema": schema,
-                            "name": table_name,
-                            "columns": [{"name": c[0], "type": c[1]} for c in columns],
-                        }
-                    )
-            except:
-                pass
+            native_tables.append(
+                {
+                    "schema": "main",
+                    "name": table_name,
+                    "columns": [{"name": c[0], "type": c[1]} for c in columns],
+                }
+            )
 
         # Get imported CSV history
         imported_tables = list_imported_tables(worldline_id)

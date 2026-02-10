@@ -32,6 +32,12 @@ TEMP_UPLOAD_DIR = seed_data_module.TEMP_UPLOAD_DIR
 
 router = APIRouter(prefix="/api/seed-data", tags=["seed-data"])
 
+_TABLE_TYPE_PRIORITY = {
+    "native": 1,
+    "external": 1,
+    "imported_csv": 2,
+}
+
 
 def _max_csv_size_label() -> str:
     return f"{MAX_CSV_FILE_SIZE / 1024 / 1024:.1f}MB"
@@ -74,6 +80,40 @@ def _append_worldline_event(
     set_worldline_head(conn, worldline_id, event_id)
     conn.commit()
     return event_id
+
+
+def _merge_table_entries(existing: dict, incoming: dict) -> dict:
+    existing_priority = _TABLE_TYPE_PRIORITY.get(str(existing.get("type", "")), 0)
+    incoming_priority = _TABLE_TYPE_PRIORITY.get(str(incoming.get("type", "")), 0)
+
+    if incoming_priority >= existing_priority:
+        preferred, secondary = incoming, existing
+    else:
+        preferred, secondary = existing, incoming
+
+    merged = {**secondary, **preferred}
+    if "columns" not in merged:
+        if "columns" in existing:
+            merged["columns"] = existing["columns"]
+        elif "columns" in incoming:
+            merged["columns"] = incoming["columns"]
+    return merged
+
+
+def _dedupe_table_entries(tables: list[dict]) -> list[dict]:
+    deduped: dict[tuple[str, str], dict] = {}
+    for table in tables:
+        key = (str(table.get("schema", "")), str(table.get("name", "")))
+        current = deduped.get(key)
+        if current is None:
+            deduped[key] = table
+            continue
+        deduped[key] = _merge_table_entries(current, table)
+
+    return sorted(
+        deduped.values(),
+        key=lambda table: (str(table.get("schema", "")), str(table.get("name", ""))),
+    )
 
 
 class AttachExternalDBRequest(BaseModel):
@@ -314,6 +354,8 @@ async def list_all_tables_endpoint(
                     "attached_at": db["attached_at"],
                 }
             )
+
+    all_tables = _dedupe_table_entries(all_tables)
 
     # Filter out system tables if not requested
     if not include_system:

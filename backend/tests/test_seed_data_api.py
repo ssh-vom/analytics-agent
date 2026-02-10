@@ -122,6 +122,67 @@ class SeedDataApiTests(unittest.TestCase):
         temp_files = list(self.temp_upload_dir.glob("*"))
         self.assertEqual(temp_files, [])
 
+    def test_get_worldline_schema_native_tables_are_unique(self) -> None:
+        worldline_id = self._create_worldline()
+        upload = UploadFile(
+            io.BytesIO(b"name,score\nAva,10\nLiam,12\n"),
+            filename="scores.csv",
+        )
+
+        self._run(
+            seed_data_api.import_csv_endpoint(
+                worldline_id=worldline_id,
+                file=upload,
+                table_name="scores_table",
+                if_exists="fail",
+            )
+        )
+
+        schema = seed_data_api.get_worldline_schema(worldline_id)
+        native_keys = [
+            (table["schema"], table["name"]) for table in schema["native_tables"]
+        ]
+
+        self.assertEqual(len(native_keys), len(set(native_keys)))
+
+    def test_list_tables_endpoint_dedupes_native_and_imported_entries(self) -> None:
+        worldline_id = self._create_worldline()
+        upload = UploadFile(
+            io.BytesIO(b"name,score\nAva,10\nLiam,12\n"),
+            filename="scores.csv",
+        )
+
+        self._run(
+            seed_data_api.import_csv_endpoint(
+                worldline_id=worldline_id,
+                file=upload,
+                table_name="scores_table",
+                if_exists="fail",
+            )
+        )
+
+        tables_response = self._run(
+            seed_data_api.list_all_tables_endpoint(
+                worldline_id=worldline_id,
+                include_system=False,
+            )
+        )
+
+        names = [table["name"] for table in tables_response["tables"]]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(tables_response["count"], len(tables_response["tables"]))
+
+        matching = [
+            table
+            for table in tables_response["tables"]
+            if table["name"] == "scores_table"
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["type"], "imported_csv")
+        self.assertEqual(matching[0]["row_count"], 2)
+        self.assertIn("columns", matching[0])
+        self.assertTrue(matching[0]["columns"])
+
 
 if __name__ == "__main__":
     unittest.main()
