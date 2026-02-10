@@ -1148,12 +1148,12 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: 5px var(--space-3);
+    padding: 8px var(--space-3);
     background: var(--surface-1);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: 14px;
     cursor: pointer;
     transition: all var(--transition-fast);
   }
@@ -1167,10 +1167,10 @@
     position: absolute;
     top: calc(100% + var(--space-1));
     left: 0;
-    min-width: 140px;
+    min-width: 160px;
     background: var(--surface-1);
     border: 1px solid var(--border-medium);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     box-shadow: var(--shadow-lg);
     z-index: 100;
     overflow: hidden;
@@ -1179,11 +1179,11 @@
   .provider-option {
     display: block;
     width: 100%;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-3);
     background: transparent;
     border: none;
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: 14px;
     text-align: left;
     cursor: pointer;
     transition: color var(--transition-fast);
@@ -1199,14 +1199,14 @@
   }
 
   .model-input {
-    padding: 5px var(--space-3);
+    padding: 8px var(--space-3);
     background: var(--surface-1);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: 14px;
     font-family: var(--font-mono);
-    min-width: 160px;
+    min-width: 180px;
     transition: border-color var(--transition-fast);
   }
 
@@ -1221,12 +1221,12 @@
   }
 
   .status {
-    font-size: 12px;
+    font-size: 13px;
     font-family: var(--font-mono);
     color: var(--text-dim);
-    padding: 3px var(--space-3);
+    padding: 5px var(--space-3);
     background: var(--surface-0);
-    border-radius: var(--radius-full);
+    border-radius: var(--radius-sm);
     border: 1px solid var(--border-soft);
   }
 
@@ -1239,12 +1239,12 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: 5px var(--space-3);
+    padding: 8px var(--space-3);
     background: var(--surface-1);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: 14px;
     cursor: pointer;
     transition: border-color var(--transition-fast);
   }
@@ -1254,10 +1254,10 @@
   }
 
   .db-badge {
-    padding: 2px 6px;
+    padding: 3px 8px;
     background: var(--accent-green-muted);
     color: var(--accent-green);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     font-family: var(--font-mono);
     text-transform: uppercase;
@@ -1266,10 +1266,10 @@
 
   .feed {
     overflow-y: auto;
-    padding: var(--space-4) var(--space-6);
+    padding: var(--space-5) var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-4);
     min-height: 0;
     overscroll-behavior: contain;
     scroll-behavior: smooth;

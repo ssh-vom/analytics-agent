@@ -202,11 +202,11 @@
   .sidebar-content {
     flex: 1;
     overflow: hidden;
-    padding: var(--space-3);
+    padding: var(--space-4);
   }
 
   .section {
-    margin-bottom: var(--space-4);
+    margin-bottom: var(--space-5);
   }
 
   .section-header {
@@ -214,13 +214,13 @@
     align-items: center;
     gap: var(--space-2);
     width: 100%;
-    padding: var(--space-2) var(--space-2);
+    padding: var(--space-3) var(--space-2);
     background: transparent;
     border: none;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     color: var(--text-muted);
     font-family: var(--font-body);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -239,7 +239,7 @@
 
   .section-count {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .section-content {
@@ -263,10 +263,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-3);
     background: transparent;
     border: none;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     cursor: pointer;
     transition: background var(--transition-fast);
     text-align: left;
@@ -289,7 +289,7 @@
 
   .thread-name {
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
     white-space: nowrap;
     overflow: hidden;
@@ -298,7 +298,7 @@
 
   .thread-meta {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .active-indicator {
@@ -313,13 +313,13 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    margin-top: var(--space-1);
+    padding: var(--space-3) var(--space-3);
+    margin-top: var(--space-2);
     background: transparent;
     border: 1px dashed var(--border-medium);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: 13px;
     cursor: pointer;
     transition: all var(--transition-fast);
   }
@@ -331,7 +331,7 @@
   }
 
   .sidebar-footer {
-    padding: var(--space-3);
+    padding: var(--space-4);
     border-top: 1px solid var(--border-soft);
   }
 
@@ -346,11 +346,11 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-3);
     color: var(--text-muted);
     text-decoration: none;
-    border-radius: var(--radius-md);
-    font-size: 13px;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
     transition: all var(--transition-fast);
   }
 
@@ -366,7 +366,7 @@
 
   .version {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: 12px;
     font-family: var(--font-mono);
     text-align: center;
   }

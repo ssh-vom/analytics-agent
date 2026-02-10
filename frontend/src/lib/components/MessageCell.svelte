@@ -64,10 +64,10 @@
   .message {
     display: flex;
     gap: var(--space-3);
-    padding: var(--space-4);
+    padding: var(--space-5);
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-md);
     transition: border-color var(--transition-fast);
   }
 
@@ -91,9 +91,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius-md);
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-sm);
     background: var(--surface-2);
     color: var(--text-dim);
   }
@@ -134,8 +134,8 @@
 
   .role-name {
     font-family: var(--font-heading);
-    font-size: 12px;
-    font-weight: 400;
+    font-size: 13px;
+    font-weight: 500;
     letter-spacing: 0.04em;
     color: var(--text-muted);
     text-transform: uppercase;
@@ -155,7 +155,7 @@
 
   time {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: 12px;
     font-family: var(--font-mono);
   }
 
@@ -165,14 +165,14 @@
 
   .message-body p {
     margin: 0;
-    line-height: 1.65;
+    line-height: 1.6;
     white-space: pre-wrap;
-    font-size: 14px;
+    font-size: 15px;
   }
 
   .markdown-content {
-    font-size: 14px;
-    line-height: 1.65;
+    font-size: 15px;
+    line-height: 1.6;
   }
 
   .markdown-content :global(p) {
@@ -195,11 +195,11 @@
 
   .markdown-content :global(code) {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 13px;
     background: var(--surface-1);
     border: 1px solid var(--border-soft);
     border-radius: var(--radius-sm);
-    padding: 1px 4px;
+    padding: 2px 6px;
   }
 
   .markdown-content :global(pre) {
@@ -236,12 +236,12 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: 2px var(--space-2);
+    padding: 4px var(--space-2);
     background: transparent;
     border: 1px solid var(--border-soft);
     border-radius: var(--radius-sm);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: 12px;
     cursor: pointer;
     transition: all var(--transition-fast);
     opacity: 0;
