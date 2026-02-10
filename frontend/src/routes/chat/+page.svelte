@@ -1294,6 +1294,16 @@
     padding: var(--space-8);
     text-align: center;
     color: var(--text-dim);
+    animation: messageFadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  }
+
+  @keyframes messageFadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 
   .empty-icon {
@@ -1316,9 +1326,10 @@
 
   .meta-cell {
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-md);
     padding: var(--space-3);
     background: var(--surface-0);
+    animation: messageSlideIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
   }
 
   .meta-cell header {
@@ -1386,19 +1397,26 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    padding: 6px var(--space-3);
+    padding: 8px var(--space-3);
     background: var(--surface-1);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: 14px;
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
   .context-btn:hover {
     border-color: var(--border-medium);
     color: var(--text-primary);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  .context-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
   }
 
   .context-menu {
@@ -1408,8 +1426,10 @@
     min-width: 220px;
     background: var(--surface-0);
     border: 1px solid var(--border-medium);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     box-shadow: var(--shadow-lg);
+    animation: panelSlideUp 0.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    transform-origin: bottom center;
     z-index: 200;
     padding: var(--space-2);
     display: flex;
@@ -1418,6 +1438,17 @@
     max-height: 280px;
     overflow-y: auto;
     max-width: min(320px, calc(100vw - 2 * var(--space-4)));
+  }
+
+  @keyframes panelSlideUp {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 
   .connectors-menu {
@@ -1539,15 +1570,22 @@
     height: 40px;
     background: var(--accent-green);
     border: none;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     color: #111;
     cursor: pointer;
-    transition: opacity var(--transition-fast);
+    transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
     flex-shrink: 0;
   }
 
   .send-btn:hover:not(:disabled) {
-    opacity: 0.85;
+    opacity: 0.9;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(62, 207, 142, 0.3);
+  }
+
+  .send-btn:active:not(:disabled) {
+    transform: translateY(0);
+    box-shadow: 0 2px 6px rgba(62, 207, 142, 0.2);
   }
 
   .send-btn:disabled {
@@ -1790,6 +1828,18 @@
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
     color: var(--text-dim);
+    animation: messageSlideIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  }
+
+  @keyframes messageSlideIn {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 
   .thinking-dots {

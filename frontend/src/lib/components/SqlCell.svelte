@@ -34,7 +34,7 @@
         : "queued";
 </script>
 
-<article class="sql-cell">
+<article class="sql-cell message-entrance">
   <header class="cell-header">
     <div class="header-left">
       <button
@@ -171,7 +171,7 @@
   .sql-cell {
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-md);
     overflow: hidden;
     transition: border-color var(--transition-fast);
     flex-shrink: 0;
@@ -334,6 +334,7 @@
   .cell-content {
     display: flex;
     flex-direction: column;
+    animation: messageFadeIn 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
   }
 
   .content-section {
@@ -418,6 +419,16 @@
     padding: var(--space-6);
     color: var(--text-dim);
     font-size: 13px;
+  }
+
+  .loading-state :global(.spin) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   @media (max-width: 640px) {

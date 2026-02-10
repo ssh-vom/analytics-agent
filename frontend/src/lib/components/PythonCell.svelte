@@ -64,7 +64,7 @@
   }
 </script>
 
-<article class="python-cell">
+<article class="python-cell message-entrance">
   <header class="cell-header">
     <div class="header-left">
       <button
@@ -272,7 +272,7 @@
   .python-cell {
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-md);
     overflow: hidden;
     transition: border-color var(--transition-fast);
     flex-shrink: 0;
@@ -435,6 +435,16 @@
   .cell-content {
     display: flex;
     flex-direction: column;
+    animation: messageFadeIn 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  }
+
+  @keyframes messageFadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 
   .content-section {

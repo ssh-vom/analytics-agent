@@ -24,7 +24,7 @@
   }
 </script>
 
-<article class="message" class:user={role === "user"} class:assistant={role === "assistant"} class:plan={role === "plan"}>
+<article class="message message-entrance" class:user={role === "user"} class:assistant={role === "assistant"} class:plan={role === "plan"}>
   <div class="message-gutter">
     <div class="avatar" class:user={role === "user"} class:assistant={role === "assistant"} class:plan={role === "plan"}>
       {#if role === "user"}
