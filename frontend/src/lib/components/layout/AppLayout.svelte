@@ -75,7 +75,7 @@
     <div class="sidebar-header">
       <a href="/chat" class="logo">
         <Zap size={18} color="var(--accent-green)" />
-        <span class="logo-text">TextQL</span>
+        <span class="logo-text">AnalyticZ</span>
       </a>
     </div>
 

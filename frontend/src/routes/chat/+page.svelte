@@ -32,11 +32,14 @@
   import { Send } from "lucide-svelte";
   import { ChevronDown } from "lucide-svelte";
   import { Sparkles } from "lucide-svelte";
+  import { Plus } from "lucide-svelte";
+  import { Wrench } from "lucide-svelte";
   import { Upload } from "lucide-svelte";
   import { FileSpreadsheet } from "lucide-svelte";
   import { X } from "lucide-svelte";
 
   type Provider = "gemini" | "openai" | "openrouter";
+  type OutputType = "report" | "dashboard";
 
   let threadId = "";
   let activeWorldlineId = "";
@@ -68,6 +71,20 @@
   let importSuccess: { filename: string; table: string; rows: number } | null = null;
   let showImportPanel = false;
   let worldlineTables: Awaited<ReturnType<typeof fetchWorldlineTables>> | null = null;
+  let outputType: OutputType = "report";
+  let showOutputTypeMenu = false;
+  let showConnectorsMenu = false;
+  let showSettingsMenu = false;
+  let showDataContextMenu = false;
+  let availableConnectors: Array<{ id: string; name: string; isActive: boolean }> = [];
+  let selectedConnectorIds: string[] = [];
+  let selectedContextTables: string[] = [];
+  let contextSettings = {
+    webSearch: true,
+    dashboards: false,
+    textToSql: true,
+    ontology: false,
+  };
 
   $: activeEvents = eventsByWorldline[activeWorldlineId] ?? [];
   $: displayItems = buildDisplayItems(activeEvents, streamingState);
@@ -78,6 +95,7 @@
 
   onMount(async () => {
     await threads.loadThreads();
+    loadConnectorsFromStorage();
 
     // Load from localStorage if available
     activeThread.loadFromStorage();
@@ -95,6 +113,7 @@
     }
 
     await tick();
+    await refreshWorldlineContextTables();
     scrollFeedToBottom(true);
   });
 
@@ -167,6 +186,97 @@
 
   function resetStreamingDrafts(): void {
     streamingState = createStreamingState();
+  }
+
+  function loadConnectorsFromStorage(): void {
+    try {
+      const saved = localStorage.getItem("textql_connectors");
+      if (saved) {
+        const parsed = JSON.parse(saved) as Array<{
+          id: string;
+          name: string;
+          isActive: boolean;
+        }>;
+        availableConnectors = parsed;
+        selectedConnectorIds = parsed.filter((c) => c.isActive).map((c) => c.id);
+      }
+    } catch {
+      availableConnectors = [];
+      selectedConnectorIds = [];
+    }
+  }
+
+  function closeContextMenus(): void {
+    showOutputTypeMenu = false;
+    showConnectorsMenu = false;
+    showSettingsMenu = false;
+    showDataContextMenu = false;
+  }
+
+  function toggleConnector(id: string): void {
+    if (selectedConnectorIds.includes(id)) {
+      selectedConnectorIds = selectedConnectorIds.filter((connectorId) => connectorId !== id);
+      return;
+    }
+    selectedConnectorIds = [...selectedConnectorIds, id];
+  }
+
+  function toggleContextTable(name: string): void {
+    if (selectedContextTables.includes(name)) {
+      selectedContextTables = selectedContextTables.filter((table) => table !== name);
+      return;
+    }
+    selectedContextTables = [...selectedContextTables, name];
+  }
+
+  async function refreshWorldlineContextTables(): Promise<void> {
+    if (!activeWorldlineId) {
+      worldlineTables = null;
+      selectedContextTables = [];
+      return;
+    }
+    try {
+      const tables = await fetchWorldlineTables(activeWorldlineId);
+      worldlineTables = tables;
+      selectedContextTables = selectedContextTables.filter((selected) =>
+        tables.tables.some((table) => table.name === selected),
+      );
+      if (selectedContextTables.length === 0 && tables.tables.length > 0) {
+        selectedContextTables = [tables.tables[0].name];
+      }
+    } catch {
+      worldlineTables = null;
+      selectedContextTables = [];
+    }
+  }
+
+  function buildContextualMessage(message: string): string {
+    const selectedConnectors = availableConnectors
+      .filter((connector) => selectedConnectorIds.includes(connector.id))
+      .map((connector) => connector.name);
+    const contextLines: string[] = [
+      `output_type=${outputType}`,
+    ];
+
+    if (selectedContextTables.length > 0) {
+      contextLines.push(`tables=${selectedContextTables.join(",")}`);
+    }
+    if (selectedConnectors.length > 0) {
+      contextLines.push(`connectors=${selectedConnectors.join(",")}`);
+    }
+
+    const enabledSettings = Object.entries(contextSettings)
+      .filter(([, enabled]) => enabled)
+      .map(([key]) => key);
+    if (enabledSettings.length > 0) {
+      contextLines.push(`settings=${enabledSettings.join(",")}`);
+    }
+
+    if (contextLines.length === 0) {
+      return message;
+    }
+
+    return `${message}\n\n<context>\n${contextLines.map((line) => `- ${line}`).join("\n")}\n</context>`;
   }
 
   async function hydrateThread(targetThreadId: string, preferredWorldlineId?: string): Promise<void> {
@@ -255,13 +365,13 @@
       selectedArtifactId = null;
       
       // Create thread via API
-      const thread = await createThread("TextQL Session");
+      const thread = await createThread("AnalyticZ Session");
       threadId = thread.thread_id;
       
       // Create local thread object
       const newThread = {
         id: thread.thread_id,
-        name: "TextQL Session",
+        name: "AnalyticZ Session",
         createdAt: new Date().toISOString(),
         lastActivity: new Date().toISOString(),
         messageCount: 0,
@@ -317,6 +427,7 @@
     if (!eventsByWorldline[worldlineId]) {
       await loadWorldline(worldlineId);
     }
+    await refreshWorldlineContextTables();
     scrollFeedToBottom(true);
   }
 
@@ -362,6 +473,7 @@
 
     isSending = true;
     prompt = "";
+    closeContextMenus();
     statusText = "Agent is thinking...";
     shouldAutoScroll = true;
     resetStreamingDrafts();
@@ -380,9 +492,10 @@
     scrollFeedToBottom(true);
 
     try {
+      const contextualMessage = buildContextualMessage(message);
       await streamChatTurn({
         worldlineId: activeWorldlineId,
-        message,
+        message: contextualMessage,
         provider,
         model: model.trim() || undefined,
         maxIterations: provider === "gemini" ? 10 : 20,
@@ -503,6 +616,7 @@
       removeUploadedFile(file.name);
       // Refresh tables list
       worldlineTables = await fetchWorldlineTables(activeWorldlineId);
+      selectedContextTables = [...new Set([...selectedContextTables, result.table_name])];
       statusText = `Imported ${result.row_count} rows into ${result.table_name}`;
     } catch (error) {
       importError = error instanceof Error ? error.message : "Import failed";
@@ -668,6 +782,132 @@
 
   <!-- Composer -->
   <div class="composer-container">
+    <div class="context-toolbar">
+      <button
+        type="button"
+        class="context-btn"
+        on:click={() => {
+          showOutputTypeMenu = !showOutputTypeMenu;
+          showConnectorsMenu = false;
+          showSettingsMenu = false;
+          showDataContextMenu = false;
+        }}
+      >
+        <span>{outputType === "report" ? "Report" : "Dashboard"}</span>
+        <ChevronDown size={13} />
+      </button>
+      {#if showOutputTypeMenu}
+        <div class="context-menu">
+          <div class="context-menu-title">Output Type</div>
+          <button type="button" class="context-option" on:click={() => { outputType = "report"; showOutputTypeMenu = false; }}>
+            {outputType === "report" ? "✓ " : ""}Report
+          </button>
+          <button type="button" class="context-option" on:click={() => { outputType = "dashboard"; showOutputTypeMenu = false; }}>
+            {outputType === "dashboard" ? "✓ " : ""}Dashboard
+          </button>
+        </div>
+      {/if}
+
+      <button
+        type="button"
+        class="context-btn"
+        on:click={() => {
+          showConnectorsMenu = !showConnectorsMenu;
+          showOutputTypeMenu = false;
+          showSettingsMenu = false;
+          showDataContextMenu = false;
+        }}
+      >
+        <Database size={14} />
+        <span>{selectedConnectorIds.length > 0 ? `${selectedConnectorIds.length} connectors` : "Connectors"}</span>
+        <ChevronDown size={13} />
+      </button>
+      {#if showConnectorsMenu}
+        <div class="context-menu connectors-menu">
+          <div class="context-menu-title">Connectors</div>
+          {#if availableConnectors.length === 0}
+            <div class="context-empty">No connectors configured</div>
+          {:else}
+            {#each availableConnectors as connector}
+              <button type="button" class="context-option" on:click={() => toggleConnector(connector.id)}>
+                {selectedConnectorIds.includes(connector.id) ? "✓ " : ""}{connector.name}
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {/if}
+
+      <button
+        type="button"
+        class="context-btn"
+        on:click={() => {
+          showSettingsMenu = !showSettingsMenu;
+          showOutputTypeMenu = false;
+          showConnectorsMenu = false;
+          showDataContextMenu = false;
+        }}
+      >
+        <Wrench size={14} />
+        <span>Settings</span>
+        <ChevronDown size={13} />
+      </button>
+      {#if showSettingsMenu}
+        <div class="context-menu settings-menu">
+          <div class="context-menu-title">Settings</div>
+          <label class="toggle-row">
+            <span>Web Search</span>
+            <input type="checkbox" bind:checked={contextSettings.webSearch} />
+          </label>
+          <label class="toggle-row">
+            <span>Dashboards</span>
+            <input type="checkbox" bind:checked={contextSettings.dashboards} />
+          </label>
+          <label class="toggle-row">
+            <span>Text to SQL</span>
+            <input type="checkbox" bind:checked={contextSettings.textToSql} />
+          </label>
+          <label class="toggle-row">
+            <span>Ontology</span>
+            <input type="checkbox" bind:checked={contextSettings.ontology} />
+          </label>
+        </div>
+      {/if}
+
+      <button
+        type="button"
+        class="context-btn"
+        on:click={() => {
+          showDataContextMenu = !showDataContextMenu;
+          showOutputTypeMenu = false;
+          showConnectorsMenu = false;
+          showSettingsMenu = false;
+        }}
+      >
+        <Plus size={14} />
+        <span>{selectedContextTables.length > 0 ? `${selectedContextTables.length} table(s)` : "Attach Context"}</span>
+        <ChevronDown size={13} />
+      </button>
+      {#if showDataContextMenu}
+        <div class="context-menu data-menu">
+          <div class="context-menu-title">Datasets</div>
+          <button type="button" class="context-option" on:click={() => document.getElementById('csv-upload')?.click()}>
+            Attach a file
+          </button>
+          <div class="context-sep"></div>
+          <div class="context-menu-title small">Worldline Tables</div>
+          {#if worldlineTables && worldlineTables.tables.length > 0}
+            {#each worldlineTables.tables.slice(0, 12) as table}
+              <button type="button" class="context-option" on:click={() => toggleContextTable(table.name)}>
+                {selectedContextTables.includes(table.name) ? "✓ " : ""}{table.name}
+              </button>
+            {/each}
+          {:else}
+            <div class="context-empty">No tables available</div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+
     <!-- CSV Import Panel -->
     {#if showImportPanel}
       <div class="import-panel">
@@ -1060,6 +1300,121 @@
     background: var(--bg-1);
     border-top: 1px solid var(--border-soft);
     flex-shrink: 0;
+  }
+
+  .context-toolbar {
+    max-width: 900px;
+    margin: 0 auto var(--space-2);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    position: relative;
+  }
+
+  .context-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 6px var(--space-3);
+    background: var(--surface-1);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .context-btn:hover {
+    border-color: var(--border-medium);
+    color: var(--text-primary);
+  }
+
+  .context-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    min-width: 220px;
+    background: var(--surface-0);
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    z-index: 200;
+    padding: var(--space-2);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+
+  .connectors-menu {
+    left: 130px;
+  }
+
+  .settings-menu {
+    left: 300px;
+  }
+
+  .data-menu {
+    left: 430px;
+  }
+
+  .context-menu-title {
+    padding: var(--space-1) var(--space-2);
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .context-menu-title.small {
+    margin-top: var(--space-1);
+  }
+
+  .context-option {
+    border: none;
+    background: transparent;
+    border-radius: var(--radius-sm);
+    text-align: left;
+    padding: 6px var(--space-2);
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    font-family: var(--font-body);
+  }
+
+  .context-option:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .context-empty {
+    padding: var(--space-2);
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+
+  .context-sep {
+    height: 1px;
+    background: var(--border-soft);
+    margin: var(--space-1) 0;
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: 6px var(--space-2);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .toggle-row:hover {
+    background: var(--surface-hover);
   }
 
   .composer {

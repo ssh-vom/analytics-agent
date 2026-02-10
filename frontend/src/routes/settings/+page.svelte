@@ -44,7 +44,7 @@
     <div class="header-content">
       <div>
         <h1>Settings</h1>
-        <p class="subtitle">Configure your TextQL preferences</p>
+        <p class="subtitle">Configure your AnalyticZ preferences</p>
       </div>
       {#if hasChanges}
         <button class="save-btn" on:click={saveSettings}>
