@@ -26,9 +26,13 @@
   let outputCollapsed = false;
   const dispatch = createEventDispatcher<{ artifactselect: { artifactId: string } }>();
 
+  $: rawCode = callEvent?.payload?.code;
   $: code =
-    (callEvent?.payload?.code as string | undefined) ??
-    "# code unavailable (result event arrived before call event)";
+    typeof rawCode === "string" && rawCode.length > 0
+      ? rawCode
+      : resultEvent
+        ? "# code unavailable (result event arrived before call event)"
+        : "";
   $: result = readPythonResult(resultEvent);
   $: artifacts = result?.artifacts ?? [];
   $: imageArtifacts = artifacts.filter((artifact) => artifact.type === "image");

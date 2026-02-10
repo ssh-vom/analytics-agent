@@ -10,7 +10,8 @@
   let timer: ReturnType<typeof setInterval> | ReturnType<typeof requestAnimationFrame> | null = null;
   let lastCode = "";
   $: isRevealing = animate && rendered.length < code.length;
-  $: content = rendered || placeholder;
+  // Prefer real code whenever available; only show placeholder when code is empty.
+  $: content = rendered || code || placeholder;
   $: languageId = (language || "text").trim().toLowerCase();
   $: highlighted = highlightCode(content, languageId);
 

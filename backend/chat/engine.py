@@ -157,12 +157,23 @@ class ChatEngine:
                 repeated_call_detected = False
                 for tool_call in response.tool_calls:
                     tool_name = (tool_call.name or "").strip()
+                    delta_type = self._tool_name_to_delta_type(tool_name)
 
                     if tool_name == "run_python" and python_succeeded_in_turn:
                         final_text = (
                             "Python already ran successfully in this turn, so I stopped "
                             "additional Python executions and finalized the result."
                         )
+                        if on_delta is not None and delta_type is not None:
+                            await on_delta(
+                                active_worldline_id,
+                                {
+                                    "type": delta_type,
+                                    "call_id": tool_call.id or None,
+                                    "skipped": True,
+                                    "reason": "python_already_succeeded_in_turn",
+                                },
+                            )
                         repeated_call_detected = True
                         break
 
@@ -175,6 +186,16 @@ class ChatEngine:
                             "I stopped because the model repeated the same tool call "
                             "with identical arguments in this turn."
                         )
+                        if on_delta is not None and delta_type is not None:
+                            await on_delta(
+                                active_worldline_id,
+                                {
+                                    "type": delta_type,
+                                    "call_id": tool_call.id or None,
+                                    "skipped": True,
+                                    "reason": "repeated_identical_tool_call",
+                                },
+                            )
                         repeated_call_detected = True
                         break
 

@@ -77,6 +77,8 @@ export interface StreamDeltaPayload {
   call_id?: string;
   delta?: string;
   done?: boolean;
+  skipped?: boolean;
+  reason?: string;
 }
 
 export interface SseDeltaFrame {

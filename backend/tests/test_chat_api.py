@@ -592,6 +592,71 @@ class ChatApiTests(unittest.TestCase):
         )
         self.assertTrue(payloads[-1]["done"])
 
+    def test_chat_stream_emits_tool_call_skipped_for_repeated_call(self) -> None:
+        """When repeated-call guard stops execution, stream emits skipped delta."""
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_repeat_1",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_repeat_2",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 10},
+                        )
+                    ],
+                ),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            response = self._run(
+                chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="repeat this sql",
+                        provider="openai",
+                    )
+                )
+            )
+            raw_stream = self._run(self._consume_stream(response))
+            payloads = self._extract_sse_payloads(raw_stream)
+
+        event_types = [
+            payload["event"]["type"] for payload in payloads if "event" in payload
+        ]
+        self.assertEqual(
+            event_types,
+            ["user_message", "tool_call_sql", "tool_result_sql", "assistant_message"],
+        )
+
+        skipped_deltas = [
+            payload["delta"]
+            for payload in payloads
+            if "delta" in payload
+            and payload["delta"].get("type") == "tool_call_sql"
+            and payload["delta"].get("skipped") is True
+        ]
+        self.assertEqual(len(skipped_deltas), 1)
+        self.assertEqual(skipped_deltas[0].get("call_id"), "call_repeat_2")
+        self.assertEqual(
+            skipped_deltas[0].get("reason"),
+            "repeated_identical_tool_call",
+        )
+        self.assertTrue(payloads[-1]["done"])
+
     def test_chat_stream_emits_tool_call_deltas(self) -> None:
         """Verify that tool-call argument deltas are streamed as SSE frames.
 

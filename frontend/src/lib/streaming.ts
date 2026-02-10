@@ -16,12 +16,83 @@ export interface StreamingState {
   toolCalls: Map<string, { type: "sql" | "python"; code: string; rawArgs: string; createdAt: string }>;
 }
 
+const FALLBACK_DRAFT_ID: Record<"sql" | "python", string> = {
+  sql: "sql-draft",
+  python: "python-draft",
+};
+
 export function createStreamingState(): StreamingState {
   return {
     text: "",
     textCreatedAt: "",
     toolCalls: new Map(),
   };
+}
+
+function mostRecentDraftIdByKind(
+  toolCalls: StreamingState["toolCalls"],
+  kind: "sql" | "python"
+): string | null {
+  const calls = [...toolCalls.entries()].filter(([, v]) => v.type === kind);
+  if (calls.length === 0) {
+    return null;
+  }
+  const mostRecent = calls.sort(
+    (a, b) =>
+      new Date(b[1].createdAt).getTime() - new Date(a[1].createdAt).getTime()
+  )[0];
+  return mostRecent[0];
+}
+
+function resolveDeltaDraftId(
+  state: StreamingState,
+  kind: "sql" | "python",
+  callId: string | undefined
+): string {
+  const normalized = (callId ?? "").trim();
+  if (normalized) {
+    return normalized;
+  }
+  const fallbackId = FALLBACK_DRAFT_ID[kind];
+  if (state.toolCalls.has(fallbackId)) {
+    return fallbackId;
+  }
+  // Reuse an existing in-flight draft of this kind to avoid duplicates.
+  const existingKindDraft = mostRecentDraftIdByKind(state.toolCalls, kind);
+  if (existingKindDraft) {
+    return existingKindDraft;
+  }
+  return fallbackId;
+}
+
+function findAliasDraftIdForCall(
+  state: StreamingState,
+  kind: "sql" | "python",
+  canonicalCallId: string
+): string | null {
+  if (state.toolCalls.has(canonicalCallId)) {
+    return canonicalCallId;
+  }
+  const fallbackId = FALLBACK_DRAFT_ID[kind];
+  if (state.toolCalls.has(fallbackId)) {
+    return fallbackId;
+  }
+  return null;
+}
+
+function resolveDeleteDraftId(
+  state: StreamingState,
+  kind: "sql" | "python",
+  callIdFromEvent: unknown
+): string | null {
+  if (typeof callIdFromEvent === "string" && callIdFromEvent.trim()) {
+    const key = callIdFromEvent.trim();
+    if (state.toolCalls.has(key)) {
+      return key;
+    }
+  }
+  // call_id missing OR call_id mismatched with draft key -> fallback by kind.
+  return mostRecentDraftIdByKind(state.toolCalls, kind);
 }
 
 function deltaTypeToKind(type: StreamDeltaType): "sql" | "python" | null {
@@ -88,19 +159,33 @@ export function applyDelta(
   const kind = deltaTypeToKind(delta.type);
   if (!kind) return state;
 
+  if (delta.skipped) {
+    const toDelete = resolveDeleteDraftId(state, kind, delta.call_id);
+    if (!toDelete) {
+      return state;
+    }
+    const next = new Map(state.toolCalls);
+    next.delete(toDelete);
+    return { ...state, toolCalls: next };
+  }
+
   if (delta.done) {
-    const callId = (delta.call_id ?? `${kind}-draft`).trim() || `${kind}-draft`;
-    const existing = state.toolCalls.get(callId);
+    const callId = resolveDeltaDraftId(state, kind, delta.call_id);
+    const aliasId = findAliasDraftIdForCall(state, kind, callId);
+    const existing = aliasId ? state.toolCalls.get(aliasId) : undefined;
     if (existing) {
       const finalCode = extractCodeFromArgs(existing.rawArgs, kind);
       const next = new Map(state.toolCalls);
+      if (aliasId && aliasId !== callId) {
+        next.delete(aliasId);
+      }
       next.set(callId, { ...existing, code: finalCode });
       return { ...state, toolCalls: next };
     }
     return state;
   }
 
-  const callId = (delta.call_id ?? `${kind}-draft`).trim() || `${kind}-draft`;
+  const callId = resolveDeltaDraftId(state, kind, delta.call_id);
   const argsDelta = delta.delta ?? "";
 
   let nextText = state.text;
@@ -110,15 +195,19 @@ export function applyDelta(
     nextTextCreatedAt = "";
   }
 
-  const existing = state.toolCalls.get(callId);
   const next = new Map(state.toolCalls);
-  if (existing) {
-    const rawArgs = existing.rawArgs + argsDelta;
+  const aliasId = findAliasDraftIdForCall(state, kind, callId);
+  const existingEntry = aliasId ? state.toolCalls.get(aliasId) : undefined;
+  if (existingEntry) {
+    const rawArgs = existingEntry.rawArgs + argsDelta;
+    if (aliasId && aliasId !== callId) {
+      next.delete(aliasId);
+    }
     next.set(callId, {
       type: kind,
       rawArgs,
       code: extractCodeFromArgs(rawArgs, kind),
-      createdAt: existing.createdAt,
+      createdAt: existingEntry.createdAt,
     });
   } else {
     next.set(callId, {
@@ -143,22 +232,7 @@ export function clearFromEvent(
     return { ...state, text: "", textCreatedAt: "" };
   }
   if (event.type === "tool_call_sql") {
-    const callId = event.payload?.call_id;
-    const toDelete =
-      typeof callId === "string" && callId.trim()
-        ? callId
-        : (() => {
-            const sqlCalls = [...state.toolCalls.entries()].filter(
-              ([_, v]) => v.type === "sql"
-            );
-            if (sqlCalls.length === 0) return null;
-            const mostRecent = sqlCalls.sort(
-              (a, b) =>
-                new Date(b[1].createdAt).getTime() -
-                new Date(a[1].createdAt).getTime()
-            )[0];
-            return mostRecent[0];
-          })();
+    const toDelete = resolveDeleteDraftId(state, "sql", event.payload?.call_id);
     if (toDelete) {
       const next = new Map(state.toolCalls);
       next.delete(toDelete);
@@ -167,22 +241,7 @@ export function clearFromEvent(
     return state;
   }
   if (event.type === "tool_call_python") {
-    const callId = event.payload?.call_id;
-    const toDelete =
-      typeof callId === "string" && callId.trim()
-        ? callId
-        : (() => {
-            const pyCalls = [...state.toolCalls.entries()].filter(
-              ([_, v]) => v.type === "python"
-            );
-            if (pyCalls.length === 0) return null;
-            const mostRecent = pyCalls.sort(
-              (a, b) =>
-                new Date(b[1].createdAt).getTime() -
-                new Date(a[1].createdAt).getTime()
-            )[0];
-            return mostRecent[0];
-          })();
+    const toDelete = resolveDeleteDraftId(state, "python", event.payload?.call_id);
     if (toDelete) {
       const next = new Map(state.toolCalls);
       next.delete(toDelete);

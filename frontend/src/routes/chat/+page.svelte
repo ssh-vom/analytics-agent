@@ -416,7 +416,9 @@
           ensureWorldlineVisible(frame.worldline_id);
           activeWorldlineId = frame.worldline_id;
           streamingState = applyDelta(streamingState, frame.delta);
-          if (frame.delta.type === "assistant_text" && !frame.delta.done) {
+          if (frame.delta.skipped) {
+            statusText = "Skipped repeated tool call...";
+          } else if (frame.delta.type === "assistant_text" && !frame.delta.done) {
             statusText = "Composing response...";
           } else if (frame.delta.type === "tool_call_sql" && !frame.delta.done) {
             statusText = "Drafting SQL...";
@@ -618,14 +620,14 @@
             <SqlCell
               callEvent={cell.call}
               resultEvent={cell.result}
-              initialCollapsed={Boolean(cell.result)}
+              initialCollapsed={true}
               onBranch={() => branchFromEvent(cell.result?.id ?? cell.call?.id ?? "")}
             />
           {:else if cell.kind === "python"}
             <PythonCell
               callEvent={cell.call}
               resultEvent={cell.result}
-              initialCollapsed={Boolean(cell.result)}
+              initialCollapsed={true}
               showArtifacts={true}
               artifactLinkMode="panel"
               on:artifactselect={handleArtifactSelect}
