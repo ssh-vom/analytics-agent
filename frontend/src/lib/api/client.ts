@@ -1,4 +1,5 @@
 import type {
+  ArtifactPreviewResponse,
   EventsResponse,
   SseDeltaFrame,
   SseDoneFrame,
@@ -304,6 +305,18 @@ export async function fetchWorldlineTables(
     }[];
     count: number;
   }>(url.toString(), undefined, "Failed to fetch tables");
+}
+
+export async function fetchArtifactPreview(
+  artifactId: string,
+  limit = 100,
+): Promise<ArtifactPreviewResponse> {
+  return requestJson<ArtifactPreviewResponse>(
+    `/api/artifacts/${artifactId}/preview?limit=${limit}`,
+    undefined,
+    "Failed to fetch artifact preview",
+    true,
+  );
 }
 
 export async function streamChatTurn(options: StreamOptions): Promise<void> {

@@ -108,6 +108,22 @@ export interface PythonArtifact {
   artifact_id: string;
 }
 
+export interface ArtifactTablePreview {
+  format: "table";
+  columns: string[];
+  rows: string[][];
+  row_count: number;
+  preview_count: number;
+  truncated: boolean;
+}
+
+export interface ArtifactPreviewResponse {
+  artifact_id: string;
+  name: string;
+  type: string;
+  preview: ArtifactTablePreview;
+}
+
 export interface PythonResultPayload {
   stdout?: string;
   stderr?: string;
