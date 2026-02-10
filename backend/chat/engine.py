@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -272,6 +273,8 @@ class ChatEngine:
         text_buffer: list[str] = []
         # Per-tool-call accumulators:  call_id -> {name, args_json_parts}
         tool_call_accum: dict[str, dict[str, Any]] = {}
+        # Fallback when adapter omits call_id in delta/done chunks (e.g. some providers)
+        last_tool_call_id: str | None = None
         # Track whether we've emitted text and whether we've sent the text-done signal
         emitted_text = False
 
@@ -295,6 +298,7 @@ class ChatEngine:
 
             if chunk.type == "tool_call_start":
                 call_id = chunk.tool_call_id or f"call_{len(tool_call_accum) + 1}"
+                last_tool_call_id = call_id
                 tool_name = chunk.tool_name or ""
                 tool_call_accum[call_id] = {
                     "name": tool_name,
@@ -312,13 +316,21 @@ class ChatEngine:
                 continue
 
             if chunk.type == "tool_call_delta":
-                call_id = chunk.tool_call_id or ""
+                call_id = (chunk.tool_call_id or "").strip() or last_tool_call_id or ""
                 args_delta = chunk.arguments_delta or ""
-                if call_id in tool_call_accum:
-                    tool_call_accum[call_id]["args_parts"].append(args_delta)
+                if call_id and call_id in tool_call_accum:
+                    accum = tool_call_accum[call_id]
+                    # Some providers (e.g. OpenRouter with certain models) send the
+                    # full accumulated arguments in each chunk rather than incremental
+                    # deltas. If we append those, we get corrupted JSON. Detect
+                    # complete JSON and replace instead of append.
+                    if self._looks_like_complete_tool_args(args_delta):
+                        accum["args_parts"] = [args_delta]
+                    else:
+                        accum["args_parts"].append(args_delta)
 
-                # Determine the delta event type from the tool name
-                accum = tool_call_accum.get(call_id)
+                # Determine the delta event type from the tool name (use resolved call_id)
+                accum = tool_call_accum.get(call_id) if call_id else None
                 tool_name = accum["name"] if accum else ""
                 delta_type = self._tool_name_to_delta_type(tool_name)
 
@@ -340,8 +352,8 @@ class ChatEngine:
                 continue
 
             if chunk.type == "tool_call_done":
-                call_id = chunk.tool_call_id or ""
-                accum = tool_call_accum.get(call_id)
+                call_id = (chunk.tool_call_id or "").strip() or last_tool_call_id or ""
+                accum = tool_call_accum.get(call_id) if call_id else None
                 tool_name = accum["name"] if accum else ""
                 delta_type = self._tool_name_to_delta_type(tool_name)
                 if delta_type:
@@ -372,6 +384,8 @@ class ChatEngine:
                 arguments = json.loads(raw_json) if raw_json else {}
             except json.JSONDecodeError:
                 arguments = {"_raw": raw_json}
+            # If parse failed, try to extract sql/code from raw for tool execution
+            arguments = self._normalize_tool_arguments(accum["name"], arguments)
             tool_calls.append(
                 ToolCall(
                     id=call_id,
@@ -390,6 +404,46 @@ class ChatEngine:
         if tool_name == "run_python":
             return "tool_call_python"
         return None
+
+    @staticmethod
+    def _looks_like_complete_tool_args(args_delta: str) -> bool:
+        """Heuristic: provider may send full accumulated args each chunk (replace not append)."""
+        if not args_delta or not args_delta.strip().startswith("{"):
+            return False
+        try:
+            parsed = json.loads(args_delta)
+            if not isinstance(parsed, dict):
+                return False
+            # run_sql expects "sql", run_python expects "code"
+            return "sql" in parsed or "code" in parsed
+        except json.JSONDecodeError:
+            return False
+
+    @staticmethod
+    def _normalize_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Extract sql/code from _raw when JSON parse failed, so tools get valid args."""
+        if "_raw" not in arguments:
+            return arguments
+        raw = arguments.get("_raw", "")
+        if not isinstance(raw, str):
+            return arguments
+        # Try regex extraction as fallback
+        code_field = "sql" if (tool_name or "").strip() == "run_sql" else "code"
+        pattern = rf'"{code_field}"\s*:\s*"((?:[^"\\]|\\.)*)"'
+        match = re.search(pattern, raw, re.DOTALL)
+        if match:
+            try:
+                extracted = json.loads(f'"{match.group(1)}"')
+                result = {k: v for k, v in arguments.items() if k != "_raw"}
+                result[code_field] = extracted
+                if code_field == "sql":
+                    result.setdefault("limit", 100)
+                else:
+                    result.setdefault("timeout", 30)
+                return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return arguments
 
     # ---- tool definitions ---------------------------------------------------
 
