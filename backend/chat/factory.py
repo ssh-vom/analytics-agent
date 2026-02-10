@@ -41,8 +41,10 @@ def build_llm_client(
         )
     if resolved_provider == "openrouter":
         return OpenRouterAdapter(
-            model=model or os.getenv("OPENROUTER_MODEL", "stepfun/step-3.5-flash:free"),
-            api_key=api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_KEY"),
+            model=model or os.getenv("OPENROUTER_MODEL", "openrouter/pony-alpha"),
+            api_key=api_key
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("OPENROUTER_KEY"),
             app_name=os.getenv("OPENROUTER_APP_NAME", "TextQL"),
             http_referer=os.getenv("OPENROUTER_HTTP_REFERER"),
         )

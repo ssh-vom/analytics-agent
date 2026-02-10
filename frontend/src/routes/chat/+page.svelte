@@ -25,6 +25,11 @@
     importCSV,
     fetchWorldlineTables,
   } from "$lib/api/client";
+  import {
+    createOptimisticUserMessage,
+    insertOptimisticEvent,
+    replaceOptimisticWithReal,
+  } from "$lib/chat/optimisticState";
   import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
@@ -519,15 +524,12 @@
     selectedArtifactId = null;
 
     // Optimistic user message — show immediately in the feed
-    const optimisticId = `optimistic-user-${Date.now()}`;
-    const optimisticEvent: TimelineEvent = {
-      id: optimisticId,
-      parent_event_id: null,
-      type: "user_message",
-      payload: { text: message },
-      created_at: new Date().toISOString(),
-    };
-    appendEvent(requestWorldlineId, optimisticEvent);
+    const { id: optimisticId, event: optimisticEvent } = createOptimisticUserMessage(message);
+    const currentEvents = eventsByWorldline[requestWorldlineId] ?? [];
+    setWorldlineEvents(
+      requestWorldlineId,
+      insertOptimisticEvent(currentEvents, optimisticEvent)
+    );
     scrollFeedToBottom(true);
 
     try {
@@ -547,8 +549,12 @@
           // Remove optimistic user message when real one arrives
           if (frame.event.type === "user_message") {
             const existing = eventsByWorldline[frameWorldlineId] ?? [];
-            const filtered = existing.filter((e) => e.id !== optimisticId);
-            setWorldlineEvents(frameWorldlineId, [...filtered, frame.event]);
+            const { events: updated } = replaceOptimisticWithReal(
+              existing,
+              optimisticId,
+              frame.event
+            );
+            setWorldlineEvents(frameWorldlineId, updated);
           } else {
             appendEvent(frameWorldlineId, frame.event);
           }

@@ -10,6 +10,7 @@ import type {
   WorldlineCreateResponse,
   WorldlinesResponse,
 } from "$lib/types";
+import { createStreamProcessor } from "./streamParser";
 
 const JSON_HEADERS = {
   "Content-Type": "application/json",
@@ -323,74 +324,20 @@ export async function streamChatTurn(options: StreamOptions): Promise<void> {
   }
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  const processFrame = (frame: string): void => {
-    if (!frame.trim()) {
-      return;
-    }
-
-    let eventName = "event";
-    const dataLines: string[] = [];
-    for (const line of frame.split("\n")) {
-      if (line.startsWith("event:")) {
-        eventName = line.slice(6).trim();
-        continue;
-      }
-      if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trimStart());
-      }
-    }
-
-    if (dataLines.length === 0) {
-      return;
-    }
-
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
-    } catch {
-      options.onError?.("Failed to parse stream frame");
-      return;
-    }
-    if (eventName === "event") {
-      options.onEvent(parsed as unknown as SseEventFrame);
-      return;
-    }
-    if (eventName === "delta") {
-      options.onDelta?.(parsed as unknown as SseDeltaFrame);
-      return;
-    }
-    if (eventName === "done") {
-      options.onDone?.(parsed as unknown as SseDoneFrame);
-      return;
-    }
-    if (eventName === "error") {
-      const error =
-        typeof parsed.error === "string"
-          ? parsed.error
-          : "Unknown stream error";
-      options.onError?.(error);
-    }
-  };
+  const processor = createStreamProcessor({
+    onEvent: options.onEvent,
+    onDelta: options.onDelta,
+    onDone: options.onDone,
+    onError: options.onError,
+  });
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) {
       break;
     }
-
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-
-    for (const frame of frames) {
-      processFrame(frame);
-    }
+    processor.processChunk(value);
   }
 
-  if (buffer.trim()) {
-    processFrame(buffer);
-  }
+  processor.flush();
 }
