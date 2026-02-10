@@ -3,6 +3,7 @@ import type {
   StreamDeltaType,
   TimelineEvent,
 } from "$lib/types";
+import { sanitizeCodeArtifacts } from "$lib/codeSanitizer";
 
 /** A display item is either a persisted event or a streaming placeholder. */
 export type DisplayItem =
@@ -110,7 +111,7 @@ function extractCodeFromArgs(rawArgs: string, kind: "sql" | "python"): string {
       parsed !== null &&
       typeof parsed[codeField] === "string"
     ) {
-      return parsed[codeField];
+      return sanitizeCodeArtifacts(parsed[codeField]);
     }
   } catch {
     // JSON incomplete; try regex for partial display
@@ -122,13 +123,15 @@ function extractCodeFromArgs(rawArgs: string, kind: "sql" | "python"): string {
   const match = rawArgs.match(pattern);
   if (match) {
     try {
-      return JSON.parse(`"${match[1]}"`);
+      return sanitizeCodeArtifacts(JSON.parse(`"${match[1]}"`));
     } catch {
-      return match[1]
+      return sanitizeCodeArtifacts(
+        match[1]
         .replace(/\\n/g, "\n")
         .replace(/\\t/g, "\t")
         .replace(/\\"/g, '"')
-        .replace(/\\\\/g, "\\");
+        .replace(/\\\\/g, "\\")
+      );
     }
   }
   return "";

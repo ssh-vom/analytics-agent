@@ -1,5 +1,12 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import hljs from "highlight.js/lib/core";
+  import python from "highlight.js/lib/languages/python";
+  import sql from "highlight.js/lib/languages/sql";
+  import { sanitizeCodeArtifacts } from "$lib/codeSanitizer";
+
+  hljs.registerLanguage("python", python);
+  hljs.registerLanguage("sql", sql);
 
   export let code = "";
   export let language = "";
@@ -13,7 +20,8 @@
   // Prefer real code whenever available; only show placeholder when code is empty.
   $: content = rendered || code || placeholder;
   $: languageId = (language || "text").trim().toLowerCase();
-  $: highlighted = highlightCode(content, languageId);
+  $: sanitizedContent = sanitizeCodeArtifacts(content);
+  $: highlighted = highlightCode(sanitizedContent, languageId);
 
   function escapeHtml(input: string): string {
     return input
@@ -22,166 +30,23 @@
       .replaceAll(">", "&gt;");
   }
 
-  function wrapToken(input: string, tokenClass: string): string {
-    return `<span class="token ${tokenClass}">${escapeHtml(input)}</span>`;
-  }
-
-  function protectSegments(
-    input: string,
-    patterns: Array<{ regex: RegExp; tokenClass: string }>,
-  ): { text: string; tokens: string[] } {
-    const tokens: string[] = [];
-    let text = input;
-    for (const pattern of patterns) {
-      text = text.replace(pattern.regex, (match) => {
-        const marker = `\u0000TOK${tokens.length}\u0000`;
-        tokens.push(wrapToken(match, pattern.tokenClass));
-        return marker;
-      });
-    }
-    return { text, tokens };
-  }
-
-  function restoreSegments(input: string, tokens: string[]): string {
-    return input.replace(/\u0000TOK(\d+)\u0000/g, (_, idx) => {
-      const token = tokens[Number(idx)];
-      return token ?? "";
-    });
-  }
-
-  function highlightWithKeywords(
-    input: string,
-    keywords: string[],
-    extra: Array<{ regex: RegExp; tokenClass: string }>,
-  ): string {
-    let html = escapeHtml(input);
-    for (const item of extra) {
-      html = html.replace(item.regex, (match) => {
-        return `<span class="token ${item.tokenClass}">${match}</span>`;
-      });
-    }
-
-    if (keywords.length) {
-      const keywordPattern = new RegExp(`\\b(${keywords.join("|")})\\b`, "gi");
-      html = html.replace(keywordPattern, (match) => {
-        return `<span class="token keyword">${match}</span>`;
-      });
-    }
-    return html;
-  }
-
-  function highlightSql(input: string): string {
-    const protectedSql = protectSegments(input, [
-      { regex: /--.*$/gm, tokenClass: "comment" },
-      { regex: /'(?:''|[^'])*'/g, tokenClass: "string" },
-    ]);
-
-    const keywords = [
-      "select",
-      "from",
-      "where",
-      "group",
-      "by",
-      "order",
-      "having",
-      "limit",
-      "offset",
-      "join",
-      "left",
-      "right",
-      "inner",
-      "outer",
-      "cross",
-      "on",
-      "as",
-      "and",
-      "or",
-      "not",
-      "in",
-      "is",
-      "null",
-      "case",
-      "when",
-      "then",
-      "else",
-      "end",
-      "distinct",
-      "with",
-      "union",
-      "all",
-      "desc",
-      "asc",
-    ];
-
-    const html = highlightWithKeywords(protectedSql.text, keywords, [
-      { regex: /\b\d+(?:\.\d+)?\b/g, tokenClass: "number" },
-      {
-        regex: /\b(count|sum|avg|min|max|coalesce|date_trunc|extract)\b/gi,
-        tokenClass: "function",
-      },
-    ]);
-    return restoreSegments(html, protectedSql.tokens);
-  }
-
-  function highlightPython(input: string): string {
-    const protectedPy = protectSegments(input, [
-      { regex: /#.*$/gm, tokenClass: "comment" },
-      { regex: /'(?:\\.|[^'\\])*'/g, tokenClass: "string" },
-      { regex: /"(?:\\.|[^"\\])*"/g, tokenClass: "string" },
-    ]);
-
-    const keywords = [
-      "import",
-      "from",
-      "as",
-      "def",
-      "class",
-      "return",
-      "if",
-      "elif",
-      "else",
-      "for",
-      "while",
-      "in",
-      "try",
-      "except",
-      "finally",
-      "with",
-      "lambda",
-      "yield",
-      "pass",
-      "break",
-      "continue",
-      "and",
-      "or",
-      "not",
-      "is",
-      "None",
-      "True",
-      "False",
-    ];
-
-    const html = highlightWithKeywords(protectedPy.text, keywords, [
-      { regex: /\b\d+(?:\.\d+)?\b/g, tokenClass: "number" },
-      {
-        regex: /\b(print|len|range|list|dict|set|tuple|int|float|str|plt|np)\b/g,
-        tokenClass: "function",
-      },
-    ]);
-    return restoreSegments(html, protectedPy.tokens);
-  }
-
   function highlightCode(input: string, lang: string): string {
     if (!input) {
       return "";
     }
-    if (lang.includes("sql")) {
-      return highlightSql(input);
+    try {
+      const normalized = lang.includes("python")
+        ? "python"
+        : lang.includes("sql")
+          ? "sql"
+          : "plaintext";
+      if (normalized === "plaintext") {
+        return escapeHtml(input);
+      }
+      return hljs.highlight(input, { language: normalized }).value;
+    } catch {
+      return escapeHtml(input);
     }
-    if (lang.includes("python") || lang === "py") {
-      return highlightPython(input);
-    }
-    return escapeHtml(input);
   }
 
   function stopTimer(): void {
@@ -271,7 +136,7 @@
   <div class="code-header">
     <span>{language || "Code"}</span>
   </div>
-  <pre><code class={`lang-${languageId}`}>{@html highlighted}</code>{#if isRevealing}<span class="cursor">▋</span>{/if}</pre>
+  <pre><code class={`hljs lang-${languageId}`}>{@html highlighted}</code>{#if isRevealing}<span class="cursor">▋</span>{/if}</pre>
 </div>
 
 <style>
@@ -320,25 +185,41 @@
     font-family: inherit;
   }
 
-  :global(.token.keyword) {
-    color: #7eb8f6;
+  :global(.hljs-keyword),
+  :global(.hljs-selector-tag),
+  :global(.hljs-type) {
+    color: #81a1c1;
   }
 
-  :global(.token.function) {
-    color: #d4a76a;
+  :global(.hljs-title),
+  :global(.hljs-title.class_),
+  :global(.hljs-title.function_) {
+    color: #88c0d0;
   }
 
-  :global(.token.string) {
-    color: #8ec98e;
+  :global(.hljs-string),
+  :global(.hljs-attr),
+  :global(.hljs-template-tag),
+  :global(.hljs-template-variable) {
+    color: #a3be8c;
   }
 
-  :global(.token.number) {
-    color: #b8a0e0;
+  :global(.hljs-number),
+  :global(.hljs-literal),
+  :global(.hljs-symbol),
+  :global(.hljs-bullet) {
+    color: #b48ead;
   }
 
-  :global(.token.comment) {
-    color: #626880;
+  :global(.hljs-comment),
+  :global(.hljs-quote) {
+    color: #616e88;
     font-style: italic;
+  }
+
+  :global(.hljs-operator),
+  :global(.hljs-punctuation) {
+    color: #c0c7d5;
   }
 
   .cursor {
