@@ -1,3 +1,5 @@
+import json
+import re
 import time
 import textwrap
 from typing import Any, Awaitable, Callable
@@ -34,6 +36,31 @@ router = APIRouter(prefix="/api/tools", tags=["tools"])
 READ_ONLY_PREFIXES = ("select", "with", "show", "describe", "explain")
 _sandbox_manager = SandboxManager(DockerSandboxRunner())
 ToolEventCallback = Callable[[dict[str, Any]], Awaitable[None]]
+DEBUG_LOG_PATH = "/Users/shivom/take_homes/textql/.cursor/debug.log"
+
+
+def _debug_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+) -> None:
+    try:
+        payload = {
+            "id": f"log_{time.time_ns()}",
+            "timestamp": int(time.time() * 1000),
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as debug_file:
+            debug_file.write(json.dumps(payload, ensure_ascii=True, default=str) + "\n")
+    except Exception:
+        pass
 
 
 class SqlToolRequest(BaseModel):
@@ -205,6 +232,38 @@ def _extract_successful_python_codes(events: list[dict]) -> list[str]:
     return codes
 
 
+def _extract_latest_successful_sql_result(events: list[dict]) -> dict[str, Any] | None:
+    for event in reversed(events):
+        if event["type"] != "tool_result_sql":
+            continue
+        payload = event.get("payload", {})
+        if payload.get("error"):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _build_sql_context_code(latest_sql_result: dict[str, Any] | None) -> str:
+    if not latest_sql_result:
+        return ""
+    serialized = json.dumps(latest_sql_result, ensure_ascii=True, default=str)
+    escaped = serialized.replace("\\", "\\\\").replace("'", "\\'")
+    return "\n".join(
+        [
+            "import json",
+            f"LATEST_SQL_RESULT = json.loads('{escaped}')",
+            "LATEST_SQL_COLUMNS = [c.get('name', '') for c in (LATEST_SQL_RESULT.get('columns') or []) if isinstance(c, dict)]",
+            "LATEST_SQL_ROWS = LATEST_SQL_RESULT.get('rows') or []",
+            "try:",
+            "    import pandas as pd",
+            "    LATEST_SQL_DF = pd.DataFrame(LATEST_SQL_ROWS, columns=LATEST_SQL_COLUMNS)",
+            "except Exception:",
+            "    LATEST_SQL_DF = None",
+        ]
+    )
+
+
 def _build_replay_code(prior_codes: list[str], current_code: str) -> str:
     if not prior_codes:
         return current_code
@@ -230,6 +289,14 @@ def _build_replay_code(prior_codes: list[str], current_code: str) -> str:
     return "\n\n".join(chunks)
 
 
+def _detect_tool_invocations_in_python(code: str) -> list[str]:
+    found: list[str] = []
+    for tool_name in ("run_sql", "run_python", "time_travel"):
+        if re.search(rf"\b{tool_name}\s*\(", code):
+            found.append(tool_name)
+    return found
+
+
 async def execute_python_tool(
     body: PythonToolRequest,
     on_event: ToolEventCallback | None = None,
@@ -242,7 +309,50 @@ async def execute_python_tool(
         parent_event_id = worldline["head_event_id"]
         prior_events = _load_event_chain(conn, parent_event_id)
         prior_python_codes = _extract_successful_python_codes(prior_events)
-        execution_code = _build_replay_code(prior_python_codes, body.code)
+        latest_sql_result = _extract_latest_successful_sql_result(prior_events)
+        sql_context_code = _build_sql_context_code(latest_sql_result)
+        active_worldlines_fn = getattr(_sandbox_manager, "active_worldlines", None)
+        active_worldlines = (
+            active_worldlines_fn() if callable(active_worldlines_fn) else []
+        )
+        sandbox_warm = body.worldline_id in set(active_worldlines)
+        replay_python_codes = [] if sandbox_warm else prior_python_codes
+        # #region agent log
+        _debug_log(
+            run_id="initial",
+            hypothesis_id="H1_H2",
+            location="backend/tools.py:execute_python_tool:prior_history",
+            message="Loaded prior python execution history",
+            data={
+                "worldline_id": body.worldline_id,
+                "parent_event_id": parent_event_id,
+                "prior_events_count": len(prior_events),
+                "prior_python_code_count": len(prior_python_codes),
+                "sandbox_warm": sandbox_warm,
+                "replay_python_code_count_applied": len(replay_python_codes),
+                "has_sql_context": latest_sql_result is not None,
+                "current_code_preview": body.code[:180],
+            },
+        )
+        # #endregion
+        execution_code = _build_replay_code(replay_python_codes, body.code)
+        if sql_context_code:
+            execution_code = f"{sql_context_code}\n\n{execution_code}"
+        # #region agent log
+        _debug_log(
+            run_id="initial",
+            hypothesis_id="H1",
+            location="backend/tools.py:execute_python_tool:execution_code",
+            message="Built python execution payload for sandbox",
+            data={
+                "worldline_id": body.worldline_id,
+                "prior_replay_steps": len(replay_python_codes),
+                "has_sql_context": bool(sql_context_code),
+                "execution_code_len": len(execution_code),
+                "execution_code_preview": execution_code[:220],
+            },
+        )
+        # #endregion
 
         call_payload: dict[str, Any] = {"code": body.code, "timeout": body.timeout}
         if body.call_id:
@@ -257,6 +367,42 @@ async def execute_python_tool(
         )
 
         try:
+            invalid_tool_calls = _detect_tool_invocations_in_python(body.code)
+            if invalid_tool_calls:
+                # #region agent log
+                _debug_log(
+                    run_id="initial",
+                    hypothesis_id="H9",
+                    location="backend/tools.py:execute_python_tool:invalid_tool_call_in_python",
+                    message="Detected backend tool invocation inside python code",
+                    data={
+                        "worldline_id": body.worldline_id,
+                        "call_id": body.call_id,
+                        "invalid_tool_calls": invalid_tool_calls,
+                        "code_preview": body.code[:220],
+                    },
+                )
+                # #endregion
+                raise ValueError(
+                    "Python code attempted to call backend tools directly "
+                    f"({', '.join(invalid_tool_calls)}). "
+                    "Use tool calls at the model level: call run_sql first, then run_python "
+                    "with plain Python that only processes provided data."
+                )
+
+            # #region agent log
+            _debug_log(
+                run_id="initial",
+                hypothesis_id="H1_H5",
+                location="backend/tools.py:execute_python_tool:before_execute",
+                message="Dispatching code to sandbox manager",
+                data={
+                    "worldline_id": body.worldline_id,
+                    "timeout": body.timeout,
+                    "call_id": body.call_id,
+                },
+            )
+            # #endregion
             raw_result = await _sandbox_manager.execute(
                 worldline_id=body.worldline_id,
                 code=execution_code,
@@ -322,8 +468,36 @@ async def execute_python_tool(
             conn.commit()
             if on_event is not None:
                 await on_event(_load_event_by_id(conn, result_event_id))
+            # #region agent log
+            _debug_log(
+                run_id="initial",
+                hypothesis_id="H1_H5",
+                location="backend/tools.py:execute_python_tool:result",
+                message="Python tool execution completed",
+                data={
+                    "worldline_id": body.worldline_id,
+                    "result_error": api_result.get("error"),
+                    "stdout_len": len(str(api_result.get("stdout", ""))),
+                    "stderr_len": len(str(api_result.get("stderr", ""))),
+                    "artifact_count": len(api_result.get("artifacts", [])),
+                },
+            )
+            # #endregion
             return api_result
         except Exception as exc:
+            # #region agent log
+            _debug_log(
+                run_id="initial",
+                hypothesis_id="H5",
+                location="backend/tools.py:execute_python_tool:error",
+                message="Python tool execution raised exception",
+                data={
+                    "worldline_id": body.worldline_id,
+                    "call_id": body.call_id,
+                    "error": str(exc),
+                },
+            )
+            # #endregion
             await _append_worldline_event(
                 conn,
                 worldline_id=body.worldline_id,

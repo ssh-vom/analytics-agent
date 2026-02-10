@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "date-fns": "^4.1.0",
-    "lucide-svelte": "^0.563.0"
+    "lucide-svelte": "^0.563.0",
+    "marked": "^17.0.1"
   }
 }

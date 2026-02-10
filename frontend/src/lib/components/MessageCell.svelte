@@ -4,6 +4,7 @@
   import { GitBranch } from "lucide-svelte";
   import { Sparkles } from "lucide-svelte";
   import { formatDistanceToNow } from "date-fns";
+  import { renderMarkdown } from "$lib/markdown";
 
   export let role: "user" | "assistant" | "plan" = "assistant";
   export let text = "";
@@ -11,6 +12,8 @@
   export let onBranch: (() => void) | null = null;
 
   $: roleLabel = role === "plan" ? "PLAN" : role.toUpperCase();
+  $: shouldRenderMarkdown = role !== "user";
+  $: renderedMarkdown = shouldRenderMarkdown ? renderMarkdown(text) : "";
   
   function formatTime(dateString: string): string {
     try {
@@ -48,7 +51,11 @@
       {/if}
     </header>
     <div class="message-body">
-      <p>{text}</p>
+      {#if shouldRenderMarkdown}
+        <div class="markdown-content">{@html renderedMarkdown}</div>
+      {:else}
+        <p>{text}</p>
+      {/if}
     </div>
   </div>
 </article>
@@ -161,6 +168,68 @@
     line-height: 1.65;
     white-space: pre-wrap;
     font-size: 14px;
+  }
+
+  .markdown-content {
+    font-size: 14px;
+    line-height: 1.65;
+  }
+
+  .markdown-content :global(p) {
+    margin: 0 0 var(--space-2);
+  }
+
+  .markdown-content :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .markdown-content :global(ul),
+  .markdown-content :global(ol) {
+    margin: 0 0 var(--space-2);
+    padding-left: 1.2rem;
+  }
+
+  .markdown-content :global(li) {
+    margin: 0.1rem 0;
+  }
+
+  .markdown-content :global(code) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--surface-1);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    padding: 1px 4px;
+  }
+
+  .markdown-content :global(pre) {
+    margin: var(--space-2) 0;
+    padding: var(--space-3);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    background: var(--bg-0);
+    overflow-x: auto;
+  }
+
+  .markdown-content :global(pre code) {
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  .markdown-content :global(blockquote) {
+    margin: var(--space-2) 0;
+    padding: var(--space-2) var(--space-3);
+    border-left: 2px solid var(--border-medium);
+    color: var(--text-muted);
+    background: var(--surface-1);
+  }
+
+  .markdown-content :global(a) {
+    color: var(--accent-blue);
+    text-decoration: underline;
   }
 
   .branch-btn {

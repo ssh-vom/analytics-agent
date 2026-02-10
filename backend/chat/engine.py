@@ -2,9 +2,38 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
+
+logger = logging.getLogger(__name__)
+DEBUG_LOG_PATH = "/Users/shivom/take_homes/textql/.cursor/debug.log"
+
+
+def _debug_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+) -> None:
+    try:
+        payload = {
+            "id": f"log_{time.time_ns()}",
+            "timestamp": int(time.time() * 1000),
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as debug_file:
+            debug_file.write(json.dumps(payload, ensure_ascii=True, default=str) + "\n")
+    except Exception:
+        pass
 
 from fastapi import HTTPException
 
@@ -103,6 +132,19 @@ class ChatEngine:
         if not message or not message.strip():
             raise HTTPException(status_code=400, detail="message must not be empty")
 
+        # #region agent log
+        _debug_log(
+            run_id="initial",
+            hypothesis_id="H3_H4",
+            location="backend/chat/engine.py:run_turn:start",
+            message="Starting chat turn",
+            data={
+                "worldline_id": worldline_id,
+                "message_preview": message[:200],
+            },
+        )
+        # #endregion
+
         active_worldline_id = worldline_id
         starting_rowid_by_worldline = {
             active_worldline_id: self._max_worldline_rowid(active_worldline_id)
@@ -116,9 +158,32 @@ class ChatEngine:
             await on_event(active_worldline_id, user_event)
 
         messages = await self._build_llm_messages(active_worldline_id)
+        # #region agent log
+        _debug_log(
+            run_id="initial",
+            hypothesis_id="H6_H7",
+            location="backend/chat/engine.py:run_turn:built_messages",
+            message="Built LLM messages for turn",
+            data={
+                "worldline_id": active_worldline_id,
+                "message_count": len(messages),
+                "tail": [
+                    {
+                        "role": msg.role,
+                        "content_preview": (msg.content or "")[:140],
+                        "has_tool_calls": bool(msg.tool_calls),
+                        "tool_call_count": len(msg.tool_calls or []),
+                    }
+                    for msg in messages[-6:]
+                ],
+            },
+        )
+        # #endregion
         final_text: str | None = None
         successful_tool_signatures: set[str] = set()
+        successful_tool_results: dict[str, dict[str, Any]] = {}
         python_succeeded_in_turn = False
+        empty_response_retries = 0
 
         for _ in range(self.max_iterations):
             # ----- LLM call: stream when on_delta is available, else batch -----
@@ -158,6 +223,24 @@ class ChatEngine:
                 for tool_call in response.tool_calls:
                     tool_name = (tool_call.name or "").strip()
                     delta_type = self._tool_name_to_delta_type(tool_name)
+                    # #region agent log
+                    _debug_log(
+                        run_id="initial",
+                        hypothesis_id="H3_H4",
+                        location="backend/chat/engine.py:run_turn:tool_call",
+                        message="Model emitted tool call",
+                        data={
+                            "worldline_id": active_worldline_id,
+                            "tool_name": tool_name,
+                            "tool_call_id": tool_call.id,
+                            "tool_args_preview": json.dumps(
+                                tool_call.arguments or {},
+                                ensure_ascii=True,
+                                default=str,
+                            )[:220],
+                        },
+                    )
+                    # #endregion
 
                     if tool_name == "run_python" and python_succeeded_in_turn:
                         final_text = (
@@ -182,10 +265,7 @@ class ChatEngine:
                         tool_call=tool_call,
                     )
                     if signature in successful_tool_signatures:
-                        final_text = (
-                            "I stopped because the model repeated the same tool call "
-                            "with identical arguments in this turn."
-                        )
+                        cached_result = successful_tool_results.get(signature)
                         if on_delta is not None and delta_type is not None:
                             await on_delta(
                                 active_worldline_id,
@@ -193,9 +273,31 @@ class ChatEngine:
                                     "type": delta_type,
                                     "call_id": tool_call.id or None,
                                     "skipped": True,
-                                    "reason": "repeated_identical_tool_call",
+                                    "reason": "reused_cached_tool_result",
                                 },
                             )
+                        if cached_result is not None:
+                            serialized_cached = json.dumps(
+                                cached_result,
+                                ensure_ascii=True,
+                                default=str,
+                            )
+                            if len(serialized_cached) > 12_000:
+                                serialized_cached = (
+                                    serialized_cached[:12_000] + "...(truncated)"
+                                )
+                            messages.append(
+                                ChatMessage(
+                                    role="tool",
+                                    content=serialized_cached,
+                                    tool_call_id=tool_call.id or None,
+                                )
+                            )
+                            continue
+                        final_text = (
+                            "I stopped because the model repeated the same tool call "
+                            "with identical arguments in this turn."
+                        )
                         repeated_call_detected = True
                         break
 
@@ -238,13 +340,42 @@ class ChatEngine:
                     )
                     if not tool_result.get("error"):
                         successful_tool_signatures.add(signature)
+                        successful_tool_results[signature] = tool_result
                         if tool_name == "run_python":
                             python_succeeded_in_turn = True
                 if repeated_call_detected:
                     break
                 continue
 
-            final_text = response.text or "Done."
+            if response.text:
+                final_text = response.text
+                break
+
+            # The LLM returned no text and no tool calls.  This typically
+            # happens when the conversation history confuses the model.
+            # Retry once by continuing the loop (which makes a fresh LLM
+            # call); give up on the second empty response.
+            empty_response_retries += 1
+            if empty_response_retries <= 1:
+                logger.warning(
+                    "Empty LLM response (no text, no tool_calls). "
+                    "messages=%d, last_role=%s. Retrying (attempt %d).",
+                    len(messages),
+                    messages[-1].role if messages else "N/A",
+                    empty_response_retries,
+                )
+                continue
+
+            logger.warning(
+                "Empty LLM response persisted after retry. "
+                "messages=%d, last_role=%s. Giving up.",
+                len(messages),
+                messages[-1].role if messages else "N/A",
+            )
+            final_text = (
+                "I wasn't able to generate a response for that request. "
+                "Could you try rephrasing your question?"
+            )
             break
 
         if final_text is None:
@@ -560,6 +691,20 @@ class ChatEngine:
         if name == "run_python":
             code = args.get("code")
             if not isinstance(code, str) or not code.strip():
+                # #region agent log
+                _debug_log(
+                    run_id="initial",
+                    hypothesis_id="H8",
+                    location="backend/chat/engine.py:_execute_tool_call:run_python_invalid_args",
+                    message="run_python call missing/invalid code argument",
+                    data={
+                        "worldline_id": worldline_id,
+                        "call_id": tool_call.id,
+                        "args_keys": sorted(list(args.keys())),
+                        "args_preview": json.dumps(args, ensure_ascii=True, default=str)[:220],
+                    },
+                )
+                # #endregion
                 err_result = {"error": "run_python requires a non-empty 'code' string"}
                 if on_event is not None:
                     await self._persist_failed_tool_call(
@@ -692,12 +837,17 @@ class ChatEngine:
 - Call SQL first to retrieve the data, then use Python if you need to visualize or further analyze it
 - After getting results, provide insights and context, not just raw data
 - If a query might be expensive or return many rows, add appropriate LIMIT clauses
+- Never write Python code that calls backend tools such as run_sql(), run_python(), or time_travel().
+- Tools must be invoked as tool calls only. Python code must be standard Python (pandas/numpy/matplotlib/etc.) and must not reference tool functions.
+- In Python, use `LATEST_SQL_RESULT` (dict) and `LATEST_SQL_DF` (pandas DataFrame, when available), which are auto-injected from the latest successful SQL result.
+- Do not invent or simulate dataset rows in Python. If more fields are needed, call run_sql again to fetch exactly those columns.
 
 The user is expecting you to help them explore and understand their data. Use the appropriate tool(s) to deliver helpful analysis and insights."""
         messages.append(ChatMessage(role="system", content=system_prompt))
 
-        # Events are newest-first (depth DESC); reverse for chronological order
-        events_chrono = list(reversed(events))
+        # Events from get_worldline_events are already chronological (oldest -> newest).
+        # Reversing here corrupts conversational order and can make stale prompts appear newest.
+        events_chrono = list(events)
         by_id = {e["id"]: e for e in events}
 
         pending_plan: str | None = None
@@ -755,6 +905,13 @@ The user is expecting you to help them explore and understand their data. Use th
                 continue
 
             if event_type in {"tool_call_sql", "tool_call_python"}:
+                # If previous tool calls were already emitted as an assistant
+                # message, this tool_call belongs to a new LLM iteration.
+                # Reset tracking so it gets its own assistant message.
+                if assistant_emitted_for_turn:
+                    pending_tool_calls = []
+                    pending_plan = None
+                    assistant_emitted_for_turn = False
                 name = "run_sql" if "sql" in event_type else "run_python"
                 args = dict(payload)
                 args.pop("call_id", None)
