@@ -25,11 +25,11 @@
   <div class="message-gutter">
     <div class="avatar" class:user={role === "user"} class:assistant={role === "assistant"} class:plan={role === "plan"}>
       {#if role === "user"}
-        <User size={16} />
+        <User size={14} />
       {:else if role === "plan"}
-        <Sparkles size={16} />
+        <Sparkles size={14} />
       {:else}
-        <Bot size={16} />
+        <Bot size={14} />
       {/if}
     </div>
   </div>
@@ -61,24 +61,19 @@
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
     border-radius: var(--radius-lg);
-    transition: all var(--transition-fast);
+    transition: border-color var(--transition-fast);
   }
 
   .message:hover {
     border-color: var(--border-medium);
-    box-shadow: var(--shadow-sm);
   }
 
   .message.user {
-    background: linear-gradient(135deg, var(--surface-0) 0%, var(--accent-blue-muted) 100%);
-  }
-
-  .message.assistant {
-    background: linear-gradient(135deg, var(--surface-0) 0%, var(--accent-orange-muted) 100%);
+    background: var(--surface-1);
   }
 
   .message.plan {
-    background: linear-gradient(135deg, var(--surface-0) 0%, var(--accent-cyan-muted) 100%);
+    border-left: 2px solid var(--accent-cyan);
   }
 
   .message-gutter {
@@ -89,30 +84,26 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
     border-radius: var(--radius-md);
-    background: var(--surface-1);
-    color: var(--text-muted);
-    border: 1px solid var(--border-soft);
+    background: var(--surface-2);
+    color: var(--text-dim);
   }
 
   .avatar.user {
     background: var(--accent-blue-muted);
     color: var(--accent-blue);
-    border-color: var(--accent-blue);
   }
 
   .avatar.assistant {
-    background: var(--accent-orange-muted);
-    color: var(--accent-orange);
-    border-color: var(--accent-orange);
+    background: var(--accent-green-muted);
+    color: var(--accent-green);
   }
 
   .avatar.plan {
     background: var(--accent-cyan-muted);
     color: var(--accent-cyan);
-    border-color: var(--accent-cyan);
   }
 
   .message-content {
@@ -130,16 +121,16 @@
 
   .role-info {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: var(--space-2);
   }
 
   .role-name {
     font-family: var(--font-heading);
-    font-size: 13px;
-    font-weight: 500;
-    letter-spacing: 0.05em;
-    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
     text-transform: uppercase;
   }
 
@@ -148,7 +139,7 @@
   }
 
   .message.assistant .role-name {
-    color: var(--accent-orange);
+    color: var(--accent-green);
   }
 
   .message.plan .role-name {
@@ -157,7 +148,8 @@
 
   time {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: 11px;
+    font-family: var(--font-mono);
   }
 
   .message-body {
@@ -166,21 +158,21 @@
 
   .message-body p {
     margin: 0;
-    line-height: 1.6;
+    line-height: 1.65;
     white-space: pre-wrap;
-    font-size: 15px;
+    font-size: 14px;
   }
 
   .branch-btn {
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: var(--space-1) var(--space-2);
+    padding: 2px var(--space-2);
     background: transparent;
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
-    color: var(--text-muted);
-    font-size: 12px;
+    border-radius: var(--radius-sm);
+    color: var(--text-dim);
+    font-size: 11px;
     cursor: pointer;
     transition: all var(--transition-fast);
     opacity: 0;
@@ -191,20 +183,14 @@
   }
 
   .branch-btn:hover {
-    background: var(--surface-hover);
-    border-color: var(--accent-orange);
-    color: var(--accent-orange);
+    border-color: var(--border-medium);
+    color: var(--text-secondary);
   }
 
   @media (max-width: 640px) {
     .message {
       gap: var(--space-2);
       padding: var(--space-3);
-    }
-
-    .avatar {
-      width: 28px;
-      height: 28px;
     }
 
     .branch-btn {

@@ -276,13 +276,10 @@
 
 <style>
   .code-block {
-    border-radius: 12px;
+    border-radius: var(--radius-md);
     border: 1px solid var(--border-soft);
-    background:
-      linear-gradient(180deg, rgb(255 255 255 / 2%) 0%, rgb(255 255 255 / 0%) 28%),
-      var(--surface-0);
+    background: var(--bg-0);
     overflow: hidden;
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 3%);
     contain: layout style paint;
     will-change: auto;
   }
@@ -292,31 +289,29 @@
     align-items: center;
     justify-content: space-between;
     border-bottom: 1px solid var(--border-soft);
-    padding: 8px 10px;
-    font-size: 12px;
-    font-family: var(--font-heading);
+    padding: 4px 10px;
+    font-size: 10px;
+    font-family: var(--font-mono);
     color: var(--text-dim);
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    background: rgb(255 255 255 / 2%);
   }
 
   pre {
     margin: 0;
-    padding: 12px;
+    padding: var(--space-3);
     overflow-x: auto;
     overflow-y: auto;
     color: var(--text-primary);
     font-family: var(--font-mono);
     font-size: 13px;
-    line-height: 1.45;
-    min-height: 56px;
+    line-height: 1.5;
+    min-height: 48px;
     max-height: 60vh;
     white-space: pre-wrap;
     scroll-behavior: smooth;
   }
 
-  /* Large code blocks get internal scrolling */
   pre:has(code) {
     overscroll-behavior: contain;
   }
@@ -326,30 +321,30 @@
   }
 
   :global(.token.keyword) {
-    color: #5ab0ff;
+    color: #7eb8f6;
   }
 
   :global(.token.function) {
-    color: #ffb86c;
+    color: #d4a76a;
   }
 
   :global(.token.string) {
-    color: #9be77a;
+    color: #8ec98e;
   }
 
   :global(.token.number) {
-    color: #c79dff;
+    color: #b8a0e0;
   }
 
   :global(.token.comment) {
-    color: #7a859c;
+    color: #626880;
     font-style: italic;
   }
 
   .cursor {
     display: inline-block;
     margin-left: 1px;
-    color: var(--accent-blue);
+    color: var(--text-dim);
     animation: blink 0.9s step-end infinite;
   }
 

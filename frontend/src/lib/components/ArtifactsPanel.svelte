@@ -205,7 +205,7 @@
     display: flex;
     flex-direction: column;
     border-left: 1px solid var(--border-soft);
-    background: var(--surface-0);
+    background: var(--bg-1);
   }
 
   .panel-header {
@@ -213,9 +213,8 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
-    padding: var(--space-3) var(--space-3) var(--space-2);
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-soft);
-    background: var(--surface-1);
     flex-shrink: 0;
   }
 
@@ -223,16 +222,17 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     min-width: 0;
   }
 
   .panel-title h2 {
     margin: 0;
-    font-size: 13px;
-    font-weight: 600;
+    font-family: var(--font-heading);
+    font-size: 12px;
+    font-weight: 400;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.03em;
   }
 
   .panel-actions {
@@ -242,36 +242,36 @@
   }
 
   .count-badge {
-    min-width: 24px;
-    height: 24px;
+    min-width: 20px;
+    height: 20px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-full);
-    border: 1px solid var(--border-medium);
-    color: var(--text-secondary);
-    font-size: 12px;
-    padding: 0 var(--space-2);
-    background: var(--surface-0);
+    color: var(--text-dim);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    padding: 0 var(--space-1);
+    background: var(--surface-2);
   }
 
   .collapse-btn {
-    width: 24px;
-    height: 24px;
+    width: 22px;
+    height: 22px;
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
-    background: var(--surface-0);
-    color: var(--text-muted);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-dim);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    transition: color var(--transition-fast);
   }
 
   .collapse-btn:hover {
-    color: var(--text-primary);
+    color: var(--text-secondary);
     border-color: var(--border-medium);
-    background: var(--surface-hover);
   }
 
   .collapsed-body {
@@ -279,7 +279,7 @@
     border: none;
     background: transparent;
     cursor: pointer;
-    color: var(--text-secondary);
+    color: var(--text-dim);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -287,20 +287,20 @@
   }
 
   .collapsed-count {
-    min-width: 30px;
-    height: 30px;
+    min-width: 26px;
+    height: 26px;
     border-radius: var(--radius-full);
-    border: 1px solid var(--border-medium);
+    border: 1px solid var(--border-soft);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
-    background: var(--surface-1);
+    font-size: 11px;
+    font-family: var(--font-mono);
   }
 
   .empty-state {
     margin: auto;
-    max-width: 200px;
+    max-width: 180px;
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
@@ -308,7 +308,7 @@
     justify-content: center;
     color: var(--text-dim);
     text-align: center;
-    font-size: 13px;
+    font-size: 12px;
   }
 
   .empty-state p {
@@ -323,7 +323,7 @@
     padding: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-2);
   }
 
   .artifact-card {
@@ -331,14 +331,14 @@
     flex-direction: column;
     gap: var(--space-2);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
-    background: var(--surface-1);
+    border-radius: var(--radius-md);
+    background: var(--surface-0);
     padding: var(--space-2);
+    transition: border-color var(--transition-fast);
   }
 
   .artifact-card.selected {
-    border-color: var(--accent-orange);
-    box-shadow: var(--glow-orange);
+    border-color: var(--accent-green);
   }
 
   .card-meta {
@@ -350,7 +350,8 @@
 
   .card-meta time {
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: 10px;
+    font-family: var(--font-mono);
     white-space: nowrap;
   }
 
@@ -359,20 +360,21 @@
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-sm);
-    border: 1px solid var(--border-medium);
-    color: var(--text-secondary);
-    font-size: 11px;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-family: var(--font-mono);
     line-height: 1;
-    padding: 4px 8px;
+    padding: 2px 6px;
     text-transform: uppercase;
+    background: var(--surface-2);
   }
 
   .image-preview {
     display: block;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     overflow: hidden;
     border: 1px solid var(--border-soft);
-    background: var(--surface-0);
+    background: var(--bg-0);
     aspect-ratio: 16 / 9;
   }
 
@@ -387,11 +389,11 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    border: 1px dashed var(--border-medium);
-    border-radius: var(--radius-md);
-    padding: var(--space-3);
+    border: 1px dashed var(--border-soft);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2);
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: 11px;
   }
 
   .artifact-link {
@@ -399,13 +401,12 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
-    background: var(--surface-0);
     text-decoration: none;
-    color: var(--text-secondary);
-    font-size: 13px;
-    padding: var(--space-2);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    padding: var(--space-1) var(--space-2);
+    transition: color var(--transition-fast);
   }
 
   .artifact-link span {
@@ -416,8 +417,6 @@
 
   .artifact-link:hover {
     color: var(--text-primary);
-    border-color: var(--border-medium);
-    background: var(--surface-hover);
   }
 
   @media (max-width: 1100px) {

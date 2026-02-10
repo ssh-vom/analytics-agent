@@ -1,52 +1,52 @@
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Departure+Mono&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap");
 
 :root {
   color-scheme: dark;
 
-  /* Background Colors */
-  --bg-0: #07090e;
-  --bg-1: #0f1118;
-  --bg-2: #141821;
-  --surface-0: #0b0f15;
-  --surface-1: #11161f;
-  --surface-2: #161c27;
-  --surface-3: #1c2330;
-  --surface-hover: rgba(255, 255, 255, 0.05);
-  --surface-active: rgba(255, 159, 67, 0.08);
+  /* Background Colors — neutral grays, no blue tint */
+  --bg-0: #111113;
+  --bg-1: #18181b;
+  --bg-2: #1f1f23;
+  --surface-0: #1c1c20;
+  --surface-1: #232328;
+  --surface-2: #2a2a30;
+  --surface-3: #333338;
+  --surface-hover: rgba(255, 255, 255, 0.04);
+  --surface-active: rgba(255, 255, 255, 0.07);
 
   /* Text Colors */
-  --text-primary: #f0f2f5;
-  --text-secondary: #a0a8b8;
-  --text-muted: #7b8393;
-  --text-dim: #5a6270;
+  --text-primary: #ededef;
+  --text-secondary: #a1a1a6;
+  --text-muted: #72727a;
+  --text-dim: #52525a;
 
-  /* Accent Colors */
-  --accent-orange: #ff9f43;
-  --accent-orange-hover: #ffb366;
-  --accent-orange-muted: rgba(255, 159, 67, 0.15);
-  --accent-blue: #4ea7ff;
-  --accent-blue-muted: rgba(78, 167, 255, 0.15);
-  --accent-cyan: #42d7c4;
-  --accent-cyan-muted: rgba(66, 215, 196, 0.15);
-  --accent-purple: #a855f7;
-  --accent-purple-muted: rgba(168, 85, 247, 0.15);
-  --danger: #ff6b6b;
-  --danger-muted: rgba(255, 107, 107, 0.15);
-  --success: #42d7c4;
-  --warning: #ff9f43;
+  /* Accent Colors — restrained, one clear brand green */
+  --accent-green: #3ecf8e;
+  --accent-green-muted: rgba(62, 207, 142, 0.12);
+  --accent-blue: #5b9bf5;
+  --accent-blue-muted: rgba(91, 155, 245, 0.12);
+  --accent-orange: #e5a04b;
+  --accent-orange-hover: #f0b060;
+  --accent-orange-muted: rgba(229, 160, 75, 0.12);
+  --accent-cyan: #36c5b0;
+  --accent-cyan-muted: rgba(54, 197, 176, 0.12);
+  --accent-purple: #a78bfa;
+  --accent-purple-muted: rgba(167, 139, 250, 0.12);
+  --danger: #ef5350;
+  --danger-muted: rgba(239, 83, 80, 0.12);
+  --success: #3ecf8e;
+  --warning: #e5a04b;
 
-  /* Border Colors */
-  --border-soft: rgba(255, 255, 255, 0.08);
-  --border-medium: rgba(255, 255, 255, 0.12);
-  --border-strong: rgba(255, 255, 255, 0.2);
-  --border-accent: rgba(255, 159, 67, 0.4);
+  /* Border Colors — very subtle */
+  --border-soft: rgba(255, 255, 255, 0.06);
+  --border-medium: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --border-accent: rgba(62, 207, 142, 0.35);
 
-  /* Shadow & Glow */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
-  --glow-orange: 0 0 20px rgba(255, 159, 67, 0.15);
-  --glow-blue: 0 0 20px rgba(78, 167, 255, 0.15);
+  /* Shadows — subtle, no glows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.24);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.32);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.44);
 
   /* Spacing */
   --space-1: 4px;
@@ -57,22 +57,22 @@
   --space-6: 24px;
   --space-8: 32px;
 
-  /* Border Radius */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  /* Border Radius — tighter, more refined */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
   --radius-full: 9999px;
 
   /* Typography */
-  --font-heading: "IBM Plex Mono", ui-monospace, monospace;
-  --font-body: "IBM Plex Sans", -apple-system, blinkmacsystemfont, "Segoe UI", sans-serif;
+  --font-heading: "Departure Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --font-body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
   /* Transitions */
-  --transition-fast: 150ms ease;
-  --transition-normal: 250ms ease;
-  --transition-slow: 350ms ease;
+  --transition-fast: 120ms ease;
+  --transition-normal: 200ms ease;
+  --transition-slow: 300ms ease;
 
   /* Sidebar */
   --sidebar-width: 260px;

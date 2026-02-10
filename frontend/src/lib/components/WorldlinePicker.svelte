@@ -28,27 +28,28 @@
   .picker {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     border: 1px solid var(--border-soft);
-    border-radius: 8px;
-    padding: 6px 10px;
-    background: var(--surface-2);
+    border-radius: var(--radius-md);
+    padding: 4px 10px;
+    background: var(--surface-1);
   }
 
   .picker-label {
-    color: var(--text-muted);
-    font-size: 12px;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-family: var(--font-mono);
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
   }
 
   select {
-    background: var(--surface-2);
+    background: var(--surface-1);
     color: var(--text-primary);
     border: none;
-    font-family: var(--font-body);
-    font-size: 14px;
-    min-width: 180px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    min-width: 160px;
   }
 
   select:focus {

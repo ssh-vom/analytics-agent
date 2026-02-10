@@ -74,21 +74,20 @@
   <aside class="sidebar">
     <div class="sidebar-header">
       <a href="/chat" class="logo">
-        <Zap class="logo-icon" size={20} />
+        <Zap size={18} color="var(--accent-green)" />
         <span class="logo-text">TextQL</span>
       </a>
     </div>
 
     <div class="sidebar-content">
-      <!-- Threads Section -->
       <div class="section">
         <button class="section-header" on:click={toggleThreads}>
           {#if threadsExpanded}
-            <ChevronDown size={16} />
+            <ChevronDown size={14} />
           {:else}
-            <ChevronRight size={16} />
+            <ChevronRight size={14} />
           {/if}
-          <MessageSquare size={16} />
+          <MessageSquare size={14} />
           <span class="section-title">Threads</span>
           <span class="section-count">({$threads.threads.length})</span>
         </button>
@@ -127,19 +126,19 @@
     <div class="sidebar-footer">
       <nav class="nav-menu">
         <a href="/worldlines" class="nav-item" class:active={isWorldlines}>
-          <GitBranch size={18} />
+          <GitBranch size={16} />
           <span>Worldlines</span>
         </a>
         <a href="/data" class="nav-item" class:active={isData}>
-          <FileSpreadsheet size={18} />
+          <FileSpreadsheet size={16} />
           <span>Data Sources</span>
         </a>
         <a href="/connectors" class="nav-item" class:active={isConnectors}>
-          <Database size={18} />
+          <Database size={16} />
           <span>Connectors</span>
         </a>
         <a href="/settings" class="nav-item" class:active={isSettings}>
-          <Settings size={18} />
+          <Settings size={16} />
           <span>Settings</span>
         </a>
       </nav>
@@ -158,7 +157,6 @@
     display: grid;
     grid-template-columns: var(--sidebar-width) 1fr;
     height: 100vh;
-    background: var(--bg-0);
     overflow: hidden;
   }
 
@@ -183,15 +181,11 @@
     color: var(--text-primary);
   }
 
-  .logo-icon {
-    color: var(--accent-orange);
-  }
-
   .logo-text {
     font-family: var(--font-heading);
-    font-size: 20px;
-    font-weight: 500;
-    letter-spacing: -0.02em;
+    font-size: 18px;
+    font-weight: 400;
+    letter-spacing: 0.02em;
   }
 
   .sidebar-content {
@@ -209,21 +203,22 @@
     align-items: center;
     gap: var(--space-2);
     width: 100%;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-2) var(--space-2);
     background: transparent;
     border: none;
     border-radius: var(--radius-md);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-family: var(--font-body);
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition: color var(--transition-fast);
   }
 
   .section-header:hover {
-    background: var(--surface-hover);
-    color: var(--text-primary);
+    color: var(--text-secondary);
   }
 
   .section-title {
@@ -233,21 +228,21 @@
 
   .section-count {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: 11px;
   }
 
   .section-content {
     display: flex;
     flex-direction: column;
-    gap: var(--space-1);
-    padding: var(--space-1) 0;
+    gap: 2px;
+    padding-top: var(--space-1);
     min-height: 0;
   }
 
   .thread-list {
     display: flex;
     flex-direction: column;
-    gap: var(--space-1);
+    gap: 2px;
     overflow-y: auto;
     max-height: min(56vh, calc(100vh - 260px));
     padding-right: 2px;
@@ -257,35 +252,33 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--space-3);
-    background: var(--surface-0);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-md);
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition: background var(--transition-fast);
     text-align: left;
   }
 
   .thread-card:hover {
     background: var(--surface-hover);
-    border-color: var(--border-medium);
   }
 
   .thread-card.active {
     background: var(--surface-active);
-    border-color: var(--border-accent);
   }
 
   .thread-info {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
     min-width: 0;
   }
 
   .thread-name {
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
     white-space: nowrap;
     overflow: hidden;
@@ -294,36 +287,36 @@
 
   .thread-meta {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: 11px;
   }
 
   .active-indicator {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
-    background: var(--accent-orange);
+    background: var(--accent-green);
     flex-shrink: 0;
   }
 
   .new-thread-btn {
     display: flex;
     align-items: center;
-    justify-content: center;
     gap: var(--space-2);
-    padding: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    margin-top: var(--space-1);
     background: transparent;
     border: 1px dashed var(--border-medium);
-    border-radius: var(--radius-lg);
-    color: var(--text-secondary);
-    font-size: 13px;
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    font-size: 12px;
     cursor: pointer;
     transition: all var(--transition-fast);
   }
 
   .new-thread-btn:hover {
     background: var(--surface-hover);
-    border-color: var(--accent-orange);
-    color: var(--text-primary);
+    border-color: var(--text-dim);
+    color: var(--text-secondary);
   }
 
   .sidebar-footer {
@@ -334,7 +327,7 @@
   .nav-menu {
     display: flex;
     flex-direction: column;
-    gap: var(--space-1);
+    gap: 1px;
     margin-bottom: var(--space-4);
   }
 
@@ -343,32 +336,32 @@
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-2) var(--space-3);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-decoration: none;
     border-radius: var(--radius-md);
-    font-size: 14px;
+    font-size: 13px;
     transition: all var(--transition-fast);
   }
 
   .nav-item:hover {
+    color: var(--text-secondary);
     background: var(--surface-hover);
-    color: var(--text-primary);
   }
 
   .nav-item.active {
-    background: var(--accent-orange-muted);
-    color: var(--accent-orange);
+    color: var(--accent-green);
+    background: var(--accent-green-muted);
   }
 
   .version {
     color: var(--text-dim);
     font-size: 11px;
+    font-family: var(--font-mono);
     text-align: center;
   }
 
   .main-content {
     overflow: hidden;
-    background: var(--bg-0);
     height: 100vh;
     overscroll-behavior: none;
   }
