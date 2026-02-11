@@ -2,6 +2,7 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { threads, activeThread, createNewThread, loadThread } from "$lib/stores/threads";
+  import { chatJobs, type JobToast } from "$lib/stores/chatJobs";
   import { createWorldline, fetchThreadWorldlines } from "$lib/api/client";
   import { GitBranch } from "lucide-svelte";
   import { Database } from "lucide-svelte";
@@ -12,7 +13,7 @@
   import { ChevronRight } from "lucide-svelte";
   import { MessageSquare } from "lucide-svelte";
   import { Zap } from "lucide-svelte";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
 
   let threadsExpanded = true;
 
@@ -38,7 +39,37 @@
   onMount(() => {
     threads.loadThreads();
     activeThread.loadFromStorage();
+    chatJobs.startPolling();
   });
+
+  onDestroy(() => {
+    chatJobs.stopPolling();
+  });
+
+  function dismissJobToast(toastId: string): void {
+    chatJobs.dismissToast(toastId);
+  }
+
+  async function openJobToast(toast: JobToast): Promise<void> {
+    dismissJobToast(toast.id);
+
+    if (toast.resultWorldlineId) {
+      localStorage.setItem("textql_active_worldline", toast.resultWorldlineId);
+    }
+    await loadThread(toast.threadId);
+    await goto("/chat");
+
+    if (toast.resultWorldlineId) {
+      window.dispatchEvent(
+        new CustomEvent("textql:open-worldline", {
+          detail: {
+            threadId: toast.threadId,
+            worldlineId: toast.resultWorldlineId,
+          },
+        }),
+      );
+    }
+  }
 
   async function ensureThreadHasWorldline(threadId: string): Promise<string> {
     const existing = await fetchThreadWorldlines(threadId);
@@ -107,6 +138,7 @@
           <div class="section-content">
             <div class="thread-list">
               {#each $threads.threads as thread}
+                {@const threadJobSummary = chatJobs.getThreadSummary(thread.id)}
                 <button
                   class="thread-card"
                   class:active={thread.id === $activeThread?.id}
@@ -114,9 +146,20 @@
                 >
                   <div class="thread-info">
                     <span class="thread-name">{thread.name}</span>
-                    <span class="thread-meta">
-                      {thread.messageCount} msgs · {formatRelativeTime(thread.lastActivity)}
-                    </span>
+                    <div class="thread-meta-row">
+                      <span class="thread-meta">
+                        {thread.messageCount} msgs · {formatRelativeTime(thread.lastActivity)}
+                      </span>
+                      {#if threadJobSummary.running > 0}
+                        <span class="thread-job-pill running">
+                          {threadJobSummary.running} running
+                        </span>
+                      {:else if threadJobSummary.queued > 0}
+                        <span class="thread-job-pill queued">
+                          {threadJobSummary.queued} queued
+                        </span>
+                      {/if}
+                    </div>
                   </div>
                   {#if thread.id === $activeThread?.id}
                     <div class="active-indicator"></div>
@@ -162,6 +205,31 @@
     <slot />
   </main>
 </div>
+
+{#if $chatJobs.toasts.length > 0}
+  <aside class="job-toast-stack" aria-live="polite">
+    {#each $chatJobs.toasts as toast (toast.id)}
+      <article class="job-toast" class:failed={toast.status === "failed"}>
+        <div class="job-toast-copy">
+          <strong>{toast.title}</strong>
+          <p>{toast.message}</p>
+        </div>
+        <div class="job-toast-actions">
+          <button type="button" class="toast-btn" on:click={() => openJobToast(toast)}>
+            {toast.status === "completed" && toast.resultWorldlineId ? "Open Result" : "Open"}
+          </button>
+          <button
+            type="button"
+            class="toast-btn ghost"
+            on:click={() => dismissJobToast(toast.id)}
+          >
+            Dismiss
+          </button>
+        </div>
+      </article>
+    {/each}
+  </aside>
+{/if}
 
 <style>
   .app-layout {
@@ -301,6 +369,37 @@
     font-size: 12px;
   }
 
+  .thread-meta-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .thread-job-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border: 1px solid var(--border-soft);
+    color: var(--text-dim);
+  }
+
+  .thread-job-pill.running {
+    color: var(--accent-orange);
+    border-color: var(--accent-orange-muted);
+    background: color-mix(in srgb, var(--accent-orange-muted) 45%, transparent);
+  }
+
+  .thread-job-pill.queued {
+    color: var(--text-secondary);
+    border-color: var(--border-medium);
+    background: var(--surface-1);
+  }
+
   .active-indicator {
     width: 5px;
     height: 5px;
@@ -377,6 +476,76 @@
     overscroll-behavior: none;
   }
 
+  .job-toast-stack {
+    position: fixed;
+    right: var(--space-4);
+    bottom: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    width: min(360px, calc(100vw - 24px));
+    z-index: 150;
+  }
+
+  .job-toast {
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    background: var(--bg-1);
+    box-shadow: var(--shadow-sm);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .job-toast.failed {
+    border-color: var(--danger);
+  }
+
+  .job-toast-copy {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .job-toast-copy strong {
+    font-size: 12px;
+    color: var(--text-primary);
+  }
+
+  .job-toast-copy p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .job-toast-actions {
+    display: flex;
+    gap: var(--space-2);
+  }
+
+  .toast-btn {
+    border: 1px solid var(--accent-green);
+    border-radius: var(--radius-sm);
+    background: var(--accent-green-muted);
+    color: var(--accent-green);
+    font-size: 11px;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+
+  .toast-btn.ghost {
+    border-color: var(--border-soft);
+    background: transparent;
+    color: var(--text-dim);
+  }
+
+  .toast-btn:hover {
+    border-color: var(--border-medium);
+    color: var(--text-primary);
+  }
+
   @media (max-width: 768px) {
     .app-layout {
       grid-template-columns: 1fr;
@@ -384,6 +553,13 @@
 
     .sidebar {
       display: none;
+    }
+
+    .job-toast-stack {
+      right: var(--space-2);
+      left: var(--space-2);
+      width: auto;
+      bottom: var(--space-2);
     }
   }
 </style>
