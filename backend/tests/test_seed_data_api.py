@@ -154,6 +154,39 @@ class SeedDataApiTests(unittest.TestCase):
         self.assertEqual(snapshot_row["event_id"], result["event_id"])
         self.assertTrue(Path(snapshot_row["duckdb_path"]).exists())
 
+    def test_import_csv_auto_table_name_uses_original_filename(self) -> None:
+        worldline_id = self._create_worldline()
+        upload = UploadFile(
+            io.BytesIO(b"name,score\nAva,10\nLiam,12\n"),
+            filename="customer-orders.csv",
+        )
+
+        result = self._run(
+            seed_data_api.import_csv_endpoint(
+                worldline_id=worldline_id,
+                file=upload,
+                table_name=None,
+                if_exists="fail",
+            )
+        )
+
+        self.assertTrue(result["table_name"].startswith("customer_orders_"))
+        self.assertFalse(result["table_name"].startswith("temp_"))
+
+        tables_response = self._run(
+            seed_data_api.list_all_tables_endpoint(
+                worldline_id=worldline_id,
+                include_system=False,
+            )
+        )
+        matching = [
+            table
+            for table in tables_response["tables"]
+            if table["name"] == result["table_name"]
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].get("source_filename"), "customer-orders.csv")
+
     def test_get_worldline_schema_native_tables_are_unique(self) -> None:
         worldline_id = self._create_worldline()
         upload = UploadFile(
@@ -212,6 +245,7 @@ class SeedDataApiTests(unittest.TestCase):
         self.assertEqual(len(matching), 1)
         self.assertEqual(matching[0]["type"], "imported_csv")
         self.assertEqual(matching[0]["row_count"], 2)
+        self.assertEqual(matching[0].get("source_filename"), "scores.csv")
         self.assertIn("columns", matching[0])
         self.assertTrue(matching[0]["columns"])
 

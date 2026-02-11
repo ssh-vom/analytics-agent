@@ -70,7 +70,7 @@
   import { Plus } from "lucide-svelte";
   import { Wrench } from "lucide-svelte";
   import { Upload } from "lucide-svelte";
-  import { FileSpreadsheet } from "lucide-svelte";
+  import { FileText } from "lucide-svelte";
   import { X } from "lucide-svelte";
 
   let threadId = "";
@@ -102,10 +102,6 @@
 
   // CSV Import state
   let uploadedFiles: File[] = [];
-  let importingFile: string | null = null;
-  let importError: string | null = null;
-  let importSuccess: { filename: string; table: string; rows: number } | null = null;
-  let showImportPanel = false;
   let worldlineTables: Awaited<ReturnType<typeof fetchWorldlineTables>> | null = null;
   let outputType: OutputType = "report";
   let showOutputTypeMenu = false;
@@ -364,6 +360,17 @@
     selectedContextTables = toggleSelectedId(selectedContextTables, name);
   }
 
+  function contextTableLabel(table: {
+    name: string;
+    type: "native" | "imported_csv" | "external";
+    source_filename?: string;
+  }): string {
+    if (table.type === "imported_csv" && table.source_filename) {
+      return table.source_filename;
+    }
+    return table.name;
+  }
+
   async function refreshWorldlineContextTables(): Promise<void> {
     if (!activeWorldlineId) {
       worldlineTables = null;
@@ -571,8 +578,6 @@
 
   async function sendPrompt(): Promise<void> {
     const message = prompt.trim();
-    const isCurrentWorldlineSending = Boolean(activeWorldlineId && sendingByWorldline[activeWorldlineId]);
-    const hasPendingWorldlineJobs = activeWorldlineQueueDepth > 0;
     if (!message || !activeWorldlineId) {
       if (!activeWorldlineId) {
         statusText = "Error: No active worldline. Please refresh the page.";
@@ -580,12 +585,24 @@
       return;
     }
 
+    const requestWorldlineId = activeWorldlineId;
+
+    if (uploadedFiles.length > 0) {
+      try {
+        await importUploadedFilesBeforeSend(requestWorldlineId);
+      } catch {
+        return;
+      }
+    }
+
+    const isCurrentWorldlineSending = Boolean(sendingByWorldline[requestWorldlineId]);
+    const hasPendingWorldlineJobs = activeWorldlineQueueDepth > 0;
+
     if (isCurrentWorldlineSending || hasPendingWorldlineJobs) {
-      await queuePromptAsJob(message, activeWorldlineId);
+      await queuePromptAsJob(message, requestWorldlineId);
       return;
     }
 
-    const requestWorldlineId = activeWorldlineId;
     setWorldlineSending(requestWorldlineId, true);
     prompt = "";
     closeContextMenus();
@@ -714,51 +731,54 @@
       return;
     }
     uploadedFiles = [...uploadedFiles, ...csvFiles];
-    showImportPanel = uploadedFiles.length > 0;
+    statusText =
+      uploadedFiles.length === 1
+        ? `Attached ${uploadedFiles[0].name}. It will import when you send.`
+        : `Attached ${uploadedFiles.length} CSV files. They will import when you send.`;
+    input.value = "";
   }
 
   function removeUploadedFile(filename: string) {
     uploadedFiles = removeUploadedFileByName(uploadedFiles, filename);
-    if (uploadedFiles.length === 0) {
-      showImportPanel = false;
-    }
   }
 
-  async function importCSVFile(file: File) {
-    if (!activeWorldlineId) return;
-    
-    importingFile = file.name;
-    importError = null;
-    importSuccess = null;
-
+  async function runCSVImport(
+    worldlineId: string,
+    file: File,
+  ): Promise<Awaited<ReturnType<typeof importCSV>>> {
     try {
-      const result = await importCSV(activeWorldlineId, file);
-      importSuccess = {
-        filename: file.name,
-        table: result.table_name,
-        rows: result.row_count
-      };
-      // Remove from uploaded files after successful import
+      const result = await importCSV(worldlineId, file);
       removeUploadedFile(file.name);
-      // Refresh tables list
-      worldlineTables = await fetchWorldlineTables(activeWorldlineId);
-      selectedContextTables = [...new Set([...selectedContextTables, result.table_name])];
-      statusText = `Imported ${result.row_count} rows into ${result.table_name}`;
+
+      if (activeWorldlineId === worldlineId) {
+        selectedContextTables = [...new Set([...selectedContextTables, result.table_name])];
+      }
+
+      statusText = `Imported ${result.row_count} rows from ${file.name} into ${result.table_name}`;
+      return result;
     } catch (error) {
-      importError = error instanceof Error ? error.message : "Import failed";
-      statusText = `Import failed: ${importError}`;
-    } finally {
-      importingFile = null;
+      const detail = error instanceof Error ? error.message : "Import failed";
+      statusText = `Import failed: ${detail}`;
+      throw error instanceof Error ? error : new Error(detail);
     }
   }
 
-  function toggleImportPanel() {
-    showImportPanel = !showImportPanel;
-    if (showImportPanel && activeWorldlineId) {
-      fetchWorldlineTables(activeWorldlineId).then(tables => {
-        worldlineTables = tables;
-      });
+  async function importUploadedFilesBeforeSend(worldlineId: string): Promise<void> {
+    if (uploadedFiles.length === 0) {
+      return;
     }
+
+    const filesToImport = [...uploadedFiles];
+    statusText =
+      filesToImport.length === 1
+        ? `Importing ${filesToImport[0].name}...`
+        : `Importing ${filesToImport.length} files...`;
+
+    for (const file of filesToImport) {
+      await runCSVImport(worldlineId, file);
+    }
+
+    worldlineTables = await fetchWorldlineTables(worldlineId);
   }
 </script>
 
@@ -1057,8 +1077,13 @@
             <div class="context-menu-title small">Worldline Tables</div>
             {#if worldlineTables && worldlineTables.tables.length > 0}
               {#each worldlineTables.tables.slice(0, 12) as table}
-                <button type="button" class="context-option" on:click={() => toggleContextTable(table.name)}>
-                  {selectedContextTables.includes(table.name) ? "✓ " : ""}{table.name}
+                <button
+                  type="button"
+                  class="context-option"
+                  title={table.name}
+                  on:click={() => toggleContextTable(table.name)}
+                >
+                  {selectedContextTables.includes(table.name) ? "✓ " : ""}{contextTableLabel(table)}
                 </button>
               {/each}
             {:else}
@@ -1069,80 +1094,33 @@
       </div>
     </div>
 
-    <!-- CSV Import Panel -->
-    {#if showImportPanel}
-      <div class="import-panel">
-        <div class="import-panel-header">
-          <FileSpreadsheet size={16} />
-          <span>CSV Files to Import</span>
-          <button class="close-btn" on:click={() => showImportPanel = false}>
-            <X size={14} />
-          </button>
-        </div>
-        <div class="uploaded-files-list">
-          {#each uploadedFiles as file}
-            <div class="uploaded-file-item">
-              <span class="filename">{file.name}</span>
-              <span class="filesize">({(file.size / 1024).toFixed(1)} KB)</span>
-              <div class="file-actions">
-                {#if importingFile === file.name}
-                  <span class="importing-indicator">Importing...</span>
-                {:else}
-                  <button 
-                    class="import-btn"
-                    on:click={() => importCSVFile(file)}
-                    disabled={importingFile !== null}
-                  >
-                    Import
-                  </button>
-                  <button 
-                    class="remove-btn"
-                    on:click={() => removeUploadedFile(file.name)}
-                    disabled={importingFile !== null}
-                  >
-                    <X size={12} />
-                  </button>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        </div>
-        {#if importSuccess}
-          <div class="import-success">
-            ✓ Imported {importSuccess.rows.toLocaleString()} rows into table "{importSuccess.table}"
-          </div>
-        {/if}
-        {#if importError}
-          <div class="import-error">
-            ✗ {importError}
-          </div>
-        {/if}
-        {#if worldlineTables && worldlineTables.tables.length > 0}
-          <div class="existing-tables">
-            <div class="existing-tables-header">Available Tables ({worldlineTables.count}):</div>
-            <div class="tables-list">
-              {#each worldlineTables.tables.slice(0, 5) as table}
-                <span class="table-badge" class:imported={table.type === 'imported_csv'}>
-                  {table.name}
-                </span>
-              {/each}
-              {#if worldlineTables.tables.length > 5}
-                <span class="table-badge more">+{worldlineTables.tables.length - 5} more</span>
-              {/if}
-            </div>
-          </div>
-        {/if}
-      </div>
-    {/if}
-
     <form class="composer" on:submit|preventDefault={sendPrompt}>
       <div class="composer-input-wrapper">
+        {#if uploadedFiles.length > 0}
+          <div class="attachment-chips">
+            {#each uploadedFiles as file}
+              <div class="attachment-chip" title={file.name}>
+                <FileText size={14} />
+                <span class="attachment-name">{file.name}</span>
+                <button
+                  type="button"
+                  class="attachment-remove"
+                  on:click={() => removeUploadedFile(file.name)}
+                  title="Remove file"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
         <textarea
           bind:value={prompt}
           placeholder="Ask a question, write SQL, or request Python analysis..."
           rows={composerExpanded ? 4 : 2}
           on:focus={() => composerExpanded = true}
           on:blur={() => composerExpanded = false}
+          class:with-attachments={uploadedFiles.length > 0}
         ></textarea>
         <!-- File Upload Button -->
         <div class="upload-btn-wrapper">
@@ -1165,16 +1143,6 @@
               <span class="upload-badge">{uploadedFiles.length}</span>
             {/if}
           </button>
-          {#if uploadedFiles.length > 0}
-            <button 
-              type="button" 
-              class="upload-btn active"
-              on:click={toggleImportPanel}
-              title="Show import panel"
-            >
-              <FileSpreadsheet size={16} />
-            </button>
-          {/if}
         </div>
       </div>
       <button 
@@ -1754,6 +1722,10 @@
     color: var(--text-dim);
   }
 
+  textarea.with-attachments {
+    padding-top: calc(var(--space-3) + 28px);
+  }
+
   .send-btn {
     display: flex;
     align-items: center;
@@ -1785,6 +1757,62 @@
     cursor: not-allowed;
   }
 
+  .attachment-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3) 0;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 40px;
+    z-index: 1;
+  }
+
+  .attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 4px 8px;
+    background: var(--surface-1);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-md);
+    font-size: 12px;
+    color: var(--text-secondary);
+    max-width: 200px;
+  }
+
+  .attachment-chip :global(svg) {
+    flex-shrink: 0;
+    color: var(--accent-green);
+  }
+
+  .attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+  }
+
+  .attachment-remove {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .attachment-remove:hover {
+    background: var(--danger-muted);
+    color: var(--danger);
+  }
+
   @media (max-width: 1100px) {
     .workspace {
       grid-template-columns: 1fr;
@@ -1794,164 +1822,6 @@
     .workspace.panel-collapsed {
       grid-template-rows: minmax(0, 1fr) 56px;
     }
-  }
-
-  /* Import Panel */
-  .import-panel {
-    background: var(--surface-0);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
-    margin-bottom: var(--space-3);
-    overflow: hidden;
-  }
-
-  .import-panel-header {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border-soft);
-    color: var(--text-muted);
-    font-size: 12px;
-    font-weight: 500;
-  }
-
-  .import-panel-header .close-btn {
-    margin-left: auto;
-    padding: var(--space-1);
-    background: transparent;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    border-radius: var(--radius-sm);
-    transition: color var(--transition-fast);
-  }
-
-  .import-panel-header .close-btn:hover {
-    color: var(--text-primary);
-  }
-
-  .uploaded-files-list {
-    padding: var(--space-2);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .uploaded-file-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    font-size: 13px;
-  }
-
-  .uploaded-file-item .filename {
-    color: var(--text-primary);
-    font-family: var(--font-mono);
-    font-size: 12px;
-  }
-
-  .uploaded-file-item .filesize {
-    color: var(--text-dim);
-    font-size: 11px;
-  }
-
-  .uploaded-file-item .file-actions {
-    margin-left: auto;
-    display: flex;
-    gap: var(--space-1);
-  }
-
-  .import-btn, .remove-btn {
-    padding: var(--space-1) var(--space-2);
-    font-size: 11px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: all var(--transition-fast);
-  }
-
-  .import-btn {
-    background: var(--accent-green-muted);
-    border: 1px solid var(--accent-green);
-    color: var(--accent-green);
-  }
-
-  .import-btn:hover:not(:disabled) {
-    background: var(--accent-green);
-    color: #111;
-  }
-
-  .remove-btn {
-    background: transparent;
-    border: 1px solid var(--border-soft);
-    color: var(--text-dim);
-    padding: var(--space-1);
-  }
-
-  .remove-btn:hover:not(:disabled) {
-    background: var(--danger-muted);
-    border-color: var(--danger);
-    color: var(--danger);
-  }
-
-  .importing-indicator {
-    font-size: 11px;
-    color: var(--text-dim);
-    font-style: italic;
-  }
-
-  .import-success, .import-error {
-    padding: var(--space-2) var(--space-3);
-    margin: 0 var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-  }
-
-  .import-success {
-    background: var(--accent-green-muted);
-    color: var(--accent-green);
-  }
-
-  .import-error {
-    background: var(--danger-muted);
-    color: var(--danger);
-  }
-
-  .existing-tables {
-    padding: var(--space-3);
-    border-top: 1px solid var(--border-soft);
-  }
-
-  .existing-tables-header {
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-bottom: var(--space-2);
-  }
-
-  .tables-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1);
-  }
-
-  .table-badge {
-    padding: 2px 6px;
-    background: var(--surface-1);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    color: var(--text-dim);
-    font-family: var(--font-mono);
-  }
-
-  .table-badge.imported {
-    color: var(--accent-green);
-  }
-
-  .table-badge.more {
-    background: transparent;
-    border-style: dashed;
   }
 
   /* Upload */
@@ -1981,11 +1851,6 @@
   .upload-btn:hover {
     border-color: var(--border-medium);
     color: var(--text-secondary);
-  }
-
-  .upload-btn.active {
-    color: var(--accent-green);
-    border-color: var(--accent-green);
   }
 
   .upload-badge {

@@ -205,6 +205,7 @@ async def import_csv_endpoint(
             worldline_id=worldline_id,
             file_path=temp_path,
             table_name=table_name,
+            source_filename=file.filename,
             if_exists=if_exists,
         )
 

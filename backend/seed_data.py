@@ -101,6 +101,7 @@ def import_csv_to_worldline(
     worldline_id: str,
     file_path: Path,
     table_name: str | None = None,
+    source_filename: str | None = None,
     if_exists: str = "fail",
 ) -> CSVImportResult:
     """
@@ -110,6 +111,7 @@ def import_csv_to_worldline(
         worldline_id: The worldline to import into
         file_path: Path to the CSV file
         table_name: Optional table name (auto-generated from filename if not provided)
+        source_filename: Original uploaded filename used for metadata and table auto-naming
         if_exists: Behavior if table exists: "fail", "replace", "append"
 
     Returns:
@@ -137,9 +139,11 @@ def import_csv_to_worldline(
             detail=f"File too large. Max size: {MAX_CSV_FILE_SIZE / 1024 / 1024:.1f}MB",
         )
 
+    source_filename_for_metadata = (source_filename or "").strip() or file_path.name
+
     # Generate or sanitize table name
     if table_name is None:
-        table_name = _generate_table_name_from_filename(file_path.name)
+        table_name = _generate_table_name_from_filename(source_filename_for_metadata)
     else:
         table_name = _sanitize_table_name(table_name)
 
@@ -207,7 +211,7 @@ def import_csv_to_worldline(
             INSERT INTO _csv_import_history (id, table_name, source_filename, row_count)
             VALUES (?, ?, ?, ?)
         """,
-            (import_id, table_name, file_path.name, row_count),
+            (import_id, table_name, source_filename_for_metadata, row_count),
         )
 
         conn.commit()
