@@ -446,7 +446,9 @@
         }
         scrollFeedToBottom(true);
       } else {
-        statusText = "Error: No worldline found";
+        // No worldline yet - this is expected for new threads
+        // Worldline will be created lazily on first message
+        statusText = "Ready";
       }
 
       isReady = true;
@@ -497,21 +499,15 @@
       activeThread.set(newThread);
       activeThread.saveToStorage(newThread);
       
-      statusText = "Creating worldline...";
-      
-      // Create worldline for this thread
-      const worldline = await createWorldline(threadId, "main");
-      activeWorldlineId = worldline.worldline_id;
-      persistPreferredWorldline(activeWorldlineId);
-      
-      statusText = "Loading worldline...";
-      await refreshWorldlines();
-      await loadWorldline(activeWorldlineId);
-      scrollFeedToBottom(true);
+      // Don't create worldline here - it will be created lazily on first message
+      // Just set up empty state
+      worldlines = [];
+      eventsByWorldline = {};
+      activeWorldlineId = "";
       
       statusText = "Ready";
       isReady = true;
-      console.log("Session initialized successfully:", { threadId, activeWorldlineId });
+      console.log("Session initialized successfully:", { threadId, activeWorldlineId: null });
     } catch (error) {
       statusText = error instanceof Error ? error.message : "Initialization failed";
       console.error("Initialization error:", error);
@@ -576,16 +572,43 @@
     selectedArtifactId = event.detail.artifactId;
   }
 
+  async function ensureWorldline(): Promise<string | null> {
+    // If we already have a worldline, use it
+    if (activeWorldlineId) {
+      return activeWorldlineId;
+    }
+    
+    // If we have a thread but no worldline, create one lazily
+    if (threadId) {
+      statusText = "Creating worldline...";
+      try {
+        const worldline = await createWorldline(threadId, "main");
+        activeWorldlineId = worldline.worldline_id;
+        persistPreferredWorldline(activeWorldlineId);
+        await refreshWorldlines();
+        statusText = "Ready";
+        return activeWorldlineId;
+      } catch (error) {
+        statusText = error instanceof Error ? error.message : "Failed to create worldline";
+        return null;
+      }
+    }
+    
+    return null;
+  }
+
   async function sendPrompt(): Promise<void> {
     const message = prompt.trim();
-    if (!message || !activeWorldlineId) {
-      if (!activeWorldlineId) {
-        statusText = "Error: No active worldline. Please refresh the page.";
-      }
+    if (!message) {
       return;
     }
 
-    const requestWorldlineId = activeWorldlineId;
+    // Ensure we have a worldline (create lazily if needed)
+    const requestWorldlineId = await ensureWorldline();
+    if (!requestWorldlineId) {
+      statusText = "Error: No active worldline. Please refresh the page.";
+      return;
+    }
 
     if (uploadedFiles.length > 0) {
       try {

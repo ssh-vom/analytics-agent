@@ -84,11 +84,12 @@
   async function handleCreateNewThread() {
     try {
       const thread = await createNewThread();
-
-      const worldlineId = await ensureThreadHasWorldline(thread.id);
       
-      // Store the worldline ID in localStorage so chat page can pick it up
-      localStorage.setItem("textql_active_worldline", worldlineId);
+      // Load the thread and navigate - worldline will be created lazily on first message
+      await loadThread(thread.id);
+      
+      // Clear any stored worldline ID since we're starting fresh
+      localStorage.removeItem("textql_active_worldline");
       
       // Navigate to chat page
       await goto("/chat");
@@ -100,8 +101,9 @@
 
   async function handleThreadSelect(threadId: string): Promise<void> {
     await loadThread(threadId);
-    const worldlineId = await ensureThreadHasWorldline(threadId);
-    localStorage.setItem("textql_active_worldline", worldlineId);
+    // Don't ensure worldline here - let it be created lazily on first message
+    // Just clear the stored worldline ID
+    localStorage.removeItem("textql_active_worldline");
     await goto("/chat");
   }
 
