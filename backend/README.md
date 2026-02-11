@@ -1,5 +1,14 @@
 # Backend Notes
 
+## Current refactor state
+
+- Event writes now use a shared atomic append-and-advance-head primitive.
+- Branch creation restores DuckDB state at the fork boundary (`from_event_id`) with deterministic fallback behavior.
+- Chat runtime orchestration is shared across immediate, streaming, and queued job execution paths.
+- Worldline summaries are available via:
+  - `GET /api/threads/{thread_id}/worldline-summaries`
+  - includes message counts, last activity, and per-status job counts.
+
 ## Sandbox image (required)
 
 Build the Python sandbox image before running tools:

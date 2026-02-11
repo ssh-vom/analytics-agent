@@ -14,7 +14,6 @@
     id: string;
     name: string;
     parentId: string | null;
-    createdAt: string;
     lastActivity: string;
     messageCount: number;
     activeJobs: number;
@@ -96,7 +95,6 @@
         id: line.id,
         name: line.name || line.id.slice(0, 12),
         parentId: line.parent_worldline_id,
-        createdAt: line.created_at,
         lastActivity: line.last_activity,
         messageCount: line.message_count,
         activeJobs: (line.jobs.running ?? 0) + (line.jobs.queued ?? 0),

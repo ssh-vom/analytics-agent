@@ -2,6 +2,14 @@
 
 Analytics agent with SQL/Python tool execution and worldline branching.
 
+## Refactor Status (Phase 9)
+
+- Phases 0-8 are complete (security hardening, atomic event store, fork-boundary state restore, scheduler/runtime consolidation, backend/frontend decomposition, and worldline API efficiency).
+- Phase 9 completed final hardening: full test/build verification, dead-code cleanup, and docs/LOC closure.
+- Background chat turn scheduling is now part of the main product path (`/api/chat/jobs`).
+- Worldlines UI now uses a summary API to avoid N+1 fetches:
+  - `GET /api/threads/{thread_id}/worldline-summaries`
+
 ## Quick Start
 
 **Prerequisites:** Docker, [uv](https://docs.astral.sh/uv/), Node.js/npm
@@ -41,3 +49,10 @@ Set at least one LLM API key:
 - `OPENROUTER_API_KEY` (default provider)
 - `OPENAI_API_KEY`
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+
+## Useful API Endpoints
+
+- `POST /api/chat/jobs`: queue a background chat turn.
+- `GET /api/chat/jobs`: list background chat jobs (optionally filtered).
+- `POST /api/chat/jobs/{job_id}/ack`: acknowledge a completed/failed job.
+- `GET /api/threads/{thread_id}/worldline-summaries`: fetch worldline metadata (message counts, activity, and job summary) in one request.
