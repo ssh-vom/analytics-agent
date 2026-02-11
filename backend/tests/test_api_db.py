@@ -48,7 +48,14 @@ class Stage1ApiDbTests(unittest.TestCase):
         table_names = [row["name"] for row in rows]
         self.assertEqual(
             table_names,
-            ["artifacts", "events", "snapshots", "threads", "worldlines"],
+            [
+                "artifacts",
+                "chat_turn_jobs",
+                "events",
+                "snapshots",
+                "threads",
+                "worldlines",
+            ],
         )
 
     def test_create_thread_persists(self) -> None:

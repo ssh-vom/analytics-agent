@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import main
 
@@ -31,6 +31,8 @@ class MainLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(main, "get_sandbox_manager", return_value=manager),
             patch.object(main, "init_meta_db", Mock()),
+            patch.object(main, "start_chat_runtime", AsyncMock()),
+            patch.object(main, "shutdown_chat_runtime", AsyncMock()),
         ):
             main.REAPER_INTERVAL_SECONDS = 0.01
             main.IDLE_TTL_SECONDS = 1

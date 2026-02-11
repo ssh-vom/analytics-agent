@@ -1,19 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import {
+    buildPersistedSettings,
+    parsePersistedSettings,
+    type SettingsState,
+  } from "$lib/settingsPersistence";
   import { Settings as SettingsIcon } from "lucide-svelte";
   import { Moon } from "lucide-svelte";
   import { Bell } from "lucide-svelte";
   import { Key } from "lucide-svelte";
   import { Save } from "lucide-svelte";
-
-  interface SettingsState {
-    theme: "dark" | "light" | "auto";
-    notifications: boolean;
-    apiKey: string;
-    defaultProvider: string;
-  }
-
-  type PersistedSettings = Omit<SettingsState, "apiKey">;
 
   let settings: SettingsState = {
     theme: "dark",
@@ -23,37 +19,6 @@
   };
 
   let hasChanges = false;
-
-  function parsePersistedSettings(raw: string): {
-    settings: Partial<PersistedSettings>;
-    hadLegacyApiKey: boolean;
-  } | null {
-    try {
-      const parsed = JSON.parse(raw) as Partial<SettingsState>;
-      const next: Partial<PersistedSettings> = {};
-
-      if (parsed.theme === "dark" || parsed.theme === "light" || parsed.theme === "auto") {
-        next.theme = parsed.theme;
-      }
-      if (typeof parsed.notifications === "boolean") {
-        next.notifications = parsed.notifications;
-      }
-      if (
-        parsed.defaultProvider === "gemini" ||
-        parsed.defaultProvider === "openai" ||
-        parsed.defaultProvider === "openrouter"
-      ) {
-        next.defaultProvider = parsed.defaultProvider;
-      }
-
-      return {
-        settings: next,
-        hadLegacyApiKey: typeof parsed.apiKey === "string" && parsed.apiKey.length > 0,
-      };
-    } catch {
-      return null;
-    }
-  }
 
   onMount(() => {
     const saved = localStorage.getItem("textql_settings");
@@ -74,11 +39,7 @@
   });
 
   function saveSettings() {
-    const persisted: PersistedSettings = {
-      theme: settings.theme,
-      notifications: settings.notifications,
-      defaultProvider: settings.defaultProvider,
-    };
+    const persisted = buildPersistedSettings(settings);
     localStorage.setItem("textql_settings", JSON.stringify(persisted));
     hasChanges = false;
   }
