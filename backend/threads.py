@@ -1,9 +1,9 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend.meta import get_conn, new_id, paginate_by_cursor
-except ModuleNotFoundError:
+else:
     from meta import get_conn, new_id, paginate_by_cursor
 
 

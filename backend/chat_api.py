@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from fastapi.responses import StreamingResponse
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend.chat import build_llm_client
     from backend.chat.engine import ChatEngine
     from backend.chat.jobs import (
@@ -25,7 +25,7 @@ try:
         enqueue_chat_turn_job,
     )
     from backend.meta import get_conn
-except ModuleNotFoundError:
+else:
     from chat import build_llm_client
     from chat.engine import ChatEngine
     from chat.jobs import (

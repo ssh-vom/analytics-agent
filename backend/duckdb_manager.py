@@ -2,9 +2,9 @@ import duckdb
 import shutil
 from pathlib import Path
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend import meta
-except ModuleNotFoundError:
+else:
     import meta
 
 

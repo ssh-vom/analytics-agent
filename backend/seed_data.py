@@ -15,10 +15,10 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend import meta
     from backend.duckdb_manager import ensure_worldline_db, worldline_db_path
-except ModuleNotFoundError:
+else:
     import meta
     from duckdb_manager import ensure_worldline_db, worldline_db_path
 

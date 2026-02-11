@@ -3,7 +3,7 @@ from fastapi import FastAPI
 import os
 import asyncio
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend.env_loader import load_env_once
     from backend.meta import init_meta_db
     from backend.threads import router as threads_router
@@ -16,7 +16,7 @@ try:
         shutdown_chat_runtime,
     )
     from backend.seed_data_api import router as seed_data_router
-except ModuleNotFoundError:
+else:
     from env_loader import load_env_once
     from meta import init_meta_db
     from threads import router as threads_router

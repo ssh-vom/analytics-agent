@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend.duckdb_manager import execute_read_query
     from backend.debug_log import debug_log as _debug_log
     from backend.meta import (
@@ -19,7 +19,7 @@ try:
     )
     from backend.sandbox.docker_runner import DockerSandboxRunner
     from backend.sandbox.manager import SandboxManager
-except ModuleNotFoundError:
+else:
     from duckdb_manager import execute_read_query
     from debug_log import debug_log as _debug_log
     from meta import (

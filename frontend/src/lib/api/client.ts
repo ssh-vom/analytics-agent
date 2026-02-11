@@ -110,13 +110,37 @@ export async function fetchThreadWorldlines(
 
 export async function fetchWorldlineEvents(
   worldlineId: string,
+  options: {
+    pageSize?: number;
+    maxPages?: number;
+  } = {},
 ): Promise<TimelineEvent[]> {
-  const body = await requestJson<EventsResponse>(
-    `/api/worldlines/${worldlineId}/events?limit=500`,
-    undefined,
-    "Failed to fetch worldline events",
-  );
-  return body.events;
+  const pageSize = Math.max(1, Math.min(options.pageSize ?? 200, 500));
+  const maxPages = Math.max(1, options.maxPages ?? 25);
+  const events: TimelineEvent[] = [];
+  let cursor: string | null = null;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const params = new URLSearchParams();
+    params.set("limit", String(pageSize));
+    if (cursor) {
+      params.set("cursor", cursor);
+    }
+
+    const body = await requestJson<EventsResponse>(
+      `/api/worldlines/${worldlineId}/events?${params.toString()}`,
+      undefined,
+      "Failed to fetch worldline events",
+    );
+    events.push(...body.events);
+
+    if (!body.next_cursor) {
+      break;
+    }
+    cursor = body.next_cursor;
+  }
+
+  return events;
 }
 
 export async function branchWorldline(

@@ -1,14 +1,13 @@
-import importlib
 import csv
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
-try:
-    meta = importlib.import_module("backend.meta")
-except ModuleNotFoundError:
-    meta = importlib.import_module("meta")
+if (__package__ or "").startswith("backend"):
+    from backend import meta
+else:
+    import meta
 
 
 router = APIRouter(prefix="/api", tags=["artifacts"])

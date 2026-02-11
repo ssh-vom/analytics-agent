@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getStoredJson } from "$lib/storage";
   import type { Connector } from "$lib/types";
   import { Plus } from "lucide-svelte";
   import { Database } from "lucide-svelte";
@@ -13,11 +14,34 @@
   let newConnectorType: Connector["type"] = "duckdb";
   let newConnectorString = "";
 
+  function isStoredConnector(value: unknown): value is Connector {
+    if (typeof value !== "object" || value === null) {
+      return false;
+    }
+    const connector = value as Partial<Connector>;
+    return (
+      typeof connector.id === "string" &&
+      typeof connector.name === "string" &&
+      (connector.type === "sqlite" ||
+        connector.type === "postgres" ||
+        connector.type === "duckdb" ||
+        connector.type === "mysql") &&
+      typeof connector.connectionString === "string" &&
+      typeof connector.isActive === "boolean" &&
+      (connector.lastConnected === undefined ||
+        typeof connector.lastConnected === "string")
+    );
+  }
+
+  function isStoredConnectors(value: unknown): value is Connector[] {
+    return Array.isArray(value) && value.every((item) => isStoredConnector(item));
+  }
+
   onMount(() => {
     // Load connectors from localStorage
-    const saved = localStorage.getItem("textql_connectors");
+    const saved = getStoredJson<Connector[]>("textql_connectors", isStoredConnectors);
     if (saved) {
-      connectors = JSON.parse(saved);
+      connectors = saved;
     } else {
       // Default connector
       connectors = [

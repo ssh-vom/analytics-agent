@@ -8,11 +8,11 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
-try:
+if (__package__ or "").startswith("backend"):
     meta_module = importlib.import_module("backend.meta")
     seed_data_module = importlib.import_module("backend.seed_data")
     duckdb_manager_module = importlib.import_module("backend.duckdb_manager")
-except ModuleNotFoundError:
+else:
     meta_module = importlib.import_module("meta")
     seed_data_module = importlib.import_module("seed_data")
     duckdb_manager_module = importlib.import_module("duckdb_manager")

@@ -1,10 +1,10 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend.meta import event_row_to_dict, get_conn, new_id, paginate_by_cursor
     from backend.worldline_service import BranchOptions, WorldlineService
-except ModuleNotFoundError:
+else:
     from meta import event_row_to_dict, get_conn, new_id, paginate_by_cursor
     from worldline_service import BranchOptions, WorldlineService
 

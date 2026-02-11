@@ -30,8 +30,10 @@
   import {
     createOptimisticUserMessage,
     insertOptimisticEvent,
+    removeOptimisticEvent,
     replaceOptimisticWithReal,
   } from "$lib/chat/optimisticState";
+  import { getStoredJson } from "$lib/storage";
   import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
@@ -353,21 +355,37 @@
   }
 
   function loadConnectorsFromStorage(): void {
-    try {
-      const saved = localStorage.getItem("textql_connectors");
-      if (saved) {
-        const parsed = JSON.parse(saved) as Array<{
-          id: string;
-          name: string;
-          isActive: boolean;
-        }>;
-        availableConnectors = parsed;
-        selectedConnectorIds = parsed.filter((c) => c.isActive).map((c) => c.id);
-      }
-    } catch {
+    const parsed = getStoredJson<
+      Array<{ id: string; name: string; isActive: boolean }>
+    >(
+      "textql_connectors",
+      (value): value is Array<{ id: string; name: string; isActive: boolean }> =>
+        Array.isArray(value) &&
+        value.every(
+          (item) =>
+            typeof item === "object" &&
+            item !== null &&
+            typeof (item as { id?: unknown }).id === "string" &&
+            typeof (item as { name?: unknown }).name === "string" &&
+            typeof (item as { isActive?: unknown }).isActive === "boolean",
+        ),
+    );
+
+    if (parsed) {
+      availableConnectors = parsed;
+      selectedConnectorIds = parsed.filter((c) => c.isActive).map((c) => c.id);
+      return;
+    }
+
+    if (localStorage.getItem("textql_connectors") !== null) {
       availableConnectors = [];
       selectedConnectorIds = [];
     }
+  }
+
+  function rollbackOptimisticMessage(worldlineId: string, optimisticId: string | null): void {
+    const currentEvents = eventsByWorldline[worldlineId] ?? [];
+    setWorldlineEvents(worldlineId, removeOptimisticEvent(currentEvents, optimisticId));
   }
 
   function closeContextMenus(): void {
@@ -759,6 +777,7 @@
         },
         onError: (error) => {
           resetStreamingDrafts(requestWorldlineId);
+          rollbackOptimisticMessage(requestWorldlineId, optimisticId);
           if (activeWorldlineId === requestWorldlineId) {
             statusText = `Error: ${error}`;
           }
@@ -766,6 +785,7 @@
       });
     } catch (error) {
       resetStreamingDrafts(requestWorldlineId);
+      rollbackOptimisticMessage(requestWorldlineId, optimisticId);
       if (activeWorldlineId === requestWorldlineId) {
         statusText = error instanceof Error ? error.message : "Request failed";
       }

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import os
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend.chat.adapters.gemini_adapter import GeminiAdapter
     from backend.chat.adapters.openai_adapter import OpenAiAdapter
     from backend.chat.adapters.openrouter_adapter import OpenRouterAdapter
     from backend.chat.llm_client import LlmClient
     from backend.env_loader import load_env_once
-except ModuleNotFoundError:
+else:
     from chat.adapters.gemini_adapter import GeminiAdapter
     from chat.adapters.openai_adapter import OpenAiAdapter
     from chat.adapters.openrouter_adapter import OpenRouterAdapter

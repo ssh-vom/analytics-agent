@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend.meta import (
         EventStoreConflictError,
         append_event_and_advance_head,
@@ -18,7 +18,7 @@ try:
         ensure_worldline_db,
         worldline_db_path,
     )
-except ModuleNotFoundError:
+else:
     from meta import (
         EventStoreConflictError,
         append_event_and_advance_head,

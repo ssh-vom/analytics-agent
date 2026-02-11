@@ -1,11 +1,26 @@
 import { writable } from "svelte/store";
 import type { Thread } from "$lib/types";
 import { createThread, fetchThreads } from "$lib/api/client";
+import { getStoredJson } from "$lib/storage";
 
 interface ThreadsState {
   threads: Thread[];
   loading: boolean;
   error: string | null;
+}
+
+function isStoredThread(value: unknown): value is Thread {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<Thread>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.name === "string" &&
+    typeof candidate.createdAt === "string" &&
+    typeof candidate.lastActivity === "string" &&
+    typeof candidate.messageCount === "number"
+  );
 }
 
 function createThreadsStore() {
@@ -92,9 +107,9 @@ function createActiveThreadStore() {
     subscribe,
     set,
     loadFromStorage: () => {
-      const saved = localStorage.getItem("textql_active_thread");
+      const saved = getStoredJson<Thread>("textql_active_thread", isStoredThread);
       if (saved) {
-        set(JSON.parse(saved));
+        set(saved);
       }
     },
     saveToStorage: (thread: Thread | null) => {

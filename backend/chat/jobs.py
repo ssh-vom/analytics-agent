@@ -6,9 +6,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-try:
+if (__package__ or "").startswith("backend"):
     from backend.meta import get_conn, new_id
-except ModuleNotFoundError:
+else:
     from meta import get_conn, new_id
 
 T = TypeVar("T")
