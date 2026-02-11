@@ -30,9 +30,35 @@
   import {
     createOptimisticUserMessage,
     insertOptimisticEvent,
-    removeOptimisticEvent,
     replaceOptimisticWithReal,
   } from "$lib/chat/optimisticState";
+  import {
+    activeConnectorIds,
+    buildContextualMessage as buildContextualChatMessage,
+    isStoredConnectorList,
+    providerLabel,
+    toggleSelectedId,
+    type ContextSettings,
+    type OutputType,
+    type Provider,
+    type StoredConnector,
+  } from "$lib/chat/contextControls";
+  import {
+    rollbackOptimisticWorldlineEvent,
+    withStreamingState,
+    withWorldlineSending,
+    withoutStreamingState,
+  } from "$lib/chat/streamState";
+  import {
+    pickActiveJobWorldlineId,
+    withAppendedWorldlineEvent,
+    withVisibleWorldline,
+    withWorldlineEvents,
+  } from "$lib/chat/worldlineState";
+  import {
+    extractCsvFiles,
+    removeUploadedFileByName,
+  } from "$lib/chat/csvImportPanel";
   import { getStoredJson } from "$lib/storage";
   import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
@@ -46,9 +72,6 @@
   import { Upload } from "lucide-svelte";
   import { FileSpreadsheet } from "lucide-svelte";
   import { X } from "lucide-svelte";
-
-  type Provider = "gemini" | "openai" | "openrouter";
-  type OutputType = "report" | "dashboard";
 
   let threadId = "";
   let activeWorldlineId = "";
@@ -89,10 +112,10 @@
   let showConnectorsMenu = false;
   let showSettingsMenu = false;
   let showDataContextMenu = false;
-  let availableConnectors: Array<{ id: string; name: string; isActive: boolean }> = [];
+  let availableConnectors: StoredConnector[] = [];
   let selectedConnectorIds: string[] = [];
   let selectedContextTables: string[] = [];
-  let contextSettings = {
+  let contextSettings: ContextSettings = {
     webSearch: true,
     dashboards: false,
     textToSql: true,
@@ -155,45 +178,6 @@
       return;
     }
     localStorage.setItem("textql_active_worldline", worldlineId);
-  }
-
-  function pickActiveJobWorldlineId(
-    threadWorldlines: WorldlineItem[],
-    targetThreadId: string,
-  ): string | null {
-    if (threadWorldlines.length === 0) {
-      return null;
-    }
-    const candidateIds = new Set(threadWorldlines.map((line) => line.id));
-    const jobs = Object.values($chatJobs.jobsById).filter(
-      (job) =>
-        job.thread_id === targetThreadId &&
-        candidateIds.has(job.worldline_id) &&
-        (job.status === "running" || job.status === "queued"),
-    );
-
-    if (jobs.length === 0) {
-      return null;
-    }
-
-    jobs.sort((left, right) => {
-      const statusScore = (jobStatus: "running" | "queued") =>
-        jobStatus === "running" ? 2 : 1;
-      const leftScore = statusScore(left.status as "running" | "queued");
-      const rightScore = statusScore(right.status as "running" | "queued");
-      if (leftScore !== rightScore) {
-        return rightScore - leftScore;
-      }
-
-      const leftTime = Date.parse(left.started_at ?? left.created_at ?? "") || 0;
-      const rightTime = Date.parse(right.started_at ?? right.created_at ?? "") || 0;
-      if (leftTime !== rightTime) {
-        return rightTime - leftTime;
-      }
-      return right.id.localeCompare(left.id);
-    });
-
-    return jobs[0]?.worldline_id ?? null;
   }
 
   onMount(async () => {
@@ -293,42 +277,26 @@
   }
 
   function setStreamingState(worldlineId: string, state: StreamingState): void {
-    streamingStateByWorldline = {
-      ...streamingStateByWorldline,
-      [worldlineId]: state,
-    };
+    streamingStateByWorldline = withStreamingState(
+      streamingStateByWorldline,
+      worldlineId,
+      state,
+    );
   }
 
   function setWorldlineSending(worldlineId: string, isSending: boolean): void {
-    if (!worldlineId) {
-      return;
-    }
-    if (isSending) {
-      sendingByWorldline = {
-        ...sendingByWorldline,
-        [worldlineId]: true,
-      };
-      return;
-    }
-    if (!(worldlineId in sendingByWorldline)) {
-      return;
-    }
-    const next = { ...sendingByWorldline };
-    delete next[worldlineId];
-    sendingByWorldline = next;
+    sendingByWorldline = withWorldlineSending(
+      sendingByWorldline,
+      worldlineId,
+      isSending,
+    );
   }
 
   function resetStreamingDrafts(worldlineId?: string): void {
-    if (!worldlineId) {
-      streamingStateByWorldline = {};
-      return;
-    }
-    if (!(worldlineId in streamingStateByWorldline)) {
-      return;
-    }
-    const next = { ...streamingStateByWorldline };
-    delete next[worldlineId];
-    streamingStateByWorldline = next;
+    streamingStateByWorldline = withoutStreamingState(
+      streamingStateByWorldline,
+      worldlineId,
+    );
   }
 
   async function queuePromptAsJob(message: string, worldlineId: string): Promise<void> {
@@ -355,25 +323,14 @@
   }
 
   function loadConnectorsFromStorage(): void {
-    const parsed = getStoredJson<
-      Array<{ id: string; name: string; isActive: boolean }>
-    >(
+    const parsed = getStoredJson<StoredConnector[]>(
       "textql_connectors",
-      (value): value is Array<{ id: string; name: string; isActive: boolean }> =>
-        Array.isArray(value) &&
-        value.every(
-          (item) =>
-            typeof item === "object" &&
-            item !== null &&
-            typeof (item as { id?: unknown }).id === "string" &&
-            typeof (item as { name?: unknown }).name === "string" &&
-            typeof (item as { isActive?: unknown }).isActive === "boolean",
-        ),
+      isStoredConnectorList,
     );
 
     if (parsed) {
       availableConnectors = parsed;
-      selectedConnectorIds = parsed.filter((c) => c.isActive).map((c) => c.id);
+      selectedConnectorIds = activeConnectorIds(parsed);
       return;
     }
 
@@ -384,8 +341,11 @@
   }
 
   function rollbackOptimisticMessage(worldlineId: string, optimisticId: string | null): void {
-    const currentEvents = eventsByWorldline[worldlineId] ?? [];
-    setWorldlineEvents(worldlineId, removeOptimisticEvent(currentEvents, optimisticId));
+    eventsByWorldline = rollbackOptimisticWorldlineEvent(
+      eventsByWorldline,
+      worldlineId,
+      optimisticId,
+    );
   }
 
   function closeContextMenus(): void {
@@ -396,19 +356,11 @@
   }
 
   function toggleConnector(id: string): void {
-    if (selectedConnectorIds.includes(id)) {
-      selectedConnectorIds = selectedConnectorIds.filter((connectorId) => connectorId !== id);
-      return;
-    }
-    selectedConnectorIds = [...selectedConnectorIds, id];
+    selectedConnectorIds = toggleSelectedId(selectedConnectorIds, id);
   }
 
   function toggleContextTable(name: string): void {
-    if (selectedContextTables.includes(name)) {
-      selectedContextTables = selectedContextTables.filter((table) => table !== name);
-      return;
-    }
-    selectedContextTables = [...selectedContextTables, name];
+    selectedContextTables = toggleSelectedId(selectedContextTables, name);
   }
 
   async function refreshWorldlineContextTables(): Promise<void> {
@@ -433,32 +385,13 @@
   }
 
   function buildContextualMessage(message: string): string {
-    const selectedConnectors = availableConnectors
-      .filter((connector) => selectedConnectorIds.includes(connector.id))
-      .map((connector) => connector.name);
-    const contextLines: string[] = [
-      `output_type=${outputType}`,
-    ];
-
-    if (selectedContextTables.length > 0) {
-      contextLines.push(`tables=${selectedContextTables.join(",")}`);
-    }
-    if (selectedConnectors.length > 0) {
-      contextLines.push(`connectors=${selectedConnectors.join(",")}`);
-    }
-
-    const enabledSettings = Object.entries(contextSettings)
-      .filter(([, enabled]) => enabled)
-      .map(([key]) => key);
-    if (enabledSettings.length > 0) {
-      contextLines.push(`settings=${enabledSettings.join(",")}`);
-    }
-
-    if (contextLines.length === 0) {
-      return message;
-    }
-
-    return `${message}\n\n<context>\n${contextLines.map((line) => `- ${line}`).join("\n")}\n</context>`;
+    return buildContextualChatMessage(message, {
+      outputType,
+      availableConnectors,
+      selectedConnectorIds,
+      selectedContextTables,
+      contextSettings,
+    });
   }
 
   async function hydrateThread(targetThreadId: string, preferredWorldlineId?: string): Promise<void> {
@@ -479,7 +412,11 @@
         await chatJobs.poll();
       }
 
-      const activeJobWorldlineId = pickActiveJobWorldlineId(worldlines, targetThreadId);
+      const activeJobWorldlineId = pickActiveJobWorldlineId(
+        worldlines,
+        targetThreadId,
+        $chatJobs.jobsById,
+      );
 
       if (activeJobWorldlineId && worldlines.some((w) => w.id === activeJobWorldlineId)) {
         activeWorldlineId = activeJobWorldlineId;
@@ -513,46 +450,16 @@
     }
   }
 
-  function dedupePreserveOrder(events: TimelineEvent[]): TimelineEvent[] {
-    const seenIds = new Set<string>();
-    const output: TimelineEvent[] = [];
-    for (const event of events) {
-      if (seenIds.has(event.id)) {
-        continue;
-      }
-      seenIds.add(event.id);
-      output.push(event);
-    }
-    return output;
-  }
-
   function setWorldlineEvents(worldlineId: string, events: TimelineEvent[]): void {
-    eventsByWorldline = {
-      ...eventsByWorldline,
-      [worldlineId]: dedupePreserveOrder(events),
-    };
+    eventsByWorldline = withWorldlineEvents(eventsByWorldline, worldlineId, events);
   }
 
   function appendEvent(worldlineId: string, event: TimelineEvent): void {
-    const existing = eventsByWorldline[worldlineId] ?? [];
-    setWorldlineEvents(worldlineId, [...existing, event]);
+    eventsByWorldline = withAppendedWorldlineEvent(eventsByWorldline, worldlineId, event);
   }
 
   function ensureWorldlineVisible(worldlineId: string): void {
-    if (worldlines.some((line) => line.id === worldlineId)) {
-      return;
-    }
-    worldlines = [
-      ...worldlines,
-      {
-        id: worldlineId,
-        name: worldlineId.slice(0, 12),
-        parent_worldline_id: null,
-        forked_from_event_id: null,
-        head_event_id: null,
-        created_at: new Date().toISOString(),
-      },
-    ];
+    worldlines = withVisibleWorldline(worldlines, worldlineId);
   }
 
   async function initializeSession(): Promise<void> {
@@ -795,28 +702,22 @@
   }
 
   function getProviderIcon(provider: Provider) {
-    switch (provider) {
-      case "gemini":
-        return "Gemini";
-      case "openai":
-        return "OpenAI";
-      case "openrouter":
-        return "OpenRouter";
-    }
+    return providerLabel(provider);
   }
 
   // CSV Import functions
   function handleFileSelect(event: Event) {
     const input = event.target as HTMLInputElement;
-    if (input.files) {
-      const csvFiles = Array.from(input.files).filter(f => f.name.endsWith('.csv'));
-      uploadedFiles = [...uploadedFiles, ...csvFiles];
-      showImportPanel = uploadedFiles.length > 0;
+    const csvFiles = extractCsvFiles(input.files);
+    if (csvFiles.length === 0) {
+      return;
     }
+    uploadedFiles = [...uploadedFiles, ...csvFiles];
+    showImportPanel = uploadedFiles.length > 0;
   }
 
   function removeUploadedFile(filename: string) {
-    uploadedFiles = uploadedFiles.filter(f => f.name !== filename);
+    uploadedFiles = removeUploadedFileByName(uploadedFiles, filename);
     if (uploadedFiles.length === 0) {
       showImportPanel = false;
     }
