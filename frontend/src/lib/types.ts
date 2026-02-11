@@ -56,6 +56,25 @@ export interface WorldlinesResponse {
   next_cursor: string | null;
 }
 
+export interface WorldlineSummaryItem extends WorldlineItem {
+  message_count: number;
+  last_event_at: string | null;
+  last_activity: string;
+  jobs: {
+    queued: number;
+    running: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    latest_status: ChatJobStatus | null;
+  };
+}
+
+export interface WorldlineSummaryResponse {
+  worldlines: WorldlineSummaryItem[];
+  next_cursor: string | null;
+}
+
 export interface EventsResponse {
   events: TimelineEvent[];
   next_cursor: string | null;

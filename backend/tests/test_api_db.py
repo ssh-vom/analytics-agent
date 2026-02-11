@@ -316,6 +316,166 @@ class Stage1ApiDbTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.status_code, 404)
 
+    def test_get_thread_worldline_summaries_includes_message_and_job_stats(
+        self,
+    ) -> None:
+        thread_id = self._create_thread()
+        worldline_a = self._create_worldline(thread_id, "main")
+        worldline_b = self._create_worldline(thread_id, "branch-a")
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_a_1",
+                    worldline_a,
+                    None,
+                    "user_message",
+                    '{"text":"a1"}',
+                    "2026-01-01 10:00:00",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_a_2",
+                    worldline_a,
+                    "event_a_1",
+                    "assistant_message",
+                    '{"text":"a2"}',
+                    "2026-01-01 10:01:00",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_b_1",
+                    worldline_b,
+                    None,
+                    "assistant_message",
+                    '{"text":"b1"}',
+                    "2026-01-01 09:00:00",
+                ),
+            )
+
+            conn.execute(
+                """
+                INSERT INTO chat_turn_jobs (
+                    id,
+                    thread_id,
+                    worldline_id,
+                    request_json,
+                    status,
+                    created_at,
+                    started_at,
+                    finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "job_a_1",
+                    thread_id,
+                    worldline_a,
+                    '{"message":"older"}',
+                    "completed",
+                    "2026-01-01 10:00:00",
+                    "2026-01-01 10:00:05",
+                    "2026-01-01 10:00:20",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO chat_turn_jobs (
+                    id,
+                    thread_id,
+                    worldline_id,
+                    request_json,
+                    status,
+                    created_at,
+                    started_at,
+                    finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "job_a_2",
+                    thread_id,
+                    worldline_a,
+                    '{"message":"newer"}',
+                    "running",
+                    "2026-01-01 10:02:00",
+                    "2026-01-01 10:02:10",
+                    None,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO chat_turn_jobs (
+                    id,
+                    thread_id,
+                    worldline_id,
+                    request_json,
+                    status,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "job_b_1",
+                    thread_id,
+                    worldline_b,
+                    '{"message":"queued"}',
+                    "queued",
+                    "2026-01-01 09:30:00",
+                ),
+            )
+            conn.commit()
+
+        response = self._run(
+            threads.get_thread_worldline_summaries(
+                thread_id=thread_id,
+                limit=10,
+                cursor=None,
+            )
+        )
+
+        self.assertEqual(len(response["worldlines"]), 2)
+        self.assertIsNone(response["next_cursor"])
+
+        by_id = {row["id"]: row for row in response["worldlines"]}
+        summary_a = by_id[worldline_a]
+        summary_b = by_id[worldline_b]
+
+        self.assertEqual(summary_a["message_count"], 2)
+        self.assertEqual(summary_a["jobs"]["running"], 1)
+        self.assertEqual(summary_a["jobs"]["completed"], 1)
+        self.assertEqual(summary_a["jobs"]["queued"], 0)
+        self.assertEqual(summary_a["jobs"]["latest_status"], "running")
+        self.assertEqual(summary_a["last_activity"], "2026-01-01 10:02:10")
+
+        self.assertEqual(summary_b["message_count"], 1)
+        self.assertEqual(summary_b["jobs"]["queued"], 1)
+        self.assertEqual(summary_b["jobs"]["running"], 0)
+        self.assertEqual(summary_b["jobs"]["latest_status"], "queued")
+        self.assertEqual(summary_b["last_activity"], "2026-01-01 09:30:00")
+
+    def test_get_thread_worldline_summaries_not_found(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(
+                threads.get_thread_worldline_summaries(
+                    thread_id="thread_missing",
+                    limit=50,
+                    cursor=None,
+                )
+            )
+        self.assertEqual(ctx.exception.status_code, 404)
+
     def test_list_threads_returns_last_activity_desc(self) -> None:
         older_thread_id = self._create_thread("older")
         newer_thread_id = self._create_thread("newer")

@@ -2,9 +2,12 @@
   import { goto } from "$app/navigation";
   import { onMount } from "svelte";
 
-  import { branchWorldline, fetchThreadWorldlines, fetchWorldlineEvents } from "$lib/api/client";
+  import {
+    branchWorldline,
+    fetchThreadWorldlineSummaries,
+  } from "$lib/api/client";
   import { activeThread, threads } from "$lib/stores/threads";
-  import type { Thread, TimelineEvent } from "$lib/types";
+  import type { Thread } from "$lib/types";
   import { AlertCircle, ArrowRight, Clock, GitBranch, Loader2 } from "lucide-svelte";
 
   interface WorldlineView {
@@ -12,7 +15,9 @@
     name: string;
     parentId: string | null;
     createdAt: string;
+    lastActivity: string;
     messageCount: number;
+    activeJobs: number;
     isActive: boolean;
     headEventId: string | null;
   }
@@ -67,7 +72,7 @@
     threadId = targetThreadId;
 
     try {
-      const response = await fetchThreadWorldlines(targetThreadId);
+      const response = await fetchThreadWorldlineSummaries(targetThreadId);
       const rawWorldlines = response.worldlines;
 
       if (rawWorldlines.length === 0) {
@@ -87,23 +92,14 @@
         activeWorldlineId = rawWorldlines[0].id;
       }
 
-      const messageCounts = await Promise.all(
-        rawWorldlines.map(async (line) => {
-          try {
-            const events = await fetchWorldlineEvents(line.id);
-            return countChatMessages(events);
-          } catch {
-            return 0;
-          }
-        }),
-      );
-
-      worldlines = rawWorldlines.map((line, index) => ({
+      worldlines = rawWorldlines.map((line) => ({
         id: line.id,
         name: line.name || line.id.slice(0, 12),
         parentId: line.parent_worldline_id,
         createdAt: line.created_at,
-        messageCount: messageCounts[index],
+        lastActivity: line.last_activity,
+        messageCount: line.message_count,
+        activeJobs: (line.jobs.running ?? 0) + (line.jobs.queued ?? 0),
         isActive: line.id === activeWorldlineId,
         headEventId: line.head_event_id,
       }));
@@ -114,13 +110,6 @@
     } finally {
       loading = false;
     }
-  }
-
-  function countChatMessages(events: TimelineEvent[]): number {
-    return events.filter(
-      (event) =>
-        event.type === "user_message" || event.type === "assistant_message",
-    ).length;
   }
 
   function formatDate(dateString: string): string {
@@ -268,9 +257,13 @@
 
                 <div class="worldline-meta">
                   <Clock size={14} />
-                  <span>{formatDate(worldline.createdAt)}</span>
+                  <span>{formatDate(worldline.lastActivity)}</span>
                   <span class="separator">·</span>
                   <span>{worldline.messageCount} messages</span>
+                  {#if worldline.activeJobs > 0}
+                    <span class="separator">·</span>
+                    <span>{worldline.activeJobs} active jobs</span>
+                  {/if}
                 </div>
               </div>
 

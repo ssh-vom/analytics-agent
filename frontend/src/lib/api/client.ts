@@ -11,6 +11,7 @@ import type {
   TimelineEvent,
   WorldlineBranchResponse,
   WorldlineCreateResponse,
+  WorldlineSummaryResponse,
   WorldlinesResponse,
 } from "$lib/types";
 import { createStreamProcessor } from "./streamParser";
@@ -105,6 +106,16 @@ export async function fetchThreadWorldlines(
     `/api/threads/${threadId}/worldlines`,
     undefined,
     "Failed to fetch worldlines",
+  );
+}
+
+export async function fetchThreadWorldlineSummaries(
+  threadId: string,
+): Promise<WorldlineSummaryResponse> {
+  return requestJson<WorldlineSummaryResponse>(
+    `/api/threads/${threadId}/worldline-summaries`,
+    undefined,
+    "Failed to fetch worldline summaries",
   );
 }
 
