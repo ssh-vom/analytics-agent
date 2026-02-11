@@ -99,6 +99,135 @@ make dev
 - **Backend API**: http://localhost:8000
 - **API Docs**: http://localhost:8000/docs
 
+## Getting Started
+
+This guide will walk you through your first data analysis session with the Analytics Agent.
+
+### First-Time Setup
+
+1. **Verify Prerequisites**
+   
+   Ensure Docker is running:
+   ```bash
+   docker --version
+   docker ps
+   ```
+
+2. **Configure Your LLM Provider**
+   
+   Add your API key to `backend/.env`:
+   ```bash
+   echo "OPENAI_API_KEY=sk-your-key-here" >> backend/.env
+   ```
+
+3. **Build the Environment**
+   
+   ```bash
+   make build
+   ```
+   
+   This will:
+   - Build the Docker sandbox image with Python 3.11, numpy, pandas, and matplotlib
+   - Install backend dependencies using `uv`
+   - Install frontend dependencies using `npm`
+
+4. **Start the Application**
+   
+   ```bash
+   make run
+   ```
+   
+   Wait for both services to start:
+   - Backend will be available at http://localhost:8000
+   - Frontend will be available at http://localhost:5173
+
+### Your First Analysis
+
+1. **Open the Web Interface**
+   
+   Navigate to http://localhost:5173 in your browser.
+
+2. **Create a Thread**
+   
+   Click "New Thread" to start a conversation. Threads organize your analysis sessions.
+
+3. **Ask a Question**
+   
+   Try a simple data analysis task:
+   ```
+   Create a sample dataset with 100 rows containing:
+   - dates from the last 100 days
+   - random sales values between 100 and 1000
+   - product categories (A, B, C)
+   
+   Then show me a bar chart of average sales by category.
+   ```
+
+4. **Watch the Agent Work**
+   
+   The agent will:
+   - Generate Python code to create the dataset
+   - Execute the code in a secure Docker sandbox
+   - Create visualizations using matplotlib
+   - Display results and generated artifacts in the UI
+
+5. **Explore Worldlines**
+   
+   At any point, you can:
+   - Branch the conversation to try different approaches (click the branch icon)
+   - Switch between worldlines to compare results
+   - Continue from any previous point in the analysis
+
+### Loading Your Own Data
+
+You can load data in several ways:
+
+1. **Using SQL (DuckDB)**
+   ```
+   Load data from this CSV file: /path/to/your/data.csv
+   Show me the first 10 rows
+   ```
+
+2. **Using Python (pandas)**
+   ```
+   Read the Excel file at /path/to/data.xlsx
+   Calculate summary statistics for all numeric columns
+   ```
+
+3. **Direct SQL Queries**
+   ```
+   CREATE TABLE sales AS 
+   SELECT * FROM read_csv_auto('/path/to/sales.csv');
+   
+   SELECT product, SUM(revenue) as total 
+   FROM sales 
+   GROUP BY product 
+   ORDER BY total DESC;
+   ```
+
+### Common Workflows
+
+**Data Exploration:**
+```
+Load my CSV, show me the column types and missing value counts
+```
+
+**Statistical Analysis:**
+```
+Calculate correlation matrix for all numeric columns and create a heatmap
+```
+
+**Visualization:**
+```
+Create a time series plot of sales over time with a 7-day moving average
+```
+
+**Data Transformation:**
+```
+Create a new column called 'profit_margin' as (revenue - cost) / revenue
+Then show the distribution with a histogram
+```
+
 ## Development
 
 ### Backend Development
@@ -182,6 +311,273 @@ The backend provides several REST API endpoints:
 
 See the interactive API documentation at http://localhost:8000/docs
 
+## Sandbox Execution
+
+The Analytics Agent executes all Python code in isolated Docker containers to ensure security and resource control. This section explains how the sandbox system works.
+
+### Architecture Overview
+
+**Sandbox Manager** (`backend/sandbox/manager.py`)
+- Manages lifecycle of sandbox containers per worldline
+- Implements connection pooling and reuse
+- Handles concurrent access with asyncio locks
+- Automatically cleans up idle sandboxes
+
+**Docker Runner** (`backend/sandbox/docker_runner.py`)
+- Creates and manages Docker containers
+- Configures security constraints
+- Executes Python code and captures output
+- Scans for generated artifacts (images, CSV files, etc.)
+
+### Security Features
+
+Each sandbox container runs with strict security constraints:
+
+1. **Network Isolation**
+   - `--network none`: No network access
+   - Prevents external data exfiltration
+
+2. **Capability Restrictions**
+   - `--cap-drop ALL`: Drops all Linux capabilities
+   - `--security-opt no-new-privileges`: Prevents privilege escalation
+
+3. **Resource Limits**
+   - **Memory**: 512MB (configurable)
+   - **CPU**: 1.0 cores (configurable)
+   - **Process Limit**: 128 PIDs
+   - **Temp Storage**: 64MB tmpfs
+
+4. **Filesystem Isolation**
+   - `--read-only`: Container filesystem is read-only
+   - `/tmp`: Only writable location (tmpfs, 64MB)
+   - `/workspace`: Mounted from host for data persistence
+
+5. **User Isolation**
+   - Runs as non-root user (UID 1000)
+   - Cannot modify system files
+
+### Execution Flow
+
+1. **Container Creation**
+   ```
+   User requests code execution
+   ↓
+   SandboxManager checks for existing container for worldline
+   ↓
+   If not exists, DockerRunner creates new container
+   ↓
+   Container starts with "sleep infinity" command
+   ```
+
+2. **Code Execution**
+   ```
+   Code written to /workspace/.runner_input.py
+   ↓
+   Execute: docker exec <sandbox_id> python /workspace/.runner_input.py
+   ↓
+   Capture stdout, stderr, and exit code
+   ↓
+   Scan workspace for new artifacts (images, CSV files, etc.)
+   ↓
+   Return results to user
+   ↓
+   Clean up .runner_input.py
+   ```
+
+3. **Container Reuse**
+   - Containers persist across multiple executions within the same worldline
+   - Workspace state is maintained between runs
+   - Environment variables and installed packages persist
+   - Reduces overhead of container creation
+
+### Workspace Organization
+
+Each worldline has its own workspace directory:
+
+```
+backend/data/worldlines/<worldline_id>/
+├── workspace/
+│   ├── artifacts/          # Generated files (images, CSVs, etc.)
+│   ├── .runner_input.py    # Temporary execution script
+│   └── <user files>        # Files created by Python code
+└── state.duckdb            # DuckDB database for SQL queries
+```
+
+### Artifact Detection
+
+The sandbox automatically detects and classifies generated files:
+
+- **Images**: `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`
+- **CSV Files**: `.csv`
+- **Markdown**: `.md`
+- **PDFs**: `.pdf`
+- **Other Files**: Any other file type
+
+Hidden files (starting with `.`) are excluded from artifacts.
+
+### Timeout and Error Handling
+
+- **Execution Timeout**: Default 30 seconds (configurable per request)
+- **Timeout Behavior**: Returns partial stdout/stderr with timeout error
+- **Process Errors**: Non-zero exit codes captured with stderr output
+- **Container Failures**: Reported with detailed error messages
+
+### Customizing the Sandbox
+
+**Modifying Resource Limits**
+
+Edit `backend/sandbox/docker_runner.py`:
+
+```python
+@dataclass(frozen=True)
+class SandboxLimits:
+    pids_limit: int = 256      # Increase process limit
+    memory: str = "1g"         # Increase memory
+    cpus: str = "2.0"          # Increase CPU allocation
+```
+
+**Adding Python Packages**
+
+Edit `backend/sandbox/runner/Dockerfile`:
+
+```dockerfile
+RUN pip install --no-cache-dir \
+    numpy==2.2.2 \
+    pandas==2.2.3 \
+    matplotlib==3.10.0 \
+    scikit-learn==1.5.0    # Add new package
+```
+
+Then rebuild:
+```bash
+docker build -t textql-sandbox:py311 backend/sandbox/runner
+```
+
+**Custom Sandbox Image**
+
+Set environment variable to use your own image:
+```bash
+export SANDBOX_IMAGE=my-custom-sandbox:latest
+```
+
+## Job Scheduling & Lifecycle Management
+
+The Analytics Agent includes an automatic sandbox cleanup system to manage resources efficiently.
+
+### Sandbox Reaper
+
+A background task runs continuously to clean up idle sandbox containers:
+
+**Configuration** (`backend/main.py`):
+
+```python
+REAPER_INTERVAL_SECONDS = 60    # Check for idle containers every 60 seconds
+IDLE_TTL_SECONDS = 900          # Clean up containers idle for 15 minutes
+```
+
+**Environment Variables**:
+
+```bash
+# How often to check for idle sandboxes (default: 60 seconds)
+SANDBOX_REAPER_INTERVAL_SECONDS=60
+
+# How long a sandbox can be idle before cleanup (default: 900 seconds = 15 minutes)
+SANDBOX_IDLE_TTL_SECONDS=900
+```
+
+### Lifecycle Stages
+
+1. **Startup** (`app.on_event("startup")`)
+   - Initialize metadata database
+   - Start sandbox reaper background task
+   - Reaper runs every `REAPER_INTERVAL_SECONDS`
+
+2. **Active Use**
+   - Sandboxes created on-demand per worldline
+   - Each execution updates `last_used_monotonic` timestamp
+   - Concurrent executions blocked by asyncio lock per sandbox
+
+3. **Idle Detection**
+   - Reaper checks all active sandboxes every interval
+   - Calculates idle time: `now - last_used_monotonic`
+   - Marks for cleanup if idle >= `IDLE_TTL_SECONDS` and not locked
+
+4. **Cleanup**
+   - Removes sandbox from active pool
+   - Executes `docker rm -f <sandbox_id>`
+   - Workspace directory persists for future use
+   - Database state remains intact
+
+5. **Shutdown** (`app.on_event("shutdown")`)
+   - Stops reaper task
+   - Calls `shutdown_all()` on SandboxManager
+   - Removes all active containers
+   - Cleans up resources gracefully
+
+### Concurrency Model
+
+**Per-Worldline Locking**:
+- Each sandbox has an `asyncio.Lock`
+- Only one code execution per sandbox at a time
+- Multiple worldlines can execute in parallel
+- Prevents race conditions in workspace
+
+**Manager-Level Locking**:
+- Global lock for sandbox creation/deletion
+- Prevents duplicate container creation
+- Thread-safe handle management
+- Coordinates reaper with active executions
+
+**Creation Coordination**:
+- Uses `asyncio.Future` to coordinate multiple requests for same worldline
+- First request creates container
+- Subsequent requests wait for creation to complete
+- All requests share the same container
+
+### Resource Management Best Practices
+
+1. **Adjust TTL for Your Workload**
+   - Short TTL (5 min): High container churn, lower memory usage
+   - Long TTL (30 min): Better performance, higher memory usage
+   - Default (15 min): Balanced approach
+
+2. **Monitoring Active Sandboxes**
+   ```bash
+   docker ps --filter "name=textql_"
+   ```
+
+3. **Manual Cleanup** (if needed)
+   ```bash
+   docker ps -a --filter "name=textql_" -q | xargs docker rm -f
+   ```
+
+4. **Resource Limits**
+   - Default: 512MB RAM per sandbox
+   - With 10 active worldlines: ~5GB RAM usage
+   - Adjust `SandboxLimits` based on available resources
+
+### Debugging Sandbox Issues
+
+**View Container Logs**:
+```bash
+docker logs <sandbox_id>
+```
+
+**Inspect Running Container**:
+```bash
+docker exec -it <sandbox_id> /bin/sh
+```
+
+**Check Container Resources**:
+```bash
+docker stats <sandbox_id>
+```
+
+**Force Remove All Sandboxes**:
+```bash
+docker rm -f $(docker ps -a -q --filter "name=textql_")
+```
+
 ## Project Structure
 
 ```
@@ -227,13 +623,7 @@ analytics-agent/
 - `SANDBOX_REAPER_INTERVAL_SECONDS` - Sandbox cleanup interval (default: `60`)
 - `SANDBOX_IDLE_TTL_SECONDS` - Sandbox idle timeout (default: `900`)
 
-### Customizing the Sandbox
-
-To customize the Python sandbox environment, modify the Dockerfile at `backend/sandbox/runner/Dockerfile` and rebuild:
-
-```bash
-docker build -t textql-sandbox:py311 backend/sandbox/runner
-```
+For detailed information on customizing the sandbox environment, see the [Sandbox Execution](#sandbox-execution) section.
 
 ## Testing
 
