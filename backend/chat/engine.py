@@ -3,12 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
-import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from fastapi import HTTPException
 
+from debug_log import debug_log as _debug_log
+from chat.event_store import (
+    append_worldline_event,
+    events_since_rowid,
+    load_event_by_id,
+    max_worldline_rowid,
+)
 from chat.llm_client import (
     ChatMessage,
     LlmClient,
@@ -16,12 +21,12 @@ from chat.llm_client import (
     ToolCall,
     ToolDefinition,
 )
-from meta import (
-    EventStoreConflictError,
-    append_event_and_advance_head,
-    event_row_to_dict,
-    get_conn,
-    get_worldline_row,
+from chat.message_builder import build_llm_messages_from_events
+from chat.streaming_bridge import stream_llm_response
+from chat.tooling import (
+    tool_definitions,
+    tool_name_to_delta_type,
+    tool_signature,
 )
 from tools import (
     PythonToolRequest,
@@ -33,61 +38,6 @@ from worldlines import get_worldline_events
 from worldline_service import BranchOptions, WorldlineService
 
 logger = logging.getLogger(__name__)
-DEBUG_LOG_PATH = "/Users/shivom/take_homes/textql/.cursor/debug.log"
-
-
-def _debug_log(
-    *,
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, Any],
-) -> None:
-    try:
-        payload = {
-            "id": f"log_{time.time_ns()}",
-            "timestamp": int(time.time() * 1000),
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-        }
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as debug_file:
-            debug_file.write(json.dumps(payload, ensure_ascii=True, default=str) + "\n")
-    except Exception:
-        pass
-
-
-SQL_TOOL_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "sql": {"type": "string"},
-        "limit": {"type": "integer", "minimum": 1, "maximum": 10_000},
-    },
-    "required": ["sql"],
-    "additionalProperties": False,
-}
-
-PYTHON_TOOL_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "code": {"type": "string"},
-        "timeout": {"type": "integer", "minimum": 1, "maximum": 120},
-    },
-    "required": ["code"],
-    "additionalProperties": False,
-}
-TIME_TRAVEL_TOOL_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "from_event_id": {"type": "string"},
-        "name": {"type": "string"},
-    },
-    "required": ["from_event_id"],
-    "additionalProperties": False,
-}
 
 
 @dataclass
@@ -367,230 +317,20 @@ class ChatEngine:
         tools: list[ToolDefinition],
         on_delta: Callable[[str, dict[str, Any]], Awaitable[None]],
     ) -> LlmResponse:
-        """Consume ``generate_stream()`` from the adapter, emit deltas in
-        real-time, and return the accumulated ``LlmResponse``.
-
-        This replaces the old simulated-streaming approach.
-
-        Delta protocol emitted to ``on_delta``:
-          - ``{"type": "assistant_text", "delta": "..."}``
-          - ``{"type": "assistant_text", "done": True}``
-          - ``{"type": "tool_call_sql"|"tool_call_python", "call_id": "...", "delta": "..."}``
-          - ``{"type": "tool_call_sql"|"tool_call_python", "call_id": "...", "done": True}``
-        """
-        text_buffer: list[str] = []
-        # Per-tool-call accumulators:  call_id -> {name, args_json_parts}
-        tool_call_accum: dict[str, dict[str, Any]] = {}
-        # Fallback when adapter omits call_id in delta/done chunks (e.g. some providers)
-        last_tool_call_id: str | None = None
-        # Track whether we've emitted text and whether we've sent the text-done signal
-        emitted_text = False
-
-        stream = self.llm_client.generate_stream(
+        return await stream_llm_response(
+            llm_client=self.llm_client,
+            worldline_id=worldline_id,
             messages=messages,
             tools=tools,
             max_output_tokens=self.max_output_tokens,
+            on_delta=on_delta,
         )
 
-        async for chunk in stream:
-            if chunk.type == "text":
-                delta_text = chunk.text or ""
-                if delta_text:
-                    text_buffer.append(delta_text)
-                    emitted_text = True
-                    await on_delta(
-                        worldline_id,
-                        {"type": "assistant_text", "delta": delta_text},
-                    )
-                continue
-
-            if chunk.type == "tool_call_start":
-                call_id = chunk.tool_call_id or f"call_{len(tool_call_accum) + 1}"
-                last_tool_call_id = call_id
-                tool_name = chunk.tool_name or ""
-                tool_call_accum[call_id] = {
-                    "name": tool_name,
-                    "args_parts": [],
-                }
-
-                # If we were streaming text and a tool call starts, close the
-                # text stream (text will become an assistant_plan event).
-                if emitted_text:
-                    await on_delta(
-                        worldline_id,
-                        {"type": "assistant_text", "done": True},
-                    )
-                    emitted_text = False
-                continue
-
-            if chunk.type == "tool_call_delta":
-                call_id = (chunk.tool_call_id or "").strip() or last_tool_call_id or ""
-                args_delta = chunk.arguments_delta or ""
-                if call_id and call_id in tool_call_accum:
-                    accum = tool_call_accum[call_id]
-                    # Some providers (e.g. OpenRouter with certain models) send the
-                    # full accumulated arguments in each chunk rather than incremental
-                    # deltas. If we append those, we get corrupted JSON. Detect
-                    # complete JSON and replace instead of append.
-                    if self._looks_like_complete_tool_args(args_delta):
-                        accum["args_parts"] = [args_delta]
-                    else:
-                        accum["args_parts"].append(args_delta)
-
-                # Determine the delta event type from the tool name (use resolved call_id)
-                accum = tool_call_accum.get(call_id) if call_id else None
-                tool_name = accum["name"] if accum else ""
-                delta_type = self._tool_name_to_delta_type(tool_name)
-
-                if delta_type and args_delta:
-                    # For SQL/Python, we need to parse the arguments delta and
-                    # extract the code/sql content.  The raw args_delta is a
-                    # fragment of JSON, so we cannot parse it incrementally.
-                    # Instead, we forward the raw JSON fragment.  The engine
-                    # will do a final parse when the call is done.
-                    # However, for a better UX we try to extract code tokens.
-                    await on_delta(
-                        worldline_id,
-                        {
-                            "type": delta_type,
-                            "call_id": call_id,
-                            "delta": args_delta,
-                        },
-                    )
-                continue
-
-            if chunk.type == "tool_call_done":
-                call_id = (chunk.tool_call_id or "").strip() or last_tool_call_id or ""
-                accum = tool_call_accum.get(call_id) if call_id else None
-                tool_name = accum["name"] if accum else ""
-                delta_type = self._tool_name_to_delta_type(tool_name)
-                if delta_type:
-                    await on_delta(
-                        worldline_id,
-                        {
-                            "type": delta_type,
-                            "call_id": call_id,
-                            "done": True,
-                        },
-                    )
-                continue
-
-        # If text was streamed but no tool_call_start closed it, close now.
-        if emitted_text:
-            await on_delta(
-                worldline_id,
-                {"type": "assistant_text", "done": True},
-            )
-
-        # ----- Assemble the final LlmResponse from accumulated buffers -----
-        full_text = "".join(text_buffer).strip() or None
-
-        tool_calls: list[ToolCall] = []
-        for call_id, accum in tool_call_accum.items():
-            raw_json = "".join(accum["args_parts"])
-            try:
-                arguments = json.loads(raw_json) if raw_json else {}
-            except json.JSONDecodeError:
-                arguments = {"_raw": raw_json}
-            # If parse failed, try to extract sql/code from raw for tool execution
-            arguments = self._normalize_tool_arguments(accum["name"], arguments)
-            tool_calls.append(
-                ToolCall(
-                    id=call_id,
-                    name=accum["name"],
-                    arguments=arguments,
-                )
-            )
-
-        return LlmResponse(text=full_text, tool_calls=tool_calls)
-
-    @staticmethod
-    def _tool_name_to_delta_type(tool_name: str) -> str | None:
-        """Map an LLM tool name to the SSE delta type for streaming."""
-        if tool_name == "run_sql":
-            return "tool_call_sql"
-        if tool_name == "run_python":
-            return "tool_call_python"
-        return None
-
-    @staticmethod
-    def _looks_like_complete_tool_args(args_delta: str) -> bool:
-        """Heuristic: provider may send full accumulated args each chunk (replace not append)."""
-        if not args_delta or not args_delta.strip().startswith("{"):
-            return False
-        try:
-            parsed = json.loads(args_delta)
-            if not isinstance(parsed, dict):
-                return False
-            # run_sql expects "sql", run_python expects "code"
-            return "sql" in parsed or "code" in parsed
-        except json.JSONDecodeError:
-            return False
-
-    @staticmethod
-    def _normalize_tool_arguments(
-        tool_name: str, arguments: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Extract sql/code from _raw when JSON parse failed, so tools get valid args."""
-        if "_raw" not in arguments:
-            return arguments
-        raw = arguments.get("_raw", "")
-        if not isinstance(raw, str):
-            return arguments
-        # Try regex extraction as fallback
-        code_field = "sql" if (tool_name or "").strip() == "run_sql" else "code"
-        pattern = rf'"{code_field}"\s*:\s*"((?:[^"\\]|\\.)*)"'
-        match = re.search(pattern, raw, re.DOTALL)
-        if match:
-            try:
-                extracted = json.loads(f'"{match.group(1)}"')
-                result = {k: v for k, v in arguments.items() if k != "_raw"}
-                result[code_field] = extracted
-                if code_field == "sql":
-                    result.setdefault("limit", 100)
-                else:
-                    result.setdefault("timeout", 30)
-                return result
-            except json.JSONDecodeError, ValueError:
-                pass
-        return arguments
-
-    # ---- tool definitions ---------------------------------------------------
+    def _tool_name_to_delta_type(self, tool_name: str) -> str | None:
+        return tool_name_to_delta_type(tool_name)
 
     def _tool_definitions(self, *, include_python: bool = True) -> list[ToolDefinition]:
-        tools: list[ToolDefinition] = [
-            ToolDefinition(
-                name="run_sql",
-                description=(
-                    "Execute a read-only SQL query against the worldline DuckDB. "
-                    "Use for table reads and aggregations."
-                ),
-                input_schema=SQL_TOOL_SCHEMA,
-            ),
-            ToolDefinition(
-                name="time_travel",
-                description=(
-                    "Create a new worldline from a prior event and continue execution there."
-                ),
-                input_schema=TIME_TRAVEL_TOOL_SCHEMA,
-            ),
-        ]
-
-        if include_python:
-            tools.insert(
-                1,
-                ToolDefinition(
-                    name="run_python",
-                    description=(
-                        "Execute Python in the sandbox workspace for this worldline. "
-                        "Use for plotting, data manipulation, and file artifacts. "
-                        "For plots: use matplotlib (plt.plot, plt.bar, etc.) and call "
-                        "plt.savefig('plot.png') before plt.show() to persist the image."
-                    ),
-                    input_schema=PYTHON_TOOL_SCHEMA,
-                ),
-            )
-        return tools
+        return tool_definitions(include_python=include_python)
 
     # ---- tool execution -----------------------------------------------------
 
@@ -626,7 +366,7 @@ class ChatEngine:
             raw_limit = args.get("limit", 100)
             try:
                 limit = int(raw_limit)
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 limit = 100
             limit = max(1, min(limit, 10_000))
 
@@ -688,7 +428,7 @@ class ChatEngine:
             raw_timeout = args.get("timeout", 30)
             try:
                 timeout = int(raw_timeout)
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 timeout = 30
             timeout = max(1, min(timeout, 120))
 
@@ -777,169 +517,14 @@ class ChatEngine:
             cursor=None,
         )
         events = timeline.get("events", [])
-        messages: list[ChatMessage] = []
-
-        # Add system message explaining available tools and when to use them
-        system_prompt = """You are an AI assistant with access to tools for data analysis. You have two main tools available:
-
-1. **run_sql**: Execute SQL queries against a DuckDB database containing user data. Use this when:
-   - The user asks questions about data, tables, or specific values
-   - You need to retrieve, filter, aggregate, or explore data
-   - The request involves counting, summing, or analyzing structured data
-
-2. **run_python**: Execute Python code in a sandboxed environment. Use this when:
-   - You need to create visualizations, charts, or plots (matplotlib is available)
-   - Complex data manipulation or statistical analysis is required
-   - Working with files, dataframes, or generating data insights
-
-   For plots: use matplotlib (e.g. plt.plot, plt.bar) and call plt.savefig('filename.png') 
-   to persist the image. The working directory is /workspace; saved files become viewable artifacts.
-
-**CRITICAL - You MUST execute tools:**
-- NEVER respond with only a plan or description of what you would do. You MUST actually call run_sql and/or run_python.
-- When the user asks for analysis, data exploration, or visualizations: call the tools first, then summarize the results.
-- If you need to explore the schema: call run_sql with a query like "SELECT * FROM table LIMIT 5" or "PRAGMA table_info(table)".
-- Do not say "Let me..." or "I'll..." without immediately following with a tool call in the same response.
-
-**Guidelines:**
-- Call SQL first to retrieve the data, then use Python if you need to visualize or further analyze it
-- After getting results, provide insights and context, not just raw data
-- If a query might be expensive or return many rows, add appropriate LIMIT clauses
-- Never write Python code that calls backend tools such as run_sql(), run_python(), or time_travel().
-- Tools must be invoked as tool calls only. Python code must be standard Python (pandas/numpy/matplotlib/etc.) and must not reference tool functions.
-- In Python, use `LATEST_SQL_RESULT` (dict) and `LATEST_SQL_DF` (pandas DataFrame, when available), which are auto-injected from the latest successful SQL result.
-- Do not invent or simulate dataset rows in Python. If more fields are needed, call run_sql again to fetch exactly those columns.
-
-The user is expecting you to help them explore and understand their data. Use the appropriate tool(s) to deliver helpful analysis and insights."""
-        messages.append(ChatMessage(role="system", content=system_prompt))
-
-        # Events from get_worldline_events are already chronological (oldest -> newest).
-        # Reversing here corrupts conversational order and can make stale prompts appear newest.
-        events_chrono = list(events)
-        by_id = {e["id"]: e for e in events}
-
-        pending_plan: str | None = None
-        pending_tool_calls: list[dict[str, Any]] = []
-        assistant_emitted_for_turn = False
-
-        for event in events_chrono:
-            event_type = event.get("type")
-            payload = event.get("payload", {})
-
-            if event_type == "user_message":
-                pending_plan = None
-                pending_tool_calls = []
-                assistant_emitted_for_turn = False
-                text = payload.get("text")
-                if text:
-                    messages.append(ChatMessage(role="user", content=str(text)))
-                continue
-
-            if event_type == "assistant_plan":
-                pending_plan = (payload.get("text") or "").strip() or None
-                pending_tool_calls = []
-                assistant_emitted_for_turn = False
-                continue
-
-            if event_type == "assistant_message":
-                # Emit pending assistant with tool_calls before final message
-                if pending_tool_calls and not assistant_emitted_for_turn:
-                    tool_calls_spec = [
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": json.dumps(tc["arguments"] or {}),
-                            },
-                        }
-                        for tc in pending_tool_calls
-                    ]
-                    content = (pending_plan or "").strip()
-                    messages.append(
-                        ChatMessage(
-                            role="assistant",
-                            content=content or "",
-                            tool_calls=tool_calls_spec,
-                        )
-                    )
-                    assistant_emitted_for_turn = True
-                pending_plan = None
-                pending_tool_calls = []
-                assistant_emitted_for_turn = False
-                text = payload.get("text")
-                if text:
-                    messages.append(ChatMessage(role="assistant", content=str(text)))
-                continue
-
-            if event_type in {"tool_call_sql", "tool_call_python"}:
-                # If previous tool calls were already emitted as an assistant
-                # message, this tool_call belongs to a new LLM iteration.
-                # Reset tracking so it gets its own assistant message.
-                if assistant_emitted_for_turn:
-                    pending_tool_calls = []
-                    pending_plan = None
-                    assistant_emitted_for_turn = False
-                name = "run_sql" if "sql" in event_type else "run_python"
-                args = dict(payload)
-                args.pop("call_id", None)
-                call_id = payload.get("call_id") or event.get("id", "")
-                pending_tool_calls.append(
-                    {"id": call_id, "name": name, "arguments": args}
-                )
-                continue
-
-            if event_type in {"tool_result_sql", "tool_result_python"}:
-                parent_id = event.get("parent_event_id") or ""
-                parent = by_id.get(parent_id, {})
-                call_id = (parent.get("payload") or {}).get("call_id") or parent_id
-                summary = json.dumps(payload, ensure_ascii=True, default=str)
-                if len(summary) > 2_000:
-                    summary = summary[:2_000] + "...(truncated)"
-                if pending_tool_calls and not assistant_emitted_for_turn:
-                    tool_calls_spec = [
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": json.dumps(tc["arguments"] or {}),
-                            },
-                        }
-                        for tc in pending_tool_calls
-                    ]
-                    content = (pending_plan or "").strip()
-                    messages.append(
-                        ChatMessage(
-                            role="assistant",
-                            content=content or "",
-                            tool_calls=tool_calls_spec,
-                        )
-                    )
-                    assistant_emitted_for_turn = True
-                messages.append(
-                    ChatMessage(
-                        role="tool",
-                        content=summary,
-                        tool_call_id=call_id or None,
-                    )
-                )
-                continue
-
-        return messages
+        return build_llm_messages_from_events(list(events))
 
     # ---- helpers ------------------------------------------------------------
 
     def _tool_signature(self, *, worldline_id: str, tool_call: ToolCall) -> str:
-        return json.dumps(
-            {
-                "worldline_id": worldline_id,
-                "name": tool_call.name,
-                "arguments": tool_call.arguments or {},
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-            default=str,
+        return tool_signature(
+            worldline_id=worldline_id,
+            tool_call=tool_call,
         )
 
     def _append_worldline_event(
@@ -949,76 +534,19 @@ The user is expecting you to help them explore and understand their data. Use th
         event_type: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        max_attempts = 4
-        for attempt in range(max_attempts):
-            with get_conn() as conn:
-                worldline = get_worldline_row(conn, worldline_id)
-                if worldline is None:
-                    raise HTTPException(status_code=404, detail="worldline not found")
-
-                try:
-                    event_id = append_event_and_advance_head(
-                        conn,
-                        worldline_id=worldline_id,
-                        expected_head_event_id=worldline["head_event_id"],
-                        event_type=event_type,
-                        payload=payload,
-                    )
-                    conn.commit()
-                    return self._load_event_by_id(event_id)
-                except EventStoreConflictError:
-                    conn.rollback()
-                    if attempt == max_attempts - 1:
-                        raise HTTPException(
-                            status_code=409,
-                            detail="worldline head moved during event append",
-                        )
-
-        raise HTTPException(
-            status_code=409,
-            detail="worldline head moved during event append",
+        return append_worldline_event(
+            worldline_id=worldline_id,
+            event_type=event_type,
+            payload=payload,
         )
 
     def _load_event_by_id(self, event_id: str) -> dict[str, Any]:
-        with get_conn() as conn:
-            row = conn.execute(
-                """
-                SELECT id, parent_event_id, type, payload_json, created_at
-                FROM events
-                WHERE id = ?
-                """,
-                (event_id,),
-            ).fetchone()
-
-        return event_row_to_dict(row)
+        return load_event_by_id(event_id)
 
     def _max_worldline_rowid(self, worldline_id: str) -> int:
-        with get_conn() as conn:
-            worldline = get_worldline_row(conn, worldline_id)
-            if worldline is None:
-                raise HTTPException(status_code=404, detail="worldline not found")
-
-            row = conn.execute(
-                "SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM events WHERE worldline_id = ?",
-                (worldline_id,),
-            ).fetchone()
-            return int(row["max_rowid"])
+        return max_worldline_rowid(worldline_id)
 
     def _events_since_rowid(
         self, *, worldline_id: str, rowid: int
     ) -> list[dict[str, Any]]:
-        with get_conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, parent_event_id, type, payload_json, created_at
-                FROM events
-                WHERE worldline_id = ? AND rowid > ?
-                ORDER BY rowid ASC
-                """,
-                (worldline_id, rowid),
-            ).fetchall()
-
-        output: list[dict[str, Any]] = []
-        for row in rows:
-            output.append(event_row_to_dict(row))
-        return output
+        return events_since_rowid(worldline_id=worldline_id, rowid=rowid)

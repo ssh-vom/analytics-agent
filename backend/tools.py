@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 try:
     from backend.duckdb_manager import execute_read_query
+    from backend.debug_log import debug_log as _debug_log
     from backend.meta import (
         EventStoreConflictError,
         append_event_and_advance_head,
@@ -20,6 +21,7 @@ try:
     from backend.sandbox.manager import SandboxManager
 except ModuleNotFoundError:
     from duckdb_manager import execute_read_query
+    from debug_log import debug_log as _debug_log
     from meta import (
         EventStoreConflictError,
         append_event_and_advance_head,
@@ -36,31 +38,6 @@ router = APIRouter(prefix="/api/tools", tags=["tools"])
 READ_ONLY_PREFIXES = ("select", "with", "show", "describe", "explain")
 _sandbox_manager = SandboxManager(DockerSandboxRunner())
 ToolEventCallback = Callable[[dict[str, Any]], Awaitable[None]]
-DEBUG_LOG_PATH = "/Users/shivom/take_homes/textql/.cursor/debug.log"
-
-
-def _debug_log(
-    *,
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, Any],
-) -> None:
-    try:
-        payload = {
-            "id": f"log_{time.time_ns()}",
-            "timestamp": int(time.time() * 1000),
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-        }
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as debug_file:
-            debug_file.write(json.dumps(payload, ensure_ascii=True, default=str) + "\n")
-    except Exception:
-        pass
 
 
 class SqlToolRequest(BaseModel):
