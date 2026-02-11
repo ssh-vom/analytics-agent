@@ -165,19 +165,23 @@
   }
 
   function handleVisibilityChange(): void {
+    if (typeof document === "undefined") return;
     if (document.visibilityState === "visible") {
       void chatJobs.poll();
     }
   }
 
   function persistPreferredWorldline(worldlineId: string): void {
-    if (!worldlineId) {
+    if (!worldlineId || typeof localStorage === "undefined") {
       return;
     }
     localStorage.setItem("textql_active_worldline", worldlineId);
   }
 
   onMount(async () => {
+    // Only run browser-specific code on the client
+    if (typeof window === "undefined") return;
+    
     window.addEventListener("textql:open-worldline", handleOpenWorldlineEvent as EventListener);
     document.addEventListener("visibilitychange", handleVisibilityChange);
     await threads.loadThreads();
@@ -206,11 +210,15 @@
       cancelAnimationFrame(pendingScrollRaf);
       pendingScrollRaf = 0;
     }
-    window.removeEventListener(
-      "textql:open-worldline",
-      handleOpenWorldlineEvent as EventListener,
-    );
-    document.removeEventListener("visibilitychange", handleVisibilityChange);
+    if (typeof window !== "undefined") {
+      window.removeEventListener(
+        "textql:open-worldline",
+        handleOpenWorldlineEvent as EventListener,
+      );
+    }
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    }
     hasPendingScroll = false;
     pendingScrollForce = false;
     scrollAttemptsQueue = [];
@@ -331,7 +339,7 @@
       return;
     }
 
-    if (localStorage.getItem("textql_connectors") !== null) {
+    if (typeof localStorage !== "undefined" && localStorage.getItem("textql_connectors") !== null) {
       availableConnectors = [];
       selectedConnectorIds = [];
     }
