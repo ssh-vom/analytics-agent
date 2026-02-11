@@ -28,7 +28,9 @@ class WorldlineServiceTests(unittest.TestCase):
 
     def _create_thread(self) -> str:
         response = self._run(
-            threads.create_thread(threads.CreateThreadRequest(title="worldline-service-test"))
+            threads.create_thread(
+                threads.CreateThreadRequest(title="worldline-service-test")
+            )
         )
         return response["thread_id"]
 
@@ -114,7 +116,10 @@ class WorldlineServiceTests(unittest.TestCase):
         self.assertEqual(branch_row["head_event_id"], result.created_event_ids[-1])
         self.assertEqual(branch_row["name"], "branch-service")
 
-        self.assertEqual([row["type"] for row in rows], ["worldline_created", "time_travel", "user_message"])
+        self.assertEqual(
+            [row["type"] for row in rows],
+            ["worldline_created", "time_travel", "user_message"],
+        )
         self.assertEqual(rows[0]["parent_event_id"], "event_anchor")
         self.assertEqual(rows[1]["parent_event_id"], rows[0]["id"])
         self.assertEqual(rows[2]["parent_event_id"], rows[1]["id"])
@@ -209,12 +214,184 @@ class WorldlineServiceTests(unittest.TestCase):
         self.assertTrue(target_db_path.exists())
 
         target_conn = duckdb.connect(str(target_db_path))
-        rows = target_conn.execute(
-            "SELECT k, v FROM metrics ORDER BY k"
-        ).fetchall()
+        rows = target_conn.execute("SELECT k, v FROM metrics ORDER BY k").fetchall()
         target_conn.close()
 
         self.assertEqual(rows, [("a", 1), ("b", 2)])
+
+    def test_branch_from_historical_event_uses_snapshot_state(self) -> None:
+        thread_id = self._create_thread()
+        source_worldline_id = self._create_worldline(thread_id)
+
+        source_db_path = duckdb_manager.ensure_worldline_db(source_worldline_id)
+        conn = duckdb.connect(str(source_db_path))
+        conn.execute("CREATE TABLE metrics (k VARCHAR, v INTEGER)")
+        conn.execute("INSERT INTO metrics VALUES ('a', 1)")
+        conn.close()
+
+        with meta.get_conn() as sqlite_conn:
+            anchor_event_id = meta.append_event_and_advance_head(
+                sqlite_conn,
+                worldline_id=source_worldline_id,
+                expected_head_event_id=None,
+                event_type="assistant_message",
+                payload={"text": "anchor"},
+            )
+            sqlite_conn.commit()
+
+        snapshot_path = duckdb_manager.capture_worldline_snapshot(
+            source_worldline_id,
+            anchor_event_id,
+        )
+        with meta.get_conn() as sqlite_conn:
+            sqlite_conn.execute(
+                """
+                INSERT INTO snapshots (id, worldline_id, event_id, duckdb_path)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    meta.new_id("snapshot"),
+                    source_worldline_id,
+                    anchor_event_id,
+                    str(snapshot_path),
+                ),
+            )
+            sqlite_conn.commit()
+
+        conn = duckdb.connect(str(source_db_path))
+        conn.execute("INSERT INTO metrics VALUES ('b', 2)")
+        conn.close()
+
+        with meta.get_conn() as sqlite_conn:
+            meta.append_event_and_advance_head(
+                sqlite_conn,
+                worldline_id=source_worldline_id,
+                expected_head_event_id=anchor_event_id,
+                event_type="assistant_message",
+                payload={"text": "after-snapshot"},
+            )
+            sqlite_conn.commit()
+
+        service = WorldlineService()
+        result = service.branch_from_event(
+            BranchOptions(
+                source_worldline_id=source_worldline_id,
+                from_event_id=anchor_event_id,
+                name="snapshot-branch",
+                append_events=False,
+            )
+        )
+
+        target_db_path = duckdb_manager.worldline_db_path(result.new_worldline_id)
+        target_conn = duckdb.connect(str(target_db_path))
+        rows = target_conn.execute("SELECT k, v FROM metrics ORDER BY k").fetchall()
+        target_conn.close()
+
+        self.assertEqual(rows, [("a", 1)])
+
+    def test_branch_from_deep_fork_history_uses_ancestor_snapshot(self) -> None:
+        thread_id = self._create_thread()
+        root_worldline_id = self._create_worldline(thread_id)
+
+        root_db = duckdb_manager.ensure_worldline_db(root_worldline_id)
+        conn = duckdb.connect(str(root_db))
+        conn.execute("CREATE TABLE metrics (k VARCHAR, v INTEGER)")
+        conn.execute("INSERT INTO metrics VALUES ('root', 1)")
+        conn.close()
+
+        with meta.get_conn() as sqlite_conn:
+            root_anchor_event_id = meta.append_event_and_advance_head(
+                sqlite_conn,
+                worldline_id=root_worldline_id,
+                expected_head_event_id=None,
+                event_type="assistant_message",
+                payload={"text": "root-anchor"},
+            )
+            sqlite_conn.commit()
+
+        root_snapshot = duckdb_manager.capture_worldline_snapshot(
+            root_worldline_id,
+            root_anchor_event_id,
+        )
+        with meta.get_conn() as sqlite_conn:
+            sqlite_conn.execute(
+                """
+                INSERT INTO snapshots (id, worldline_id, event_id, duckdb_path)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    meta.new_id("snapshot"),
+                    root_worldline_id,
+                    root_anchor_event_id,
+                    str(root_snapshot),
+                ),
+            )
+            sqlite_conn.commit()
+
+        service = WorldlineService()
+        branch_1 = service.branch_from_event(
+            BranchOptions(
+                source_worldline_id=root_worldline_id,
+                from_event_id=root_anchor_event_id,
+                name="branch-1",
+                append_events=False,
+            )
+        )
+
+        branch_1_db = duckdb_manager.worldline_db_path(branch_1.new_worldline_id)
+        conn = duckdb.connect(str(branch_1_db))
+        conn.execute("INSERT INTO metrics VALUES ('branch1', 2)")
+        conn.close()
+
+        with meta.get_conn() as sqlite_conn:
+            branch_1_anchor_event_id = meta.append_event_and_advance_head(
+                sqlite_conn,
+                worldline_id=branch_1.new_worldline_id,
+                expected_head_event_id=branch_1.created_event_ids[0],
+                event_type="assistant_message",
+                payload={"text": "branch-1-anchor"},
+            )
+            sqlite_conn.commit()
+
+        branch_2 = service.branch_from_event(
+            BranchOptions(
+                source_worldline_id=branch_1.new_worldline_id,
+                from_event_id=branch_1_anchor_event_id,
+                name="branch-2",
+                append_events=False,
+            )
+        )
+
+        branch_2_db = duckdb_manager.worldline_db_path(branch_2.new_worldline_id)
+        conn = duckdb.connect(str(branch_2_db))
+        conn.execute("INSERT INTO metrics VALUES ('branch2', 3)")
+        conn.close()
+
+        with meta.get_conn() as sqlite_conn:
+            branch_2_anchor_event_id = meta.append_event_and_advance_head(
+                sqlite_conn,
+                worldline_id=branch_2.new_worldline_id,
+                expected_head_event_id=branch_2.created_event_ids[0],
+                event_type="assistant_message",
+                payload={"text": "branch-2-anchor"},
+            )
+            sqlite_conn.commit()
+
+        branch_3 = service.branch_from_event(
+            BranchOptions(
+                source_worldline_id=branch_2.new_worldline_id,
+                from_event_id=root_anchor_event_id,
+                name="branch-3-from-root",
+                append_events=False,
+            )
+        )
+
+        branch_3_db = duckdb_manager.worldline_db_path(branch_3.new_worldline_id)
+        conn = duckdb.connect(str(branch_3_db))
+        rows = conn.execute("SELECT k, v FROM metrics ORDER BY k").fetchall()
+        conn.close()
+
+        self.assertEqual(rows, [("root", 1)])
 
 
 if __name__ == "__main__":

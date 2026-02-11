@@ -22,6 +22,10 @@ def ensure_worldline_db(worldline_id: str) -> Path:
 
 def clone_worldline_db(source_worldline_id: str, target_worldline_id: str) -> Path:
     source_path = worldline_db_path(source_worldline_id)
+    return clone_worldline_db_from_file(source_path, target_worldline_id)
+
+
+def clone_worldline_db_from_file(source_path: Path, target_worldline_id: str) -> Path:
     target_path = worldline_db_path(target_worldline_id)
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -30,6 +34,18 @@ def clone_worldline_db(source_worldline_id: str, target_worldline_id: str) -> Pa
         return target_path
 
     return ensure_worldline_db(target_worldline_id)
+
+
+def snapshot_db_path(worldline_id: str, event_id: str) -> Path:
+    return meta.DB_DIR / "snapshots" / worldline_id / f"{event_id}.duckdb"
+
+
+def capture_worldline_snapshot(worldline_id: str, event_id: str) -> Path:
+    source_path = ensure_worldline_db(worldline_id)
+    target_snapshot_path = snapshot_db_path(worldline_id, event_id)
+    target_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, target_snapshot_path)
+    return target_snapshot_path
 
 
 def execute_read_query(worldline_id: str, sql: str, limit: int) -> dict:

@@ -17,11 +17,11 @@ from chat.llm_client import (
     ToolDefinition,
 )
 from meta import (
-    append_event,
+    EventStoreConflictError,
+    append_event_and_advance_head,
     event_row_to_dict,
     get_conn,
     get_worldline_row,
-    set_worldline_head,
 )
 from tools import (
     PythonToolRequest,
@@ -949,22 +949,35 @@ The user is expecting you to help them explore and understand their data. Use th
         event_type: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        with get_conn() as conn:
-            worldline = get_worldline_row(conn, worldline_id)
-            if worldline is None:
-                raise HTTPException(status_code=404, detail="worldline not found")
+        max_attempts = 4
+        for attempt in range(max_attempts):
+            with get_conn() as conn:
+                worldline = get_worldline_row(conn, worldline_id)
+                if worldline is None:
+                    raise HTTPException(status_code=404, detail="worldline not found")
 
-            parent_event_id = worldline["head_event_id"]
-            event_id = append_event(
-                conn=conn,
-                worldline_id=worldline_id,
-                parent_event_id=parent_event_id,
-                event_type=event_type,
-                payload=payload,
-            )
-            set_worldline_head(conn, worldline_id, event_id)
-            conn.commit()
-            return self._load_event_by_id(event_id)
+                try:
+                    event_id = append_event_and_advance_head(
+                        conn,
+                        worldline_id=worldline_id,
+                        expected_head_event_id=worldline["head_event_id"],
+                        event_type=event_type,
+                        payload=payload,
+                    )
+                    conn.commit()
+                    return self._load_event_by_id(event_id)
+                except EventStoreConflictError:
+                    conn.rollback()
+                    if attempt == max_attempts - 1:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="worldline head moved during event append",
+                        )
+
+        raise HTTPException(
+            status_code=409,
+            detail="worldline head moved during event append",
+        )
 
     def _load_event_by_id(self, event_id: str) -> dict[str, Any]:
         with get_conn() as conn:

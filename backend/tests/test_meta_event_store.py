@@ -36,44 +36,42 @@ class MetaEventStoreCharacterizationTests(unittest.TestCase):
         )["worldline_id"]
         return worldline_id
 
-    def test_stale_parent_snapshot_allows_divergent_children(self) -> None:
-        """Characterize current lost-update behavior with stale head snapshots."""
+    def test_stale_parent_snapshot_is_rejected(self) -> None:
+        """Reject stale-head appends to prevent divergent event chains."""
         worldline_id = self._create_worldline()
 
         with meta.get_conn() as conn:
-            anchor_id = meta.append_event(
-                conn=conn,
+            anchor_id = meta.append_event_and_advance_head(
+                conn,
                 worldline_id=worldline_id,
-                parent_event_id=None,
+                expected_head_event_id=None,
                 event_type="assistant_message",
                 payload={"text": "anchor"},
             )
-            meta.set_worldline_head(conn, worldline_id, anchor_id)
             conn.commit()
 
         stale_head_id = anchor_id
 
         with meta.get_conn() as conn:
-            first_child_id = meta.append_event(
-                conn=conn,
+            first_child_id = meta.append_event_and_advance_head(
+                conn,
                 worldline_id=worldline_id,
-                parent_event_id=stale_head_id,
+                expected_head_event_id=stale_head_id,
                 event_type="assistant_message",
                 payload={"text": "first"},
             )
-            meta.set_worldline_head(conn, worldline_id, first_child_id)
             conn.commit()
 
         with meta.get_conn() as conn:
-            second_child_id = meta.append_event(
-                conn=conn,
-                worldline_id=worldline_id,
-                parent_event_id=stale_head_id,
-                event_type="assistant_message",
-                payload={"text": "second"},
-            )
-            meta.set_worldline_head(conn, worldline_id, second_child_id)
-            conn.commit()
+            with self.assertRaises(meta.EventStoreConflictError):
+                meta.append_event_and_advance_head(
+                    conn,
+                    worldline_id=worldline_id,
+                    expected_head_event_id=stale_head_id,
+                    event_type="assistant_message",
+                    payload={"text": "second"},
+                )
+            conn.rollback()
 
         with meta.get_conn() as conn:
             children = conn.execute(
@@ -108,10 +106,10 @@ class MetaEventStoreCharacterizationTests(unittest.TestCase):
                 ).fetchall()
             }
 
-        self.assertEqual(len(children), 2)
-        self.assertEqual(head_event_id, second_child_id)
-        self.assertIn(second_child_id, reachable)
-        self.assertNotIn(first_child_id, reachable)
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0]["id"], first_child_id)
+        self.assertEqual(head_event_id, first_child_id)
+        self.assertIn(first_child_id, reachable)
 
 
 if __name__ == "__main__":

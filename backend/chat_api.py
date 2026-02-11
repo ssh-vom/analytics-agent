@@ -101,6 +101,20 @@ def _build_chat_engine_from_params(
     )
 
 
+async def _run_chat_turn_from_params(
+    worldline_id: str,
+    message: str,
+    provider: str | None,
+    model: str | None,
+    max_iterations: int,
+) -> tuple[str, list[dict[str, Any]]]:
+    engine = _build_chat_engine_from_params(provider, model, max_iterations)
+    return await engine.run_turn(
+        worldline_id=worldline_id,
+        message=message,
+    )
+
+
 _runtime_lock = threading.Lock()
 _runtime_loop: asyncio.AbstractEventLoop | None = None
 _turn_coordinator: WorldlineTurnCoordinator | None = None
@@ -119,7 +133,7 @@ def _ensure_chat_runtime() -> tuple[WorldlineTurnCoordinator, ChatJobScheduler]:
         coordinator = WorldlineTurnCoordinator()
         scheduler = ChatJobScheduler(
             turn_coordinator=coordinator,
-            engine_factory=_build_chat_engine_from_params,
+            turn_runner=_run_chat_turn_from_params,
         )
         _turn_coordinator = coordinator
         _chat_job_scheduler = scheduler
@@ -247,19 +261,43 @@ def _encode_sse_frame(
     return "\n".join(lines) + "\n\n"
 
 
+async def _run_chat_turn(
+    body: ChatRequest,
+    *,
+    on_event=None,
+    on_delta=None,
+) -> tuple[str, list[dict[str, Any]]]:
+    engine = _build_chat_engine(body)
+    return await engine.run_turn(
+        worldline_id=body.worldline_id,
+        message=body.message,
+        on_event=on_event,
+        on_delta=on_delta,
+    )
+
+
+async def _run_chat_turn_serialized(
+    turn_coordinator: WorldlineTurnCoordinator,
+    body: ChatRequest,
+    *,
+    on_event=None,
+    on_delta=None,
+) -> tuple[str, list[dict[str, Any]]]:
+    async def run_now() -> tuple[str, list[dict[str, Any]]]:
+        return await _run_chat_turn(body, on_event=on_event, on_delta=on_delta)
+
+    return await turn_coordinator.run(body.worldline_id, run_now)
+
+
 @router.post("/chat")
 async def chat(body: ChatRequest):
     turn_coordinator, scheduler = _ensure_chat_runtime()
     await scheduler.start()
 
-    async def run_now() -> tuple[str, list[dict[str, Any]]]:
-        engine = _build_chat_engine(body)
-        return await engine.run_turn(
-            worldline_id=body.worldline_id,
-            message=body.message,
-        )
-
-    active_worldline_id, events = await turn_coordinator.run(body.worldline_id, run_now)
+    active_worldline_id, events = await _run_chat_turn_serialized(
+        turn_coordinator,
+        body,
+    )
     return {"worldline_id": active_worldline_id, "events": events}
 
 
@@ -305,19 +343,11 @@ async def chat_stream(body: ChatRequest):
         async def run_engine() -> None:
             nonlocal seq
             try:
-
-                async def run_now() -> tuple[str, list[dict[str, Any]]]:
-                    engine = _build_chat_engine(body)
-                    return await engine.run_turn(
-                        worldline_id=body.worldline_id,
-                        message=body.message,
-                        on_event=on_event,
-                        on_delta=on_delta,
-                    )
-
-                active_worldline_id, _ = await turn_coordinator.run(
-                    body.worldline_id,
-                    run_now,
+                active_worldline_id, _ = await _run_chat_turn_serialized(
+                    turn_coordinator,
+                    body,
+                    on_event=on_event,
+                    on_delta=on_delta,
                 )
                 seq += 1
                 await queue.put(

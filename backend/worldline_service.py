@@ -1,16 +1,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import HTTPException
 
 
 try:
-    from backend.meta import append_event, get_conn, new_id, set_worldline_head
-    from backend.duckdb_manager import clone_worldline_db
+    from backend.meta import (
+        EventStoreConflictError,
+        append_event_and_advance_head,
+        get_conn,
+        new_id,
+    )
+    from backend.duckdb_manager import (
+        clone_worldline_db_from_file,
+        ensure_worldline_db,
+        worldline_db_path,
+    )
 except ModuleNotFoundError:
-    from meta import append_event, get_conn, new_id, set_worldline_head
-    from duckdb_manager import clone_worldline_db
+    from meta import (
+        EventStoreConflictError,
+        append_event_and_advance_head,
+        get_conn,
+        new_id,
+    )
+    from duckdb_manager import (
+        clone_worldline_db_from_file,
+        ensure_worldline_db,
+        worldline_db_path,
+    )
 
 
 @dataclass(frozen=True)
@@ -43,6 +62,46 @@ class BranchResult:
 
 
 class WorldlineService:
+    def _resolve_branch_state_source_path(
+        self,
+        conn,
+        *,
+        source_worldline_id: str,
+        source_head_event_id: str | None,
+        from_event_id: str,
+    ) -> Path | None:
+        snapshot_row = conn.execute(
+            """
+            WITH RECURSIVE chain AS (
+                SELECT id, parent_event_id, 0 AS depth
+                FROM events
+                WHERE id = ?
+                UNION ALL
+                SELECT e.id, e.parent_event_id, chain.depth + 1
+                FROM events e
+                JOIN chain ON chain.parent_event_id = e.id
+            )
+            SELECT s.duckdb_path
+            FROM chain
+            JOIN snapshots s ON s.event_id = chain.id
+            ORDER BY chain.depth ASC
+            LIMIT 1
+            """,
+            (from_event_id,),
+        ).fetchone()
+
+        if snapshot_row is not None:
+            snapshot_path = Path(str(snapshot_row["duckdb_path"]))
+            if snapshot_path.exists():
+                return snapshot_path
+
+        if source_head_event_id == from_event_id:
+            source_path = worldline_db_path(source_worldline_id)
+            if source_path.exists():
+                return source_path
+
+        return None
+
     def _event_in_history(
         self, conn, *, head_event_id: str | None, event_id: str
     ) -> bool:
@@ -90,7 +149,9 @@ class WorldlineService:
             if source_event is None:
                 raise HTTPException(status_code=404, detail="from_event_id not found")
 
-            if source_event["worldline_id"] != options.source_worldline_id and not self._event_in_history(
+            if source_event[
+                "worldline_id"
+            ] != options.source_worldline_id and not self._event_in_history(
                 conn,
                 head_event_id=source_worldline["head_event_id"],
                 event_id=options.from_event_id,
@@ -119,57 +180,66 @@ class WorldlineService:
                 ),
             )
 
-            _ = clone_worldline_db(
+            source_state_path = self._resolve_branch_state_source_path(
+                conn,
                 source_worldline_id=options.source_worldline_id,
-                target_worldline_id=new_worldline_id,
+                source_head_event_id=source_worldline["head_event_id"],
+                from_event_id=options.from_event_id,
             )
 
-            worldline_created_event_id = append_event(
-                conn=conn,
-                worldline_id=new_worldline_id,
-                parent_event_id=options.from_event_id,
-                event_type="worldline_created",
-                payload={
-                    "new_worldline_id": new_worldline_id,
-                    "parent_worldline_id": options.source_worldline_id,
-                    "forked_from_event_id": options.from_event_id,
-                    "name": branch_name,
-                },
-            )
-            created_event_ids.append(worldline_created_event_id)
+            if source_state_path is None:
+                _ = ensure_worldline_db(new_worldline_id)
+            else:
+                _ = clone_worldline_db_from_file(source_state_path, new_worldline_id)
 
-            if options.append_events:
-                time_travel_event_id = append_event(
-                    conn=conn,
+            try:
+                worldline_created_event_id = append_event_and_advance_head(
+                    conn,
                     worldline_id=new_worldline_id,
-                    parent_event_id=worldline_created_event_id,
-                    event_type="time_travel",
+                    expected_head_event_id=None,
+                    event_type="worldline_created",
+                    parent_event_id=options.from_event_id,
                     payload={
-                        "from_worldline_id": options.source_worldline_id,
-                        "from_event_id": options.from_event_id,
                         "new_worldline_id": new_worldline_id,
+                        "parent_worldline_id": options.source_worldline_id,
+                        "forked_from_event_id": options.from_event_id,
                         "name": branch_name,
                     },
                 )
-                created_event_ids.append(time_travel_event_id)
+                created_event_ids.append(worldline_created_event_id)
 
-                if options.carried_user_message:
-                    carried_user_event_id = append_event(
-                        conn=conn,
+                if options.append_events:
+                    time_travel_event_id = append_event_and_advance_head(
+                        conn,
                         worldline_id=new_worldline_id,
-                        parent_event_id=time_travel_event_id,
-                        event_type="user_message",
+                        expected_head_event_id=worldline_created_event_id,
+                        event_type="time_travel",
                         payload={
-                            "text": options.carried_user_message,
-                            "carried_from_worldline_id": options.source_worldline_id,
+                            "from_worldline_id": options.source_worldline_id,
+                            "from_event_id": options.from_event_id,
+                            "new_worldline_id": new_worldline_id,
+                            "name": branch_name,
                         },
                     )
-                    created_event_ids.append(carried_user_event_id)
-                    set_worldline_head(conn, new_worldline_id, carried_user_event_id)
-                else:
-                    set_worldline_head(conn, new_worldline_id, time_travel_event_id)
-            else:
-                set_worldline_head(conn, new_worldline_id, worldline_created_event_id)
+                    created_event_ids.append(time_travel_event_id)
+
+                    if options.carried_user_message:
+                        carried_user_event_id = append_event_and_advance_head(
+                            conn,
+                            worldline_id=new_worldline_id,
+                            expected_head_event_id=time_travel_event_id,
+                            event_type="user_message",
+                            payload={
+                                "text": options.carried_user_message,
+                                "carried_from_worldline_id": options.source_worldline_id,
+                            },
+                        )
+                        created_event_ids.append(carried_user_event_id)
+            except EventStoreConflictError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="worldline head moved during branch event creation",
+                ) from exc
 
             conn.commit()
 

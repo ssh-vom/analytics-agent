@@ -5,12 +5,17 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_DIR = BASE_DIR / "data"
 DB_PATH = DB_DIR / "meta.db"
+_DEFAULT_PARENT = object()
+
+
+class EventStoreConflictError(RuntimeError):
+    pass
 
 
 SCHEMA_STATEMENTS = (
@@ -178,6 +183,65 @@ def append_event(
         """,
         (event_id, worldline_id, parent_event_id, event_type, json.dumps(payload)),
     )
+    return event_id
+
+
+def append_event_and_advance_head(
+    conn: sqlite3.Connection,
+    *,
+    worldline_id: str,
+    expected_head_event_id: str | None,
+    event_type: str,
+    payload: dict[str, Any],
+    parent_event_id: str | None | object = _DEFAULT_PARENT,
+) -> str:
+    worldline = get_worldline_row(conn, worldline_id)
+    if worldline is None:
+        raise ValueError("worldline not found")
+
+    current_head_event_id = worldline["head_event_id"]
+    if current_head_event_id != expected_head_event_id:
+        raise EventStoreConflictError(
+            "worldline head moved; expected "
+            f"{expected_head_event_id!r}, got {current_head_event_id!r}"
+        )
+
+    if parent_event_id is _DEFAULT_PARENT:
+        resolved_parent_event_id = expected_head_event_id
+    else:
+        resolved_parent_event_id = cast(str | None, parent_event_id)
+
+    event_id = append_event(
+        conn=conn,
+        worldline_id=worldline_id,
+        parent_event_id=resolved_parent_event_id,
+        event_type=event_type,
+        payload=payload,
+    )
+
+    if expected_head_event_id is None:
+        cursor = conn.execute(
+            """
+            UPDATE worldlines
+            SET head_event_id = ?
+            WHERE id = ? AND head_event_id IS NULL
+            """,
+            (event_id, worldline_id),
+        )
+    else:
+        cursor = conn.execute(
+            """
+            UPDATE worldlines
+            SET head_event_id = ?
+            WHERE id = ? AND head_event_id = ?
+            """,
+            (event_id, worldline_id, expected_head_event_id),
+        )
+
+    if cursor.rowcount != 1:
+        conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        raise EventStoreConflictError("failed to advance worldline head atomically")
+
     return event_id
 
 

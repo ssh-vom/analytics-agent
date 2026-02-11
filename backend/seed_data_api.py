@@ -11,14 +11,16 @@ from pydantic import BaseModel, Field
 try:
     meta_module = importlib.import_module("backend.meta")
     seed_data_module = importlib.import_module("backend.seed_data")
+    duckdb_manager_module = importlib.import_module("backend.duckdb_manager")
 except ModuleNotFoundError:
     meta_module = importlib.import_module("meta")
     seed_data_module = importlib.import_module("seed_data")
+    duckdb_manager_module = importlib.import_module("duckdb_manager")
 
 get_conn = meta_module.get_conn
 new_id = meta_module.new_id
-append_event = meta_module.append_event
-set_worldline_head = meta_module.set_worldline_head
+append_event_and_advance_head = meta_module.append_event_and_advance_head
+EventStoreConflictError = meta_module.EventStoreConflictError
 get_worldline_row = meta_module.get_worldline_row
 
 import_csv_to_worldline = seed_data_module.import_csv_to_worldline
@@ -29,6 +31,7 @@ list_attached_databases = seed_data_module.list_attached_databases
 get_worldline_schema = seed_data_module.get_worldline_schema
 MAX_CSV_FILE_SIZE = seed_data_module.MAX_CSV_FILE_SIZE
 TEMP_UPLOAD_DIR = seed_data_module.TEMP_UPLOAD_DIR
+capture_worldline_snapshot = duckdb_manager_module.capture_worldline_snapshot
 
 router = APIRouter(prefix="/api/seed-data", tags=["seed-data"])
 
@@ -68,18 +71,64 @@ def _require_worldline(conn, worldline_id: str):
     return worldline
 
 
-def _append_worldline_event(
-    conn,
+def _append_worldline_event_with_retry(
     *,
     worldline_id: str,
-    parent_event_id: str | None,
     event_type: str,
     payload: dict,
+    max_attempts: int = 4,
 ) -> str:
-    event_id = append_event(conn, worldline_id, parent_event_id, event_type, payload)
-    set_worldline_head(conn, worldline_id, event_id)
-    conn.commit()
-    return event_id
+    attempts = max(1, max_attempts)
+    for attempt in range(attempts):
+        with get_conn() as conn:
+            worldline = _require_worldline(conn, worldline_id)
+            try:
+                event_id = append_event_and_advance_head(
+                    conn,
+                    worldline_id=worldline_id,
+                    expected_head_event_id=worldline["head_event_id"],
+                    event_type=event_type,
+                    payload=payload,
+                )
+                conn.commit()
+                return event_id
+            except EventStoreConflictError:
+                conn.rollback()
+                if attempt == attempts - 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"worldline head moved during {event_type} append",
+                    )
+
+    raise HTTPException(
+        status_code=409,
+        detail=f"worldline head moved during {event_type} append",
+    )
+
+
+def _record_snapshot_for_event(worldline_id: str, event_id: str) -> None:
+    try:
+        snapshot_path = capture_worldline_snapshot(worldline_id, event_id)
+        with get_conn() as conn:
+            conn.execute(
+                "DELETE FROM snapshots WHERE worldline_id = ? AND event_id = ?",
+                (worldline_id, event_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO snapshots (id, worldline_id, event_id, duckdb_path)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    new_id("snapshot"),
+                    worldline_id,
+                    event_id,
+                    str(snapshot_path),
+                ),
+            )
+            conn.commit()
+    except Exception:
+        return
 
 
 def _merge_table_entries(existing: dict, incoming: dict) -> dict:
@@ -142,55 +191,53 @@ async def import_csv_endpoint(
     - **if_exists**: What to do if table exists: "fail", "replace", or "append"
     """
     with get_conn() as conn:
-        worldline = _require_worldline(conn, worldline_id)
-        parent_event_id = worldline["head_event_id"]
+        _require_worldline(conn, worldline_id)
 
-        # Save uploaded file temporarily
-        TEMP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        temp_path = TEMP_UPLOAD_DIR / f"{new_id('temp')}_{file.filename}"
+    # Save uploaded file temporarily
+    TEMP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = TEMP_UPLOAD_DIR / f"{new_id('temp')}_{file.filename}"
 
-        try:
-            await _write_upload_with_size_cap(file, destination=temp_path)
+    try:
+        await _write_upload_with_size_cap(file, destination=temp_path)
 
-            # Import the CSV
-            result = import_csv_to_worldline(
-                worldline_id=worldline_id,
-                file_path=temp_path,
-                table_name=table_name,
-                if_exists=if_exists,
-            )
+        # Import the CSV
+        result = import_csv_to_worldline(
+            worldline_id=worldline_id,
+            file_path=temp_path,
+            table_name=table_name,
+            if_exists=if_exists,
+        )
 
-            # Record the import as an event
-            event_payload = {
-                "table_name": result.table_name,
-                "source_filename": file.filename,
-                "row_count": result.row_count,
-                "columns": result.columns,
-                "import_time_ms": result.import_time_ms,
-            }
+        # Record the import as an event
+        event_payload = {
+            "table_name": result.table_name,
+            "source_filename": file.filename,
+            "row_count": result.row_count,
+            "columns": result.columns,
+            "import_time_ms": result.import_time_ms,
+        }
 
-            event_id = _append_worldline_event(
-                conn,
-                worldline_id=worldline_id,
-                parent_event_id=parent_event_id,
-                event_type="csv_import",
-                payload=event_payload,
-            )
+        event_id = _append_worldline_event_with_retry(
+            worldline_id=worldline_id,
+            event_type="csv_import",
+            payload=event_payload,
+        )
+        _record_snapshot_for_event(worldline_id, event_id)
 
-            return {
-                "success": True,
-                "table_name": result.table_name,
-                "row_count": result.row_count,
-                "columns": result.columns,
-                "import_time_ms": result.import_time_ms,
-                "event_id": event_id,
-            }
+        return {
+            "success": True,
+            "table_name": result.table_name,
+            "row_count": result.row_count,
+            "columns": result.columns,
+            "import_time_ms": result.import_time_ms,
+            "event_id": event_id,
+        }
 
-        finally:
-            # Clean up temp file
-            if temp_path.exists():
-                temp_path.unlink()
-            await file.close()
+    finally:
+        # Clean up temp file
+        if temp_path.exists():
+            temp_path.unlink()
+        await file.close()
 
 
 @router.post("/worldlines/{worldline_id}/attach-duckdb")
@@ -202,36 +249,34 @@ async def attach_duckdb_endpoint(worldline_id: str, request: AttachExternalDBReq
     - **alias**: Optional alias name for the attached database
     """
     with get_conn() as conn:
-        worldline = _require_worldline(conn, worldline_id)
-        parent_event_id = worldline["head_event_id"]
+        _require_worldline(conn, worldline_id)
 
-        # Attach the external database
-        result = attach_external_duckdb(
-            worldline_id=worldline_id, db_path=request.db_path, alias=request.alias
-        )
+    # Attach the external database
+    result = attach_external_duckdb(
+        worldline_id=worldline_id, db_path=request.db_path, alias=request.alias
+    )
 
-        # Record the attachment as an event
-        event_payload = {
-            "alias": result.alias,
-            "db_path": result.db_path,
-            "attached_at": result.attached_at,
-        }
+    # Record the attachment as an event
+    event_payload = {
+        "alias": result.alias,
+        "db_path": result.db_path,
+        "attached_at": result.attached_at,
+    }
 
-        event_id = _append_worldline_event(
-            conn,
-            worldline_id=worldline_id,
-            parent_event_id=parent_event_id,
-            event_type="external_db_attached",
-            payload=event_payload,
-        )
+    event_id = _append_worldline_event_with_retry(
+        worldline_id=worldline_id,
+        event_type="external_db_attached",
+        payload=event_payload,
+    )
+    _record_snapshot_for_event(worldline_id, event_id)
 
-        return {
-            "success": True,
-            "alias": result.alias,
-            "db_path": result.db_path,
-            "attached_at": result.attached_at,
-            "event_id": event_id,
-        }
+    return {
+        "success": True,
+        "alias": result.alias,
+        "db_path": result.db_path,
+        "attached_at": result.attached_at,
+        "event_id": event_id,
+    }
 
 
 @router.post("/worldlines/{worldline_id}/detach-duckdb")
@@ -242,29 +287,27 @@ async def detach_duckdb_endpoint(worldline_id: str, request: DetachExternalDBReq
     - **alias**: The alias of the attached database to detach
     """
     with get_conn() as conn:
-        worldline = _require_worldline(conn, worldline_id)
-        parent_event_id = worldline["head_event_id"]
+        _require_worldline(conn, worldline_id)
 
-        # Detach the database
-        result = detach_external_duckdb(worldline_id, request.alias)
+    # Detach the database
+    result = detach_external_duckdb(worldline_id, request.alias)
 
-        # Record the detachment as an event
-        event_payload = {"alias": request.alias, "status": result["status"]}
+    # Record the detachment as an event
+    event_payload = {"alias": request.alias, "status": result["status"]}
 
-        event_id = _append_worldline_event(
-            conn,
-            worldline_id=worldline_id,
-            parent_event_id=parent_event_id,
-            event_type="external_db_detached",
-            payload=event_payload,
-        )
+    event_id = _append_worldline_event_with_retry(
+        worldline_id=worldline_id,
+        event_type="external_db_detached",
+        payload=event_payload,
+    )
+    _record_snapshot_for_event(worldline_id, event_id)
 
-        return {
-            "success": True,
-            "alias": request.alias,
-            "status": result["status"],
-            "event_id": event_id,
-        }
+    return {
+        "success": True,
+        "alias": request.alias,
+        "status": result["status"],
+        "event_id": event_id,
+    }
 
 
 @router.get("/worldlines/{worldline_id}/imported-tables")

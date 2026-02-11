@@ -9,11 +9,11 @@ from pydantic import BaseModel, Field
 try:
     from backend.duckdb_manager import execute_read_query
     from backend.meta import (
-        append_event,
+        EventStoreConflictError,
+        append_event_and_advance_head,
         event_row_to_dict,
         get_conn,
         get_worldline_row,
-        set_worldline_head,
         new_id,
     )
     from backend.sandbox.docker_runner import DockerSandboxRunner
@@ -21,11 +21,11 @@ try:
 except ModuleNotFoundError:
     from duckdb_manager import execute_read_query
     from meta import (
-        append_event,
+        EventStoreConflictError,
+        append_event_and_advance_head,
         event_row_to_dict,
         get_conn,
         get_worldline_row,
-        set_worldline_head,
         new_id,
     )
     from sandbox.docker_runner import DockerSandboxRunner
@@ -105,19 +105,42 @@ async def _append_worldline_event(
     event_type: str,
     payload: dict[str, Any],
     on_event: ToolEventCallback | None = None,
+    max_attempts: int = 1,
+    allow_rebase_on_conflict: bool = False,
 ) -> str:
-    event_id = append_event(
-        conn,
-        worldline_id,
-        parent_event_id,
-        event_type,
-        payload,
+    expected_parent = parent_event_id
+    attempts = max(1, max_attempts)
+
+    for attempt in range(attempts):
+        try:
+            event_id = append_event_and_advance_head(
+                conn,
+                worldline_id=worldline_id,
+                expected_head_event_id=expected_parent,
+                event_type=event_type,
+                payload=payload,
+            )
+            conn.commit()
+            if on_event is not None:
+                await on_event(_load_event_by_id(conn, event_id))
+            return event_id
+        except EventStoreConflictError:
+            conn.rollback()
+            if allow_rebase_on_conflict and attempt < attempts - 1:
+                worldline = get_worldline_row(conn, worldline_id)
+                if worldline is None:
+                    raise HTTPException(status_code=404, detail="worldline not found")
+                expected_parent = worldline["head_event_id"]
+                continue
+            raise HTTPException(
+                status_code=409,
+                detail=f"worldline head moved during {event_type} append",
+            )
+
+    raise HTTPException(
+        status_code=409,
+        detail=f"worldline head moved during {event_type} append",
     )
-    set_worldline_head(conn, worldline_id, event_id)
-    conn.commit()
-    if on_event is not None:
-        await on_event(_load_event_by_id(conn, event_id))
-    return event_id
 
 
 async def execute_sql_tool(
@@ -143,30 +166,29 @@ async def execute_sql_tool(
             event_type="tool_call_sql",
             payload=call_payload,
             on_event=on_event,
+            max_attempts=4,
+            allow_rebase_on_conflict=True,
         )
 
+        query_error: Exception | None = None
         try:
             result = execute_read_query(body.worldline_id, body.sql, body.limit)
             result["execution_ms"] = int((time.perf_counter() - started) * 1000)
-            await _append_worldline_event(
-                conn,
-                worldline_id=body.worldline_id,
-                parent_event_id=call_event_id,
-                event_type="tool_result_sql",
-                payload=result,
-                on_event=on_event,
-            )
-            return result
         except Exception as exc:
-            await _append_worldline_event(
-                conn,
-                worldline_id=body.worldline_id,
-                parent_event_id=call_event_id,
-                event_type="tool_result_sql",
-                payload={"error": str(exc)},
-                on_event=on_event,
-            )
-            raise HTTPException(status_code=400, detail=str(exc))
+            query_error = exc
+            result = {"error": str(exc)}
+
+        await _append_worldline_event(
+            conn,
+            worldline_id=body.worldline_id,
+            parent_event_id=call_event_id,
+            event_type="tool_result_sql",
+            payload=result,
+            on_event=on_event,
+        )
+        if query_error is not None:
+            raise HTTPException(status_code=400, detail=str(query_error))
+        return result
 
 
 @router.post("/sql")
@@ -364,6 +386,8 @@ async def execute_python_tool(
             event_type="tool_call_python",
             payload=call_payload,
             on_event=on_event,
+            max_attempts=4,
+            allow_rebase_on_conflict=True,
         )
 
         try:
@@ -438,12 +462,12 @@ async def execute_python_tool(
                 "execution_ms": int((time.perf_counter() - started) * 1000),
             }
 
-            result_event_id = append_event(
+            result_event_id = append_event_and_advance_head(
                 conn,
-                body.worldline_id,
-                call_event_id,
-                "tool_result_python",
-                api_result,
+                worldline_id=body.worldline_id,
+                expected_head_event_id=call_event_id,
+                event_type="tool_result_python",
+                payload=api_result,
             )
             for artifact in db_artifacts:
                 if not artifact["path"]:
@@ -464,7 +488,6 @@ async def execute_python_tool(
                     ),
                 )
 
-            set_worldline_head(conn, body.worldline_id, result_event_id)
             conn.commit()
             if on_event is not None:
                 await on_event(_load_event_by_id(conn, result_event_id))
@@ -484,6 +507,14 @@ async def execute_python_tool(
             )
             # #endregion
             return api_result
+        except EventStoreConflictError:
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="worldline head moved before python tool result append",
+            )
+        except HTTPException:
+            raise
         except Exception as exc:
             # #region agent log
             _debug_log(

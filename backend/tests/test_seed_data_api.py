@@ -122,6 +122,38 @@ class SeedDataApiTests(unittest.TestCase):
         temp_files = list(self.temp_upload_dir.glob("*"))
         self.assertEqual(temp_files, [])
 
+    def test_import_csv_records_snapshot_for_event(self) -> None:
+        worldline_id = self._create_worldline()
+        upload = UploadFile(
+            io.BytesIO(b"name,score\nAva,10\nLiam,12\n"),
+            filename="scores.csv",
+        )
+
+        result = self._run(
+            seed_data_api.import_csv_endpoint(
+                worldline_id=worldline_id,
+                file=upload,
+                table_name="scores_table",
+                if_exists="fail",
+            )
+        )
+
+        with meta.get_conn() as conn:
+            snapshot_row = conn.execute(
+                """
+                SELECT worldline_id, event_id, duckdb_path
+                FROM snapshots
+                WHERE worldline_id = ? AND event_id = ?
+                LIMIT 1
+                """,
+                (worldline_id, result["event_id"]),
+            ).fetchone()
+
+        self.assertIsNotNone(snapshot_row)
+        self.assertEqual(snapshot_row["worldline_id"], worldline_id)
+        self.assertEqual(snapshot_row["event_id"], result["event_id"])
+        self.assertTrue(Path(snapshot_row["duckdb_path"]).exists())
+
     def test_get_worldline_schema_native_tables_are_unique(self) -> None:
         worldline_id = self._create_worldline()
         upload = UploadFile(

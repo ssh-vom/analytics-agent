@@ -119,10 +119,33 @@ class ChatJobScheduler:
         self,
         *,
         turn_coordinator: WorldlineTurnCoordinator,
-        engine_factory: Callable[[str | None, str | None, int], Any],
+        engine_factory: Callable[[str | None, str | None, int], Any] | None = None,
+        turn_runner: Callable[
+            [str, str, str | None, str | None, int],
+            Awaitable[tuple[str, list[dict[str, Any]]]],
+        ]
+        | None = None,
     ) -> None:
         self._turn_coordinator = turn_coordinator
-        self._engine_factory = engine_factory
+        if turn_runner is not None:
+            self._turn_runner = turn_runner
+        else:
+            if engine_factory is None:
+                raise ValueError(
+                    "engine_factory is required when turn_runner is not set"
+                )
+
+            async def _default_turn_runner(
+                worldline_id: str,
+                message: str,
+                provider: str | None,
+                model: str | None,
+                max_iterations: int,
+            ) -> tuple[str, list[dict[str, Any]]]:
+                engine = engine_factory(provider, model, max_iterations)
+                return await engine.run_turn(worldline_id=worldline_id, message=message)
+
+            self._turn_runner = _default_turn_runner
         self._started = False
         self._start_lock = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -211,14 +234,12 @@ class ChatJobScheduler:
                 return
 
             try:
-                engine = self._engine_factory(
+                active_worldline_id, events = await self._turn_runner(
+                    worldline_id,
+                    str(request_payload.get("message") or ""),
                     request_payload.get("provider"),
                     request_payload.get("model"),
                     int(request_payload.get("max_iterations") or 6),
-                )
-                active_worldline_id, events = await engine.run_turn(
-                    worldline_id=worldline_id,
-                    message=str(request_payload.get("message") or ""),
                 )
                 self._mark_completed(
                     job_id=job_id,
