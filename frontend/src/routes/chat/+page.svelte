@@ -130,6 +130,7 @@
   $: isActiveWorldlineSending = Boolean(activeWorldlineId && sendingByWorldline[activeWorldlineId]);
   $: hasDraftOutput =
     activeStreamingState.text.length > 0 || activeStreamingState.toolCalls.size > 0;
+  $: isEmptyChat = cells.length === 0 && !hasDraftOutput && !isActiveWorldlineSending;
   $: activeWorldlineQueueDepth = activeWorldlineId
     ? Object.values($chatJobs.jobsById).filter(
         (job) =>
@@ -761,7 +762,7 @@
   }
 </script>
 
-<div class="chat-container">
+<div class="chat-container" class:empty-chat={isEmptyChat}>
   <!-- Top Bar -->
   <header class="top-bar">
     <div class="top-bar-left">
@@ -925,6 +926,15 @@
 
   <!-- Composer -->
   <div class="composer-container">
+    {#if isEmptyChat}
+      <div class="welcome-header">
+        <div class="welcome-icon">
+          <Database size={48} />
+        </div>
+        <h1 class="welcome-title">What can I help you analyze?</h1>
+        <p class="welcome-subtitle">Ask questions, run SQL queries, or generate Python analysis</p>
+      </div>
+    {/if}
     <div class="context-toolbar">
       <div class="context-dropdown">
         <button
@@ -1183,6 +1193,66 @@
     display: flex;
     flex-direction: column;
     height: 100vh;
+    transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .chat-container.empty-chat .workspace {
+    flex: 0 0 0;
+    min-height: 0;
+    opacity: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .chat-container.empty-chat .feed {
+    display: none;
+  }
+
+  .chat-container.empty-chat .composer-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    border-top: none;
+    background: transparent;
+    padding-top: 0;
+    animation: fadeSlideUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    max-width: 800px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .chat-container.empty-chat .composer {
+    max-width: none;
+    width: 100%;
+  }
+
+  .chat-container.empty-chat .context-toolbar {
+    max-width: none;
+    width: 100%;
+    justify-content: center;
+  }
+
+  @keyframes fadeSlideUp {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fadeSlideDown {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 
   .workspace {
@@ -1468,7 +1538,38 @@
     padding: var(--space-4);
     background: var(--bg-1);
     border-top: 1px solid var(--border-soft);
-    flex-shrink: 0;
+    flex: 0 0 auto;
+    transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .welcome-header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    margin-bottom: var(--space-6);
+    animation: fadeSlideUp 0.5s cubic-bezier(0.4, 0, 0.2, 1) 0.1s both;
+  }
+
+  .welcome-icon {
+    color: var(--accent-green);
+    opacity: 0.6;
+    margin-bottom: var(--space-4);
+  }
+
+  .welcome-title {
+    margin: 0 0 var(--space-2) 0;
+    font-family: var(--font-heading);
+    font-size: 24px;
+    font-weight: 500;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+  }
+
+  .welcome-subtitle {
+    margin: 0;
+    font-size: 14px;
+    color: var(--text-dim);
   }
 
   .context-toolbar {
