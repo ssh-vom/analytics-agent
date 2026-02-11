@@ -1,4 +1,7 @@
-# TextQL
+# AnalyticZ
+
+<img width="1705" height="991" alt="image" src="https://github.com/user-attachments/assets/02443af1-5788-41e4-9761-226effb11328" />
+
 
 Analytics agent with SQL/Python tool execution and worldline branching.
 
