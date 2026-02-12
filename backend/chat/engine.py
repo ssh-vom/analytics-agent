@@ -24,6 +24,13 @@ from chat.llm_client import (
 )
 from chat.message_builder import build_llm_messages_from_events
 from chat.context_parser import extract_output_type, extract_selected_external_aliases
+from chat.artifact_memory import (
+    artifact_inventory_from_events,
+    artifact_inventory_from_tool_result,
+    artifact_name_set,
+    merge_artifact_inventory,
+    upsert_artifact_inventory_message,
+)
 from chat.data_intent import (
     build_data_intent_summary,
     data_intent_from_events,
@@ -65,8 +72,6 @@ from worldline_service import BranchOptions, WorldlineService
 
 logger = logging.getLogger(__name__)
 
-_ARTIFACT_INVENTORY_HEADER = "Artifact inventory for this worldline"
-_ARTIFACT_INVENTORY_MAX_ITEMS = 40
 _RECENT_SIGNATURE_WINDOW = 24
 _MAX_INVALID_TOOL_PAYLOAD_RETRIES: dict[str, int] = {
     "run_sql": 2,
@@ -126,14 +131,14 @@ class ChatEngine:
 
         history_events = await self._load_worldline_events(active_worldline_id)
         messages = build_llm_messages_from_events(list(history_events))
-        artifact_inventory = self._artifact_inventory_from_events(history_events)
+        artifact_inventory = artifact_inventory_from_events(history_events)
         data_intent_summary = data_intent_from_events(history_events)
         recent_successful_tool_signatures = self._recent_successful_tool_signatures(
             worldline_id=active_worldline_id,
             events=history_events,
             limit=_RECENT_SIGNATURE_WINDOW,
         )
-        recent_artifact_names = self._artifact_name_set(artifact_inventory)
+        recent_artifact_names = artifact_name_set(artifact_inventory)
         user_requested_rerun_flag = user_requested_rerun_hint(message)
         required_tools = determine_required_terminal_tools(
             message=message,
@@ -183,7 +188,7 @@ class ChatEngine:
         )
 
         for _ in range(self.max_iterations):
-            self._upsert_artifact_inventory_message(messages, artifact_inventory)
+            upsert_artifact_inventory_message(messages, artifact_inventory)
             upsert_data_intent_message(messages, data_intent_summary)
             # ----- LLM call: stream when on_delta is available, else batch -----
             if on_delta is not None:
@@ -441,7 +446,7 @@ class ChatEngine:
                             active_worldline_id
                         )
                         messages = build_llm_messages_from_events(list(history_events))
-                        artifact_inventory = self._artifact_inventory_from_events(
+                        artifact_inventory = artifact_inventory_from_events(
                             history_events
                         )
                         data_intent_summary = data_intent_from_events(history_events)
@@ -452,9 +457,7 @@ class ChatEngine:
                                 limit=_RECENT_SIGNATURE_WINDOW,
                             )
                         )
-                        recent_artifact_names = self._artifact_name_set(
-                            artifact_inventory
-                        )
+                        recent_artifact_names = artifact_name_set(artifact_inventory)
                         turn_artifact_names.clear()
                         # Reset per-turn state for the new worldline context
                         sql_success_count = 0
@@ -544,15 +547,13 @@ class ChatEngine:
                                 worldline_id=active_worldline_id,
                                 on_delta=on_delta,
                             )
-                            new_inventory_entries = (
-                                self._artifact_inventory_from_tool_result(
-                                    tool_result,
-                                    source_call_id=tool_call.id,
-                                    producer="run_python",
-                                )
+                            new_inventory_entries = artifact_inventory_from_tool_result(
+                                tool_result,
+                                source_call_id=tool_call.id,
+                                producer="run_python",
                             )
                             if new_inventory_entries:
-                                artifact_inventory = self._merge_artifact_inventory(
+                                artifact_inventory = merge_artifact_inventory(
                                     artifact_inventory,
                                     new_inventory_entries,
                                 )
@@ -1019,154 +1020,6 @@ class ChatEngine:
         )
         events = timeline.get("events", [])
         return list(events)
-
-    def _artifact_inventory_from_events(
-        self, events: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        by_id = {event.get("id"): event for event in events}
-        deduped_by_name: dict[str, dict[str, Any]] = {}
-
-        for event in events:
-            if event.get("type") != "tool_result_python":
-                continue
-
-            payload = event.get("payload")
-            if not isinstance(payload, dict):
-                continue
-
-            artifacts = payload.get("artifacts")
-            if not isinstance(artifacts, list):
-                continue
-
-            parent = by_id.get(event.get("parent_event_id")) or {}
-            parent_payload = parent.get("payload") if isinstance(parent, dict) else {}
-            source_call_id = None
-            if isinstance(parent_payload, dict):
-                raw_call_id = parent_payload.get("call_id")
-                if isinstance(raw_call_id, str) and raw_call_id.strip():
-                    source_call_id = raw_call_id.strip()
-
-            created_at = str(event.get("created_at") or "")
-            source_event_id = str(event.get("id") or "")
-
-            for artifact in artifacts:
-                if not isinstance(artifact, dict):
-                    continue
-                name = str(artifact.get("name") or "").strip()
-                if not name:
-                    continue
-
-                key = name.lower()
-                entry = {
-                    "artifact_id": str(artifact.get("artifact_id") or ""),
-                    "name": name,
-                    "type": str(artifact.get("type") or "file"),
-                    "created_at": created_at,
-                    "source_call_id": source_call_id,
-                    "source_event_id": source_event_id,
-                    "producer": "run_python",
-                }
-                if key in deduped_by_name:
-                    del deduped_by_name[key]
-                deduped_by_name[key] = entry
-
-        inventory = list(deduped_by_name.values())
-        if len(inventory) > _ARTIFACT_INVENTORY_MAX_ITEMS:
-            inventory = inventory[-_ARTIFACT_INVENTORY_MAX_ITEMS:]
-        return inventory
-
-    def _artifact_inventory_from_tool_result(
-        self,
-        tool_result: dict[str, Any],
-        *,
-        source_call_id: str | None,
-        producer: str,
-    ) -> list[dict[str, Any]]:
-        artifacts = tool_result.get("artifacts")
-        if not isinstance(artifacts, list):
-            return []
-
-        inventory: list[dict[str, Any]] = []
-        for artifact in artifacts:
-            if not isinstance(artifact, dict):
-                continue
-            name = str(artifact.get("name") or "").strip()
-            if not name:
-                continue
-            inventory.append(
-                {
-                    "artifact_id": str(artifact.get("artifact_id") or ""),
-                    "name": name,
-                    "type": str(artifact.get("type") or "file"),
-                    "created_at": "",
-                    "source_call_id": source_call_id,
-                    "source_event_id": "",
-                    "producer": producer,
-                }
-            )
-        return inventory
-
-    def _merge_artifact_inventory(
-        self,
-        existing: list[dict[str, Any]],
-        incoming: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        deduped_by_name: dict[str, dict[str, Any]] = {}
-
-        for entry in [*existing, *incoming]:
-            name = str(entry.get("name") or "").strip()
-            if not name:
-                continue
-            key = name.lower()
-            normalized_entry = dict(entry)
-            normalized_entry["name"] = name
-            if key in deduped_by_name:
-                del deduped_by_name[key]
-            deduped_by_name[key] = normalized_entry
-
-        merged = list(deduped_by_name.values())
-        if len(merged) > _ARTIFACT_INVENTORY_MAX_ITEMS:
-            merged = merged[-_ARTIFACT_INVENTORY_MAX_ITEMS:]
-        return merged
-
-    def _artifact_name_set(self, inventory: list[dict[str, Any]]) -> set[str]:
-        return {
-            str(entry.get("name") or "").strip().lower()
-            for entry in inventory
-            if str(entry.get("name") or "").strip()
-        }
-
-    def _render_artifact_inventory_message(
-        self, artifact_inventory: list[dict[str, Any]]
-    ) -> str:
-        payload = {
-            "artifact_count": len(artifact_inventory),
-            "artifacts": artifact_inventory,
-            "instructions": (
-                "Check this inventory before creating files. Reuse existing artifacts "
-                "instead of regenerating identical outputs."
-            ),
-        }
-        return f"{_ARTIFACT_INVENTORY_HEADER} (always-on memory):\n" + json.dumps(
-            payload, ensure_ascii=True, default=str
-        )
-
-    def _upsert_artifact_inventory_message(
-        self,
-        messages: list[ChatMessage],
-        artifact_inventory: list[dict[str, Any]],
-    ) -> None:
-        content = self._render_artifact_inventory_message(artifact_inventory)
-        memory_message = ChatMessage(role="system", content=content)
-        for index, message in enumerate(messages):
-            if message.role == "system" and message.content.startswith(
-                _ARTIFACT_INVENTORY_HEADER
-            ):
-                messages[index] = memory_message
-                return
-
-        insert_index = 1 if messages else 0
-        messages.insert(insert_index, memory_message)
 
     async def _emit_state_transition_delta(
         self,
