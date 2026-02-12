@@ -13,7 +13,7 @@ from semantic.types import (
 )
 from semantic.catalog import build_catalog_for_worldline
 from semantic.resolver import resolve_query
-from semantic.resolver_llm import resolve_query_with_llm, LLMSemanticResolver
+from semantic.resolver_llm import resolve_query_with_llm
 from semantic.compiler import compile_query_spec
 from semantic.executor import SemanticExecutor, should_use_semantic_lane
 from semantic.prompts import build_resolution_prompt, build_clarification_prompt
@@ -42,8 +42,6 @@ __all__ = [
     "compile_query_spec",
     "SemanticExecutor",
     "should_use_semantic_lane",
-    # LLM resolver
-    "LLMSemanticResolver",
     # Prompts
     "build_resolution_prompt",
     "build_clarification_prompt",

@@ -17,6 +17,7 @@
     Upload,
     X,
   } from "lucide-svelte";
+  import { getActiveWorldlineFromStorage } from "$lib/chat/activeWorldline";
 
   let worldlineId = "";
   let loading = true;
@@ -40,7 +41,7 @@
   let attachSuccess: { alias: string } | null = null;
 
   onMount(() => {
-    const saved = localStorage.getItem("textql_active_worldline");
+    const saved = getActiveWorldlineFromStorage();
     if (saved) {
       worldlineId = saved;
       loadData();

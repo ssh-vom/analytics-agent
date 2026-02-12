@@ -5,8 +5,6 @@
   import {
     buildDisplayItems,
     createStreamingState,
-    applyDelta,
-    clearFromEvent,
     type StreamingState,
   } from "$lib/streaming";
   import MessageCell from "$lib/components/MessageCell.svelte";
@@ -19,13 +17,11 @@
   import {
     createChatJob,
     createThread,
-    streamChatTurn,
     fetchWorldlineTables,
   } from "$lib/api/client";
   import {
     createOptimisticUserMessage,
     insertOptimisticEvent,
-    replaceOptimisticWithReal,
   } from "$lib/chat/optimisticState";
   import {
     buildContextualMessage as buildContextualChatMessage,
@@ -47,12 +43,11 @@
     extractPersistedStateTrace,
     runtimeStatePath,
     runtimeStateReasons,
-    stateTransitionFromDelta,
     withRuntimeStateTrace,
     type RuntimeStateTransition,
   } from "$lib/chat/stateTrace";
   import { computeWorldlineQueueStats } from "$lib/chat/queueStats";
-  import { statusFromDelta, statusFromStreamEvent } from "$lib/chat/streamStatus";
+  import { sendPromptWithStreaming } from "$lib/chat/streamingController";
   import {
     pickActiveJobWorldlineId,
     withAppendedWorldlineEvent,
@@ -63,6 +58,8 @@
   import { refreshWorldlineContextSnapshot } from "$lib/chat/worldlineContext";
   import { createWorldlineManager } from "$lib/chat/worldlineManager";
   import { createCSVImportController } from "$lib/chat/csvImportController";
+  import { createScrollToBottom } from "$lib/chat/scrollToBottom";
+  import { createMenuController, type MenuId } from "$lib/chat/menuController";
   import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
@@ -86,7 +83,7 @@
   let statusText = "Initializing...";
   let sendingByWorldline: Record<string, boolean> = {};
   let isReady = false;
-  let showProviderMenu = false;
+  let activeMenu: MenuId | null = null;
   let composerExpanded = false;
   let isHydratingThread = false;
   let artifactsPanelCollapsed = false;
@@ -94,11 +91,6 @@
   let streamingStateByWorldline: Record<string, StreamingState> = {};
   let activeStreamingState: StreamingState = createStreamingState();
   let feedElement: HTMLDivElement | null = null;
-  let shouldAutoScroll = true;
-  let pendingScrollRaf = 0;
-  let hasPendingScroll = false;
-  let pendingScrollForce = false;
-  let scrollAttemptsQueue: (() => void)[] = [];
   let activeWorldlineQueueDepth = 0;
   let activeWorldlineRunningJobs = 0;
   let activeWorldlineQueuedJobs = 0;
@@ -108,10 +100,6 @@
   let uploadedFiles: File[] = [];
   let worldlineTables: Awaited<ReturnType<typeof fetchWorldlineTables>> | null = null;
   let outputType: OutputType = "none";
-  let showOutputTypeMenu = false;
-  let showConnectorsMenu = false;
-  let showSettingsMenu = false;
-  let showDataContextMenu = false;
   let availableConnectors: StoredConnector[] = [];
   let selectedConnectorIds: string[] = [];
   let connectorSelectionByWorldline: Record<string, string[]> = {};
@@ -166,6 +154,8 @@
       uploadedFiles = removeUploadedFileByName(uploadedFiles, filename);
     },
   });
+  const scrollController = createScrollToBottom(() => feedElement);
+  const menuController = createMenuController();
 
   function handleOpenWorldlineEvent(event: Event): void {
     const detail = (event as CustomEvent<{ threadId?: string; worldlineId?: string }>).detail;
@@ -219,10 +209,7 @@
   });
 
   onDestroy(() => {
-    if (pendingScrollRaf) {
-      cancelAnimationFrame(pendingScrollRaf);
-      pendingScrollRaf = 0;
-    }
+    scrollController.dispose();
     if (typeof window !== "undefined") {
       window.removeEventListener(
         "textql:open-worldline",
@@ -232,9 +219,6 @@
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     }
-    hasPendingScroll = false;
-    pendingScrollForce = false;
-    scrollAttemptsQueue = [];
   });
 
   $: if ($activeThread?.id && isReady && $activeThread.id !== threadId && !isHydratingThread) {
@@ -242,56 +226,11 @@
   }
 
   function handleFeedScroll(): void {
-    if (!feedElement) {
-      return;
-    }
-    const bottomDistance =
-      feedElement.scrollHeight - feedElement.scrollTop - feedElement.clientHeight;
-    shouldAutoScroll = bottomDistance < 120;
+    scrollController.handleScroll();
   }
 
   function scrollFeedToBottom(force = false): void {
-    if (force) {
-      pendingScrollForce = true;
-    }
-    if (!force && !shouldAutoScroll) {
-      return;
-    }
-
-    // Queue scroll attempt and batch process
-    scrollAttemptsQueue.push(() => {
-      const shouldScrollNow = pendingScrollForce || shouldAutoScroll;
-      pendingScrollForce = false;
-      if (!feedElement || !shouldScrollNow) {
-        return;
-      }
-      feedElement.scrollTo({
-        top: feedElement.scrollHeight,
-        behavior: "auto",
-      });
-    });
-
-    // Prevent multiple RAFs from being scheduled
-    if (hasPendingScroll) {
-      return;
-    }
-    hasPendingScroll = true;
-
-    // Batch all queued scrolls in next frame
-    void tick().then(() => {
-      pendingScrollRaf = requestAnimationFrame(() => {
-        pendingScrollRaf = 0;
-        hasPendingScroll = false;
-
-        // Execute only the last scroll attempt
-        const lastAttempt = scrollAttemptsQueue.pop();
-        scrollAttemptsQueue = []; // Clear queue
-
-        if (lastAttempt) {
-          lastAttempt();
-        }
-      });
-    });
+    scrollController.scrollToBottom(force);
   }
 
   function setStreamingState(worldlineId: string, state: StreamingState): void {
@@ -349,10 +288,7 @@
   }
 
   function closeContextMenus(): void {
-    showOutputTypeMenu = false;
-    showConnectorsMenu = false;
-    showSettingsMenu = false;
-    showDataContextMenu = false;
+    activeMenu = menuController.closeAll();
   }
 
   function toggleConnector(id: string): void {
@@ -598,11 +534,10 @@
       return;
     }
 
-    setWorldlineSending(requestWorldlineId, true);
     prompt = "";
     closeContextMenus();
     statusText = "Agent is thinking...";
-    shouldAutoScroll = true;
+    scrollController.setAutoScroll(true);
     resetStreamingDrafts(requestWorldlineId);
     selectedArtifactId = null;
     stateTraceByWorldline = withRuntimeStateTrace(
@@ -620,81 +555,38 @@
     );
     scrollFeedToBottom(true);
 
-    try {
-      const contextualMessage = buildContextualMessage(message);
-      await streamChatTurn({
+    const contextualMessage = buildContextualMessage(message);
+    await sendPromptWithStreaming(
+      {
         worldlineId: requestWorldlineId,
         message: contextualMessage,
         provider,
         model: model.trim() || undefined,
         maxIterations: 20,
-        onEvent: (frame) => {
-          const frameWorldlineId = frame.worldline_id;
-          ensureWorldlineVisible(frameWorldlineId);
-          const frameStreamingState = streamingStateByWorldline[frameWorldlineId] ?? createStreamingState();
-          setStreamingState(frameWorldlineId, clearFromEvent(frameStreamingState, frame.event));
-
-          // Remove optimistic user message when real one arrives
-          if (frame.event.type === "user_message") {
-            const existing = eventsByWorldline[frameWorldlineId] ?? [];
-            const { events: updated } = replaceOptimisticWithReal(
-              existing,
-              optimisticId,
-              frame.event
-            );
-            setWorldlineEvents(frameWorldlineId, updated);
-          } else {
-            appendEvent(frameWorldlineId, frame.event);
-          }
-
-          if (activeWorldlineId === frameWorldlineId) {
-            scrollFeedToBottom();
-          }
-
-          if (activeWorldlineId === frameWorldlineId) {
-            statusText = statusFromStreamEvent(frame.event.type);
+      },
+      {
+        optimisticId,
+        getActiveWorldlineId: () => activeWorldlineId,
+        getEvents: (worldlineId) => eventsByWorldline[worldlineId] ?? [],
+        setWorldlineEvents,
+        appendEvent,
+        rollbackOptimisticMessage,
+        setWorldlineSending,
+        resetStreamingDrafts,
+        refreshWorldlines,
+        loadWorldline,
+        ensureWorldlineVisible,
+        onStatusChange: (status) => {
+          if (activeWorldlineId === requestWorldlineId) {
+            statusText = status;
           }
         },
-        onDelta: (frame) => {
-          const frameWorldlineId = frame.worldline_id;
-          ensureWorldlineVisible(frameWorldlineId);
-          const frameStreamingState = streamingStateByWorldline[frameWorldlineId] ?? createStreamingState();
-          setStreamingState(frameWorldlineId, applyDelta(frameStreamingState, frame.delta));
-          const stateTransition = stateTransitionFromDelta(frame.delta);
-          if (stateTransition) {
-            stateTraceByWorldline = appendRuntimeStateTransition(
-              stateTraceByWorldline,
-              frameWorldlineId,
-              stateTransition,
-            );
-            if (activeWorldlineId === frameWorldlineId) {
-              statusText = `State: ${stateTransition.to_state.replace(/_/g, " ")}`;
-            }
-            if (activeWorldlineId === frameWorldlineId) {
-              scrollFeedToBottom();
-            }
-            return;
-          }
-          if (activeWorldlineId === frameWorldlineId) {
-            const deltaStatus = statusFromDelta(frame.delta);
-            if (deltaStatus) {
-              statusText = deltaStatus;
-            }
+        onScroll: () => {
+          if (activeWorldlineId === requestWorldlineId) {
             scrollFeedToBottom();
           }
         },
-        onDone: async (done) => {
-          resetStreamingDrafts(done.worldline_id);
-          await refreshWorldlines();
-          if (done.worldline_id) {
-            await loadWorldline(done.worldline_id);
-          }
-          if (activeWorldlineId === done.worldline_id) {
-            statusText = "Done";
-            scrollFeedToBottom();
-          }
-          
-          // Update thread message count
+        onTurnCompleted: () => {
           if ($activeThread) {
             threads.updateThread($activeThread.id, {
               messageCount: ($activeThread.messageCount || 0) + 1,
@@ -702,23 +594,17 @@
             });
           }
         },
-        onError: (error) => {
-          resetStreamingDrafts(requestWorldlineId);
-          rollbackOptimisticMessage(requestWorldlineId, optimisticId);
-          if (activeWorldlineId === requestWorldlineId) {
-            statusText = `Error: ${error}`;
-          }
+        setStreamingState,
+        getStreamingState: (worldlineId) => streamingStateByWorldline[worldlineId],
+        appendRuntimeStateTransition: (worldlineId, transition) => {
+          stateTraceByWorldline = appendRuntimeStateTransition(
+            stateTraceByWorldline,
+            worldlineId,
+            transition,
+          );
         },
-      });
-    } catch (error) {
-      resetStreamingDrafts(requestWorldlineId);
-      rollbackOptimisticMessage(requestWorldlineId, optimisticId);
-      if (activeWorldlineId === requestWorldlineId) {
-        statusText = error instanceof Error ? error.message : "Request failed";
-      }
-    } finally {
-      setWorldlineSending(requestWorldlineId, false);
-    }
+      },
+    );
   }
 
   function getProviderIcon(provider: Provider) {
@@ -759,26 +645,26 @@
       <div class="provider-selector">
         <button 
           class="provider-btn"
-          on:click={() => showProviderMenu = !showProviderMenu}
+          on:click={() => activeMenu = menuController.toggle("provider")}
         >
           <Sparkles size={14} />
           <span>{getProviderIcon(provider)}</span>
           <ChevronDown size={14} />
         </button>
         
-        {#if showProviderMenu}
+        {#if activeMenu === "provider"}
           <div class="provider-menu">
             <button 
               class="provider-option"
               class:active={provider === "openai"}
-              on:click={() => { provider = "openai"; showProviderMenu = false; }}
+              on:click={() => { provider = "openai"; activeMenu = menuController.close("provider"); }}
             >
               OpenAI
             </button>
             <button 
               class="provider-option"
               class:active={provider === "openrouter"}
-              on:click={() => { provider = "openrouter"; showProviderMenu = false; }}
+              on:click={() => { provider = "openrouter"; activeMenu = menuController.close("provider"); }}
             >
               OpenRouter
             </button>
@@ -920,12 +806,7 @@
         <button
           type="button"
           class="context-btn"
-          on:click={() => {
-            showOutputTypeMenu = !showOutputTypeMenu;
-            showConnectorsMenu = false;
-            showSettingsMenu = false;
-            showDataContextMenu = false;
-          }}
+          on:click={() => activeMenu = menuController.toggle("outputType")}
         >
           <span>
             {outputType === "report"
@@ -936,16 +817,16 @@
           </span>
           <ChevronDown size={13} />
         </button>
-        {#if showOutputTypeMenu}
+        {#if activeMenu === "outputType"}
           <div class="context-menu">
             <div class="context-menu-title">Output Type</div>
-            <button type="button" class="context-option" on:click={() => { outputType = "none"; showOutputTypeMenu = false; }}>
+            <button type="button" class="context-option" on:click={() => { outputType = "none"; activeMenu = menuController.close("outputType"); }}>
               {outputType === "none" ? "✓ " : ""}No strict format
             </button>
-            <button type="button" class="context-option" on:click={() => { outputType = "report"; showOutputTypeMenu = false; }}>
+            <button type="button" class="context-option" on:click={() => { outputType = "report"; activeMenu = menuController.close("outputType"); }}>
               {outputType === "report" ? "✓ " : ""}Report
             </button>
-            <button type="button" class="context-option" on:click={() => { outputType = "dashboard"; showOutputTypeMenu = false; }}>
+            <button type="button" class="context-option" on:click={() => { outputType = "dashboard"; activeMenu = menuController.close("outputType"); }}>
               {outputType === "dashboard" ? "✓ " : ""}Dashboard
             </button>
           </div>
@@ -956,18 +837,13 @@
         <button
           type="button"
           class="context-btn"
-          on:click={() => {
-            showConnectorsMenu = !showConnectorsMenu;
-            showOutputTypeMenu = false;
-            showSettingsMenu = false;
-            showDataContextMenu = false;
-          }}
+          on:click={() => activeMenu = menuController.toggle("connectors")}
         >
           <Database size={14} />
           <span>{selectedConnectorIds.length > 0 ? `${selectedConnectorIds.length} connectors` : "Connectors"}</span>
           <ChevronDown size={13} />
         </button>
-        {#if showConnectorsMenu}
+        {#if activeMenu === "connectors"}
           <div class="context-menu connectors-menu">
             <div class="context-menu-title">Connectors</div>
             {#if availableConnectors.length === 0}
@@ -987,18 +863,13 @@
         <button
           type="button"
           class="context-btn"
-          on:click={() => {
-            showSettingsMenu = !showSettingsMenu;
-            showOutputTypeMenu = false;
-            showConnectorsMenu = false;
-            showDataContextMenu = false;
-          }}
+          on:click={() => activeMenu = menuController.toggle("settings")}
         >
           <Wrench size={14} />
           <span>Settings</span>
           <ChevronDown size={13} />
         </button>
-        {#if showSettingsMenu}
+        {#if activeMenu === "settings"}
           <div class="context-menu settings-menu">
             <div class="context-menu-title">Settings</div>
             <label class="toggle-row">
@@ -1025,18 +896,13 @@
         <button
           type="button"
           class="context-btn"
-          on:click={() => {
-            showDataContextMenu = !showDataContextMenu;
-            showOutputTypeMenu = false;
-            showConnectorsMenu = false;
-            showSettingsMenu = false;
-          }}
+          on:click={() => activeMenu = menuController.toggle("dataContext")}
         >
           <Plus size={14} />
           <span>{selectedContextTables.length > 0 ? `${selectedContextTables.length} table(s)` : "Attach Context"}</span>
           <ChevronDown size={13} />
         </button>
-        {#if showDataContextMenu}
+        {#if activeMenu === "dataContext"}
           <div class="context-menu data-menu align-right">
             <div class="context-menu-title">Datasets</div>
             <button type="button" class="context-option" on:click={() => document.getElementById('csv-upload')?.click()}>

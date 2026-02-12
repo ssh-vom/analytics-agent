@@ -1,22 +1,18 @@
 <script lang="ts">
   import { afterUpdate } from "svelte";
-  import { fetchArtifactPreview } from "$lib/api/client";
-  import ArtifactTablePreview from "$lib/components/ArtifactTablePreview.svelte";
+  import ArtifactFloatingViewer from "$lib/components/ArtifactFloatingViewer.svelte";
+  import { createArtifactPreviewStore } from "$lib/chat/artifactPreview";
   import {
     FileText,
     Image,
     Table,
     Sparkles,
     Download,
-    Loader2,
-    AlertCircle,
-    X,
     ChevronLeft,
     ChevronRight,
   } from "lucide-svelte";
 
   import type {
-    ArtifactTablePreview as ArtifactTablePreviewData,
     PythonArtifact,
     PythonResultPayload,
     TimelineEvent,
@@ -37,13 +33,9 @@
   let artifactListElement: HTMLDivElement | null = null;
   let lastFocusedArtifactId: string | null = null;
   let selectedArtifact: ArtifactEntry | null = null;
-  let previewArtifactId: string | null = null;
-  let previewLoading = false;
-  let previewError = "";
-  let tablePreview: ArtifactTablePreviewData | null = null;
-  let previewRequestToken = 0;
   let showFloatingViewer = false;
   let lastObservedSelectedArtifactId: string | null = null;
+  const artifactPreview = createArtifactPreviewStore();
 
   $: artifactEntries = extractArtifactEntries(events);
   $: if (selectedArtifactId && !artifactEntries.some((entry) => entry.artifactId === selectedArtifactId)) {
@@ -59,10 +51,13 @@
     lastObservedSelectedArtifactId = null;
   }
   $: if (selectedArtifact) {
-    void loadArtifactPreview(selectedArtifact);
+    void artifactPreview.load(
+      selectedArtifact.artifactId,
+      isTableArtifact(selectedArtifact),
+    );
   }
   $: if (!selectedArtifact) {
-    clearPreviewState();
+    artifactPreview.clear();
   }
   $: if (!selectedArtifact || collapsed) {
     showFloatingViewer = false;
@@ -153,52 +148,6 @@
   function handleGlobalKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape" && showFloatingViewer) {
       closeFloatingViewer();
-    }
-  }
-
-  function clearPreviewState(): void {
-    previewArtifactId = null;
-    previewLoading = false;
-    previewError = "";
-    tablePreview = null;
-  }
-
-  async function loadArtifactPreview(artifact: ArtifactEntry): Promise<void> {
-    if (previewArtifactId === artifact.artifactId) {
-      return;
-    }
-
-    previewArtifactId = artifact.artifactId;
-    previewRequestToken += 1;
-    const token = previewRequestToken;
-
-    if (!isTableArtifact(artifact)) {
-      previewLoading = false;
-      previewError = "";
-      tablePreview = null;
-      return;
-    }
-
-    previewLoading = true;
-    previewError = "";
-    tablePreview = null;
-
-    try {
-      const response = await fetchArtifactPreview(artifact.artifactId, 120);
-      if (token !== previewRequestToken || previewArtifactId !== artifact.artifactId) {
-        return;
-      }
-      tablePreview = response.preview;
-    } catch (error) {
-      if (token !== previewRequestToken || previewArtifactId !== artifact.artifactId) {
-        return;
-      }
-      previewError =
-        error instanceof Error ? error.message : "Failed to load table artifact preview";
-    } finally {
-      if (token === previewRequestToken && previewArtifactId === artifact.artifactId) {
-        previewLoading = false;
-      }
     }
   }
 
@@ -317,93 +266,13 @@
 </aside>
 
 {#if showFloatingViewer && selectedArtifact}
-  <div class="floating-layer" aria-live="polite">
-    <div
-      class="floating-panel"
-      role="dialog"
-      aria-modal="true"
-      aria-label={`Artifact viewer for ${selectedArtifact.name}`}
-    >
-      <header class="floating-header">
-        <div class="floating-title">
-          {#if isImageArtifact(selectedArtifact.type)}
-            <Image size={16} />
-          {:else if isTableArtifact(selectedArtifact)}
-            <Table size={16} />
-          {:else}
-            <FileText size={16} />
-          {/if}
-          <span title={selectedArtifact.name}>{selectedArtifact.name}</span>
-        </div>
-        <div class="floating-actions">
-          <a
-            class="viewer-download"
-            href={`/api/artifacts/${selectedArtifact.artifactId}`}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={`Download ${selectedArtifact.name}`}
-          >
-            <Download size={14} />
-          </a>
-          <button
-            type="button"
-            class="floating-close"
-            on:click={closeFloatingViewer}
-            aria-label="Close expanded preview"
-          >
-            <X size={14} />
-          </button>
-        </div>
-      </header>
-
-      <div class="floating-body" class:image-view={isImageArtifact(selectedArtifact.type)}>
-        {#if isImageArtifact(selectedArtifact.type)}
-          <a
-            class="floating-image"
-            href={`/api/artifacts/${selectedArtifact.artifactId}`}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={`Open ${selectedArtifact.name}`}
-          >
-            <img src={`/api/artifacts/${selectedArtifact.artifactId}`} alt={selectedArtifact.name} loading="lazy" />
-          </a>
-        {:else if isTableArtifact(selectedArtifact)}
-          {#if previewLoading}
-            <div class="viewer-state loading">
-              <Loader2 size={16} class="spin" />
-              <span>Loading table preview...</span>
-            </div>
-          {:else if previewError}
-            <div class="viewer-state error">
-              <AlertCircle size={15} />
-              <span>{previewError}</span>
-            </div>
-          {:else if tablePreview}
-            <ArtifactTablePreview
-              artifactName={selectedArtifact.name}
-              columns={tablePreview.columns}
-              rows={tablePreview.rows}
-              rowCount={tablePreview.row_count}
-              previewCount={tablePreview.preview_count}
-              truncated={tablePreview.truncated}
-              stickyHeader={true}
-              variant="floating"
-            />
-          {:else}
-            <div class="viewer-state">
-              <Table size={16} />
-              <span>No preview available.</span>
-            </div>
-          {/if}
-        {:else}
-          <div class="viewer-state">
-            <FileText size={16} />
-            <span>This artifact does not have an inline preview. Use download to open it.</span>
-          </div>
-        {/if}
-      </div>
-    </div>
-  </div>
+  <ArtifactFloatingViewer
+    artifact={selectedArtifact}
+    previewLoading={$artifactPreview.previewLoading}
+    previewError={$artifactPreview.previewError}
+    tablePreview={$artifactPreview.tablePreview}
+    onClose={closeFloatingViewer}
+  />
 {/if}
 
 <style>
@@ -523,65 +392,12 @@
     line-height: 1.4;
   }
 
-  .floating-close {
-    width: 22px;
-    height: 22px;
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-dim);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    transition: color var(--transition-fast);
-  }
-
-  .floating-close:hover {
-    color: var(--text-primary);
-    border-color: var(--border-medium);
-  }
-
-  .viewer-download {
-    width: 22px;
-    height: 22px;
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-    transition: color var(--transition-fast);
-    text-decoration: none;
-    flex-shrink: 0;
-  }
-
-  .viewer-download:hover {
-    color: var(--text-primary);
-    border-color: var(--border-medium);
-  }
-
   .panel-note {
     padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-soft);
     color: var(--text-dim);
     font-size: 11px;
     font-family: var(--font-mono);
-  }
-
-  .viewer-state {
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-2);
-    padding: var(--space-4);
-    color: var(--text-dim);
-    font-size: 12px;
-    text-align: center;
-  }
-
-  .viewer-state.error {
-    color: var(--danger);
   }
 
   .artifact-list {
@@ -716,97 +532,6 @@
     color: var(--text-primary);
   }
 
-  .floating-layer {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.35);
-    backdrop-filter: blur(1px);
-    z-index: 90;
-  }
-
-  .floating-panel {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    width: min(1080px, calc(100vw - 80px));
-    height: min(82vh, calc(100vh - 80px));
-    background: var(--bg-1);
-    border: 1px solid var(--border-medium);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-lg);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-
-  .floating-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border-soft);
-  }
-
-  .floating-title {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-width: 0;
-    color: var(--text-primary);
-    font-family: var(--font-mono);
-    font-size: 12px;
-  }
-
-  .floating-title span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .floating-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-  }
-
-  .floating-body {
-    flex: 1;
-    min-height: 0;
-    overflow: auto;
-    padding: var(--space-3);
-  }
-
-  .floating-body.image-view {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--space-4);
-  }
-
-  .floating-image {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-    background: var(--bg-0);
-    max-width: 100%;
-    max-height: 100%;
-    margin: 0 auto;
-  }
-
-  .floating-image img {
-    display: block;
-    width: auto;
-    height: auto;
-    max-width: 100%;
-    max-height: 100%;
-    object-fit: contain;
-  }
-
   @media (max-width: 1100px) {
     .artifacts-panel {
       border-left: none;
@@ -818,20 +543,8 @@
       max-height: 56px;
     }
 
-    .floating-panel {
-      width: calc(100vw - 36px);
-      height: calc(100vh - 36px);
-    }
   }
 
   @media (max-width: 768px) {
-    .floating-panel {
-      width: calc(100vw - 20px);
-      height: calc(100vh - 20px);
-    }
-
-    .floating-body.image-view {
-      padding: var(--space-2);
-    }
   }
 </style>

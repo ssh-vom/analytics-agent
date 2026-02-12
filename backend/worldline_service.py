@@ -5,31 +5,17 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-
-if (__package__ or "").startswith("backend"):
-    from backend.meta import (
-        EventStoreConflictError,
-        append_event_and_advance_head,
-        get_conn,
-        new_id,
-    )
-    from backend.duckdb_manager import (
-        clone_worldline_db_from_file,
-        ensure_worldline_db,
-        worldline_db_path,
-    )
-else:
-    from meta import (
-        EventStoreConflictError,
-        append_event_and_advance_head,
-        get_conn,
-        new_id,
-    )
-    from duckdb_manager import (
-        clone_worldline_db_from_file,
-        ensure_worldline_db,
-        worldline_db_path,
-    )
+from meta import (
+    EventStoreConflictError,
+    append_event_and_advance_head,
+    get_conn,
+    new_id,
+)
+from duckdb_manager import (
+    clone_worldline_db_from_file,
+    ensure_worldline_db,
+    worldline_db_path,
+)
 
 
 @dataclass(frozen=True)

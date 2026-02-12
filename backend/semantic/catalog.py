@@ -415,12 +415,8 @@ def build_catalog_for_worldline(
 
     try:
         # Import here to avoid circular imports
-        if (__package__ or "").startswith("backend"):
-            from backend.duckdb_manager import open_worldline_connection
-            from backend.seed_data import get_semantic_overrides
-        else:
-            from duckdb_manager import open_worldline_connection
-            from seed_data import get_semantic_overrides
+        from duckdb_manager import open_worldline_connection
+        from seed_data import get_semantic_overrides
 
         conn = open_worldline_connection(worldline_id)
         catalog = build_catalog_from_duckdb(conn)

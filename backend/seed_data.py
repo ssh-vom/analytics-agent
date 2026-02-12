@@ -15,20 +15,12 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-if (__package__ or "").startswith("backend"):
-    from backend import meta
-    from backend.duckdb_manager import (
-        attach_read_only_database,
-        open_worldline_connection,
-        worldline_db_path,
-    )
-else:
-    import meta
-    from duckdb_manager import (
-        attach_read_only_database,
-        open_worldline_connection,
-        worldline_db_path,
-    )
+import meta
+from duckdb_manager import (
+    attach_read_only_database,
+    open_worldline_connection,
+    worldline_db_path,
+)
 
 # Constants
 MAX_CSV_FILE_SIZE = 100 * 1024 * 1024  # 100MB limit

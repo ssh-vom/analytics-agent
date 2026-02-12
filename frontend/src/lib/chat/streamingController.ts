@@ -1,6 +1,17 @@
 import type { StreamDeltaPayload, TimelineEvent } from "$lib/types";
 import { streamChatTurn } from "$lib/api/client";
-import type { RuntimeStateTransition } from "$lib/chat/stateTrace";
+import {
+  stateTransitionFromDelta,
+  type RuntimeStateTransition,
+} from "$lib/chat/stateTrace";
+import { statusFromDelta, statusFromStreamEvent } from "$lib/chat/streamStatus";
+import {
+  applyDelta,
+  clearFromEvent,
+  createStreamingState,
+  type StreamingState,
+} from "$lib/streaming";
+import { replaceOptimisticWithReal } from "$lib/chat/optimisticState";
 
 export type StreamCallbacks = {
   onEvent: (frame: { worldline_id: string; event: TimelineEvent }) => void;
@@ -19,7 +30,9 @@ export type SendPromptOptions = {
 
 export type SendPromptContext = {
   optimisticId: string;
-  optimisticEvent: TimelineEvent;
+  getActiveWorldlineId: () => string;
+  getEvents: (worldlineId: string) => TimelineEvent[];
+  setWorldlineEvents: (worldlineId: string, events: TimelineEvent[]) => void;
   appendEvent: (worldlineId: string, event: TimelineEvent) => void;
   rollbackOptimisticMessage: (worldlineId: string, optimisticId: string) => void;
   setWorldlineSending: (worldlineId: string, sending: boolean) => void;
@@ -27,20 +40,15 @@ export type SendPromptContext = {
   refreshWorldlines: () => Promise<void>;
   loadWorldline: (worldlineId: string) => Promise<void>;
   ensureWorldlineVisible: (worldlineId: string) => void;
-  activeWorldlineId: string;
-  statusCallbacks: {
-    onStatusChange: (status: string) => void;
-    onStateTransition: (transition: RuntimeStateTransition) => void;
-    onScroll: () => void;
-  };
-  stateMutators: {
-    setStreamingState: (worldlineId: string, state: unknown) => void;
-    getStreamingState: (worldlineId: string) => unknown;
-    appendRuntimeStateTransition: (
-      worldlineId: string,
-      transition: RuntimeStateTransition
-    ) => void;
-  };
+  onStatusChange: (status: string) => void;
+  onScroll: () => void;
+  onTurnCompleted: () => void;
+  setStreamingState: (worldlineId: string, state: StreamingState) => void;
+  getStreamingState: (worldlineId: string) => StreamingState | undefined;
+  appendRuntimeStateTransition: (
+    worldlineId: string,
+    transition: RuntimeStateTransition
+  ) => void;
 };
 
 export async function sendPromptWithStreaming(
@@ -57,6 +65,9 @@ export async function sendPromptWithStreaming(
 
   const {
     optimisticId,
+    getActiveWorldlineId,
+    getEvents,
+    setWorldlineEvents,
     appendEvent,
     rollbackOptimisticMessage,
     setWorldlineSending,
@@ -64,9 +75,12 @@ export async function sendPromptWithStreaming(
     refreshWorldlines,
     loadWorldline,
     ensureWorldlineVisible,
-    activeWorldlineId,
-    statusCallbacks,
-    stateMutators,
+    onStatusChange,
+    onScroll,
+    onTurnCompleted,
+    setStreamingState,
+    getStreamingState,
+    appendRuntimeStateTransition,
   } = context;
 
   setWorldlineSending(worldlineId, true);
@@ -79,62 +93,56 @@ export async function sendPromptWithStreaming(
       model,
       maxIterations,
       onEvent: (frame) => {
-        ensureWorldlineVisible(frame.worldline_id);
-        appendEvent(frame.worldline_id, frame.event);
+        const frameWorldlineId = frame.worldline_id;
+        ensureWorldlineVisible(frameWorldlineId);
+        const frameStreamingState =
+          getStreamingState(frameWorldlineId) ?? createStreamingState();
+        setStreamingState(
+          frameWorldlineId,
+          clearFromEvent(frameStreamingState, frame.event)
+        );
 
-        if (frame.worldline_id === activeWorldlineId) {
-          const status = statusFromEventType(frame.event.type);
-          statusCallbacks.onStatusChange(status);
+        if (frame.event.type === "user_message") {
+          const existing = getEvents(frameWorldlineId);
+          const { events: updated } = replaceOptimisticWithReal(
+            existing,
+            optimisticId,
+            frame.event
+          );
+          setWorldlineEvents(frameWorldlineId, updated);
+        } else {
+          appendEvent(frameWorldlineId, frame.event);
+        }
+
+        if (frameWorldlineId === getActiveWorldlineId()) {
+          onScroll();
+          onStatusChange(statusFromStreamEvent(frame.event.type));
         }
       },
       onDelta: (frame) => {
-        ensureWorldlineVisible(frame.worldline_id);
+        const frameWorldlineId = frame.worldline_id;
+        ensureWorldlineVisible(frameWorldlineId);
 
         const frameStreamingState =
-          (stateMutators.getStreamingState(frame.worldline_id) as Record<
-            string,
-            unknown
-          >) ?? {};
-        const nextState = applyStreamingDelta(
-          frameStreamingState,
-          frame.delta
-        );
-        stateMutators.setStreamingState(frame.worldline_id, nextState);
+          getStreamingState(frameWorldlineId) ?? createStreamingState();
+        setStreamingState(frameWorldlineId, applyDelta(frameStreamingState, frame.delta));
 
-        // Handle state transitions
-        if (frame.delta.type === "state_transition") {
-          const transition: RuntimeStateTransition = {
-            from_state:
-              typeof frame.delta.from_state === "string"
-                ? frame.delta.from_state
-                : null,
-            to_state: String(frame.delta.to_state ?? ""),
-            reason: String(frame.delta.reason ?? "unspecified"),
-          };
-
-          if (transition.to_state) {
-            stateMutators.appendRuntimeStateTransition(
-              frame.worldline_id,
-              transition
-            );
-
-            if (frame.worldline_id === activeWorldlineId) {
-              statusCallbacks.onStateTransition(transition);
-            }
-          }
-
-          if (frame.worldline_id === activeWorldlineId) {
-            statusCallbacks.onScroll();
+        const stateTransition = stateTransitionFromDelta(frame.delta);
+        if (stateTransition) {
+          appendRuntimeStateTransition(frameWorldlineId, stateTransition);
+          if (frameWorldlineId === getActiveWorldlineId()) {
+            onStatusChange(`State: ${stateTransition.to_state.replace(/_/g, " ")}`);
+            onScroll();
           }
           return;
         }
 
-        if (frame.worldline_id === activeWorldlineId) {
+        if (frameWorldlineId === getActiveWorldlineId()) {
           const status = statusFromDelta(frame.delta);
           if (status) {
-            statusCallbacks.onStatusChange(status);
+            onStatusChange(status);
           }
-          statusCallbacks.onScroll();
+          onScroll();
         }
       },
       onDone: async (frame) => {
@@ -144,69 +152,24 @@ export async function sendPromptWithStreaming(
           await loadWorldline(frame.worldline_id);
         }
 
-        if (frame.worldline_id === activeWorldlineId) {
-          statusCallbacks.onStatusChange("Done");
-          statusCallbacks.onScroll();
+        if (frame.worldline_id === getActiveWorldlineId()) {
+          onStatusChange("Done");
+          onScroll();
         }
+        onTurnCompleted();
       },
       onError: (error) => {
         resetStreamingDrafts(worldlineId);
         rollbackOptimisticMessage(worldlineId, optimisticId);
-        statusCallbacks.onStatusChange(`Error: ${error}`);
+        onStatusChange(`Error: ${error}`);
       },
     });
   } catch (error) {
     resetStreamingDrafts(worldlineId);
     rollbackOptimisticMessage(worldlineId, optimisticId);
     const message = error instanceof Error ? error.message : "Request failed";
-    statusCallbacks.onStatusChange(message);
+    onStatusChange(message);
   } finally {
     setWorldlineSending(worldlineId, false);
   }
-}
-
-function statusFromEventType(eventType: TimelineEvent["type"]): string {
-  switch (eventType) {
-    case "tool_call_sql":
-      return "Running SQL...";
-    case "tool_call_python":
-      return "Running Python...";
-    case "assistant_message":
-      return "Done";
-    default:
-      return "Working...";
-  }
-}
-
-function statusFromDelta(delta: StreamDeltaPayload): string | null {
-  if (delta.type === "state_transition") {
-    return null;
-  }
-
-  if (delta.skipped) {
-    if (delta.reason === "invalid_tool_payload") {
-      return "Retrying after invalid tool payload...";
-    }
-    return "Skipped repeated tool call...";
-  }
-
-  if (delta.type === "assistant_text" && !delta.done) {
-    return "Composing response...";
-  }
-  if (delta.type === "tool_call_sql" && !delta.done) {
-    return "Drafting SQL...";
-  }
-  if (delta.type === "tool_call_python" && !delta.done) {
-    return "Drafting Python...";
-  }
-
-  return null;
-}
-
-function applyStreamingDelta(
-  state: Record<string, unknown>,
-  delta: StreamDeltaPayload
-): Record<string, unknown> {
-  // Simple delta application - in reality this would use the streamState helpers
-  return { ...state, delta };
 }

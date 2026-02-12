@@ -6,22 +6,14 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-try:
-    from backend.chat.llm_client import (
-        ChatMessage,
-        LlmResponse,
-        StreamChunk,
-        ToolCall,
-        ToolDefinition,
-    )
-except ModuleNotFoundError:
-    from chat.llm_client import (
-        ChatMessage,
-        LlmResponse,
-        StreamChunk,
-        ToolCall,
-        ToolDefinition,
-    )
+from chat.adapters._messages import messages_to_api
+from chat.adapters._types import (
+    ChatMessage,
+    LlmResponse,
+    StreamChunk,
+    ToolCall,
+    ToolDefinition,
+)
 
 
 @dataclass(frozen=True)
@@ -63,7 +55,7 @@ class OpenAiAdapter:
             ) from exc
 
         client = OpenAI(api_key=self.api_key)
-        api_input = self._messages_to_api(messages)
+        api_input = messages_to_api(messages)
         response = client.responses.create(
             model=self.model,
             input=api_input,
@@ -110,7 +102,7 @@ class OpenAiAdapter:
             ) from exc
 
         client = AsyncOpenAI(api_key=self.api_key)
-        api_input = self._messages_to_api(messages)
+        api_input = messages_to_api(messages)
 
         stream = await client.responses.create(
             model=self.model,
@@ -220,18 +212,6 @@ class OpenAiAdapter:
                 continue
 
     # ---- shared helpers -----------------------------------------------------
-
-    def _messages_to_api(self, messages: list[ChatMessage]) -> list[dict[str, Any]]:
-        """Convert ChatMessages to OpenAI Responses API input format."""
-        result: list[dict[str, Any]] = []
-        for m in messages:
-            msg: dict[str, Any] = {"role": m.role, "content": m.content or ""}
-            if m.role == "tool" and m.tool_call_id:
-                msg["tool_call_id"] = m.tool_call_id
-            if m.role == "assistant" and m.tool_calls:
-                msg["tool_calls"] = m.tool_calls
-            result.append(msg)
-        return result
 
     def _parse_response(self, response: Any) -> LlmResponse:
         output_items = getattr(response, "output", []) or []

@@ -2,16 +2,10 @@ from __future__ import annotations
 
 import os
 
-if (__package__ or "").startswith("backend"):
-    from backend.chat.adapters.openai_adapter import OpenAiAdapter
-    from backend.chat.adapters.openrouter_adapter import OpenRouterAdapter
-    from backend.chat.llm_client import LlmClient
-    from backend.env_loader import load_env_once
-else:
-    from chat.adapters.openai_adapter import OpenAiAdapter
-    from chat.adapters.openrouter_adapter import OpenRouterAdapter
-    from chat.llm_client import LlmClient
-    from env_loader import load_env_once
+from chat.adapters.openai_adapter import OpenAiAdapter
+from chat.adapters.openrouter_adapter import OpenRouterAdapter
+from chat.llm_client import LlmClient
+from env_loader import load_env_once
 
 
 def build_llm_client(

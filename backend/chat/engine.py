@@ -392,6 +392,14 @@ class ChatEngine:
                                     "reason": "repeated_identical_tool_call",
                                 },
                             )
+                        if requested_output_type == "report":
+                            final_text = (
+                                "I stopped because the model repeated the same tool call in "
+                                "this turn. I can continue once it emits a different tool "
+                                "call or a final answer based on existing results."
+                            )
+                            repeated_call_detected = True
+                            break
                         messages.append(
                             ChatMessage(
                                 role="system",

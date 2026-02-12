@@ -3,10 +3,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-if (__package__ or "").startswith("backend"):
-    from backend import meta
-else:
-    import meta
+import meta
 
 
 def worldline_db_path(worldline_id: str) -> Path:

@@ -13,6 +13,7 @@
   import { Plus } from "lucide-svelte";
   import { Trash2 } from "lucide-svelte";
   import { X } from "lucide-svelte";
+  import { getActiveWorldlineFromStorage } from "$lib/chat/activeWorldline";
 
   type AttachedConnector = {
     alias: string;
@@ -38,7 +39,7 @@
   let formSuccess = "";
 
   onMount(() => {
-    const saved = localStorage.getItem("textql_active_worldline");
+    const saved = getActiveWorldlineFromStorage();
     if (!saved) {
       loading = false;
       errorMessage = "No active worldline selected. Open Chat and select a worldline first.";
