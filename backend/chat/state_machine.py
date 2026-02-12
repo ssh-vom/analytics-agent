@@ -4,7 +4,15 @@ import logging
 from typing import Any, Callable
 
 TURN_STATE_TRANSITIONS: dict[str, set[str]] = {
-    "planning": {"data_fetching", "analyzing", "presenting", "completed", "error"},
+    "planning": {
+        "semantic_shortcut",
+        "data_fetching",
+        "analyzing",
+        "presenting",
+        "completed",
+        "error",
+    },
+    "semantic_shortcut": {"presenting", "completed", "error"},
     "data_fetching": {"analyzing", "presenting", "error", "completed"},
     "analyzing": {"data_fetching", "presenting", "error", "completed"},
     "presenting": {"analyzing", "error", "completed"},

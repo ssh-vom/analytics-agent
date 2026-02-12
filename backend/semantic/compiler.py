@@ -8,10 +8,12 @@ from semantic.types import (
     Filter,
     TimeRange,
     OrderBy,
+    Join,
     SemanticCatalog,
     Dataset,
     Column,
 )
+from semantic.catalog import build_joins_for_query
 
 
 def quote_identifier(identifier: str) -> str:
@@ -110,6 +112,26 @@ def compile_time_range(time_range: TimeRange) -> str | None:
     return " AND ".join(conditions)
 
 
+def compile_join(join: Join) -> str:
+    """Compile a JOIN clause."""
+    join_type = join.join_type.upper()
+    from_table = join.from_dataset
+    to_table = join.to_dataset
+
+    # Handle schema.table format
+    if "." not in from_table:
+        from_table = quote_identifier(from_table)
+    if "." not in to_table:
+        to_table = quote_identifier(to_table)
+
+    from_col = quote_identifier(join.from_column)
+    to_col = quote_identifier(join.to_column)
+
+    return (
+        f"{join_type} JOIN {to_table} ON {from_table}.{from_col} = {to_table}.{to_col}"
+    )
+
+
 def compile_query_spec(query_spec: QuerySpec, catalog: SemanticCatalog) -> str | None:
     """Compile a QuerySpec to SQL.
 
@@ -118,20 +140,36 @@ def compile_query_spec(query_spec: QuerySpec, catalog: SemanticCatalog) -> str |
     if not query_spec.dataset:
         return None
 
-    dataset = catalog.get_dataset(query_spec.dataset)
-    if not dataset:
+    primary_dataset = catalog.get_dataset(query_spec.dataset)
+    if not primary_dataset:
         return None
 
     # Build SELECT clause
     select_parts = []
 
-    # Add dimensions
+    # Add dimensions with table qualification
     for dim in query_spec.dimensions:
-        select_parts.append(quote_identifier(dim))
+        # Try to find which table this dimension belongs to
+        dim_found = False
+        for dataset in catalog.datasets:
+            for col in dataset.columns:
+                if col.name == dim:
+                    if "." in dataset.name:
+                        select_parts.append(f"{dataset.name}.{quote_identifier(dim)}")
+                    else:
+                        select_parts.append(
+                            f"{quote_identifier(dataset.name)}.{quote_identifier(dim)}"
+                        )
+                    dim_found = True
+                    break
+            if dim_found:
+                break
+        if not dim_found:
+            select_parts.append(quote_identifier(dim))
 
     # Add metrics
     for metric in query_spec.metrics:
-        select_parts.append(compile_metric(metric, dataset))
+        select_parts.append(compile_metric(metric, primary_dataset))
 
     if not select_parts:
         return None
@@ -144,6 +182,21 @@ def compile_query_spec(query_spec: QuerySpec, catalog: SemanticCatalog) -> str |
         from_clause = f"FROM {query_spec.dataset}"
     else:
         from_clause = f"FROM {quote_identifier(query_spec.dataset)}"
+
+    # Build JOIN clauses
+    join_clauses: list[str] = []
+
+    # Use explicit joins from query spec if provided
+    if query_spec.joins:
+        for join in query_spec.joins:
+            join_clauses.append(compile_join(join))
+    # Otherwise auto-build joins if multiple datasets are referenced
+    elif query_spec.additional_datasets:
+        joins = build_joins_for_query(
+            catalog, query_spec.dataset, query_spec.additional_datasets
+        )
+        for join in joins:
+            join_clauses.append(compile_join(join))
 
     # Build WHERE clause
     where_conditions = []
@@ -190,6 +243,11 @@ def compile_query_spec(query_spec: QuerySpec, catalog: SemanticCatalog) -> str |
 
     # Assemble SQL
     sql_parts = [select_clause, from_clause]
+
+    # Add JOIN clauses
+    for join_clause in join_clauses:
+        sql_parts.append(join_clause)
+
     if where_clause:
         sql_parts.append(where_clause)
     if group_clause:

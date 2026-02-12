@@ -20,7 +20,6 @@ export type WorldlineManagerContext = {
 
 export function createWorldlineManager(context: WorldlineManagerContext) {
   const {
-    threadId,
     setWorldlines,
     setActiveWorldlineId,
     persistPreferredWorldline,
@@ -31,7 +30,13 @@ export function createWorldlineManager(context: WorldlineManagerContext) {
     eventsByWorldline,
   } = context;
 
+  // Access threadId via context getter to get current value
+  function getThreadId(): string | null {
+    return context.threadId;
+  }
+
   async function refreshWorldlines(): Promise<void> {
+    const threadId = getThreadId();
     if (!threadId) {
       return;
     }
@@ -97,6 +102,7 @@ export function createWorldlineManager(context: WorldlineManagerContext) {
     }
 
     // If we have a thread but no worldline, create one lazily
+    const threadId = getThreadId();
     if (threadId) {
       onStatusChange("Creating worldline...");
       try {

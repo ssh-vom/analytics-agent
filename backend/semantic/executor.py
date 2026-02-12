@@ -3,40 +3,40 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from semantic.catalog import build_catalog_for_worldline
 from semantic.resolver import resolve_query
 from semantic.compiler import compile_query_spec, get_compilation_summary
-from semantic.types import ResolutionResult
+from semantic.types import ResolutionResult, SemanticCatalog
 
 if TYPE_CHECKING:
-    from duckdb_manager import DuckDBManager
+    from chat.llm_client import LlmClient
 
 logger = logging.getLogger(__name__)
 
 # Confidence threshold for using deterministic lane
-DETERMINISTIC_CONFIDENCE_THRESHOLD = 0.6
+DETERMINISTIC_CONFIDENCE_THRESHOLD = 0.8
 
 
 class SemanticExecutor:
     """Executes queries through the semantic layer when confidence is high."""
 
-    def __init__(self, duckdb_manager: DuckDBManager):
-        self.duckdb_manager = duckdb_manager
-        self._catalog_cache: dict[str, Any] = {}  # worldline_id -> catalog
+    def __init__(self, llm_client: LlmClient | None = None):
+        self.llm_client = llm_client
+        self._catalog_cache: dict[str, SemanticCatalog] = {}
 
     def get_or_build_catalog(self, worldline_id: str) -> SemanticCatalog | None:
         """Get cached catalog or build new one."""
         if worldline_id in self._catalog_cache:
             return self._catalog_cache[worldline_id]
 
-        catalog = build_catalog_for_worldline(worldline_id, self.duckdb_manager)
+        catalog = build_catalog_for_worldline(worldline_id, duckdb_manager=None)
         if catalog:
             self._catalog_cache[worldline_id] = catalog
         return catalog
 
-    def can_handle_query(
+    async def can_handle_query(
         self,
         user_message: str,
         worldline_id: str,
@@ -47,13 +47,15 @@ class SemanticExecutor:
             Tuple of (can_handle, resolution_result)
         """
         catalog = self.get_or_build_catalog(worldline_id)
-        if not catalog:
+        if not catalog or not catalog.datasets:
             return False, None
 
-        if not catalog.datasets:
-            return False, None
-
-        resolution = resolve_query(catalog, user_message)
+        resolution = await resolve_query(
+            user_query=user_message,
+            catalog=catalog,
+            llm_client=self.llm_client,
+            use_llm=self.llm_client is not None,
+        )
 
         # Need minimum confidence and at least one metric
         if resolution.confidence < DETERMINISTIC_CONFIDENCE_THRESHOLD:
@@ -64,34 +66,28 @@ class SemanticExecutor:
 
         return True, resolution
 
-    def execute_query(
+    def compile_resolution(
         self,
         resolution: ResolutionResult,
         worldline_id: str,
-    ) -> dict:
-        """Execute a resolved query.
+    ) -> dict[str, Any] | None:
+        """Compile a resolution to SQL.
 
         Returns:
-            Dict with sql, summary, and results preview
+            Dict with sql and summary, or None if compilation fails
         """
         catalog = self.get_or_build_catalog(worldline_id)
         if not catalog:
-            raise ValueError("No catalog available for worldline")
+            return None
 
-        # Compile to SQL
         sql = compile_query_spec(resolution.query_spec, catalog)
         if not sql:
-            raise ValueError("Failed to compile query")
-
-        # Get human-readable summary
-        summary = get_compilation_summary(resolution.query_spec)
+            return None
 
         return {
             "sql": sql,
-            "summary": summary,
+            "summary": get_compilation_summary(resolution.query_spec),
             "confidence": resolution.confidence,
-            "unmatched_terms": resolution.unmatched_terms,
-            "suggestions": resolution.suggestions,
         }
 
     def clear_cache(self, worldline_id: str | None = None):
@@ -102,16 +98,13 @@ class SemanticExecutor:
             self._catalog_cache.clear()
 
 
-def should_use_semantic_lane(
+async def should_use_semantic_lane(
     user_message: str,
     executor: SemanticExecutor,
     worldline_id: str,
 ) -> tuple[bool, ResolutionResult | None]:
-    """Determine if query should use semantic (deterministic) lane.
-
-    This is the entry point for dual-lane execution decision.
-    """
-    # Simple heuristics first
+    """Determine if query should use semantic (deterministic) lane."""
+    # Quick heuristic check - skip semantic for non-analytical queries
     analysis_patterns = [
         "sum",
         "total",
@@ -124,13 +117,8 @@ def should_use_semantic_lane(
         "how much",
         "calculate",
     ]
-
     msg_lower = user_message.lower()
-    has_analysis_intent = any(p in msg_lower for p in analysis_patterns)
-
-    if not has_analysis_intent:
-        # Likely a conversation or command, use agentic
+    if not any(p in msg_lower for p in analysis_patterns):
         return False, None
 
-    # Try semantic resolution
-    return executor.can_handle_query(user_message, worldline_id)
+    return await executor.can_handle_query(user_message, worldline_id)

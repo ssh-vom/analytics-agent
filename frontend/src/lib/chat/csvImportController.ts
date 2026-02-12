@@ -13,14 +13,21 @@ export type CSVImportContext = {
 
 export function createCSVImportController(context: CSVImportContext) {
   const {
-    uploadedFiles,
     setUploadedFiles,
     setStatusText,
     setSelectedContextTables,
     setWorldlineTables,
-    activeWorldlineId,
     removeUploadedFile,
   } = context;
+
+  // Access via context getters to get current values
+  function getUploadedFiles(): File[] {
+    return context.uploadedFiles;
+  }
+
+  function getActiveWorldlineId(): string {
+    return context.activeWorldlineId;
+  }
 
   function handleFileSelect(event: Event): void {
     const input = event.target as HTMLInputElement;
@@ -28,7 +35,8 @@ export function createCSVImportController(context: CSVImportContext) {
     if (csvFiles.length === 0) {
       return;
     }
-    setUploadedFiles([...uploadedFiles, ...csvFiles]);
+    const currentFiles = getUploadedFiles();
+    setUploadedFiles([...currentFiles, ...csvFiles]);
     setStatusText(
       csvFiles.length === 1
         ? `Attached ${csvFiles[0].name}. It will import when you send.`
@@ -45,7 +53,7 @@ export function createCSVImportController(context: CSVImportContext) {
       const result = await importCSV(worldlineId, file);
       removeUploadedFile(file.name);
 
-      if (activeWorldlineId === worldlineId) {
+      if (getActiveWorldlineId() === worldlineId) {
         setSelectedContextTables((prev) =>
           [...new Set([...prev, result.table_name])]
         );
@@ -65,6 +73,7 @@ export function createCSVImportController(context: CSVImportContext) {
   async function importUploadedFilesBeforeSend(
     worldlineId: string,
   ): Promise<void> {
+    const uploadedFiles = getUploadedFiles();
     if (uploadedFiles.length === 0) {
       return;
     }

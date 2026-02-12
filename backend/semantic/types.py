@@ -52,6 +52,27 @@ class SemanticCatalog:
 
 
 @dataclass
+class Join:
+    """A JOIN clause between two datasets."""
+
+    from_dataset: str
+    to_dataset: str
+    from_column: str
+    to_column: str
+    join_type: Literal["inner", "left", "right", "full"] = "left"
+
+
+@dataclass
+class ForeignKey:
+    """Foreign key relationship between tables."""
+
+    from_dataset: str
+    from_column: str
+    to_dataset: str
+    to_column: str
+
+
+@dataclass
 class QuerySpec:
     """User query specification for semantic SQL generation."""
 
@@ -66,12 +87,18 @@ class QuerySpec:
     # Aggregation
     grain: list[str] = field(default_factory=list)  # Group by these columns
 
+    # Joins
+    joins: list[Join] = field(default_factory=list)
+
     # Ordering and limits
     order_by: list[OrderBy] = field(default_factory=list)
     limit: int | None = 1000
 
     # Source
     dataset: str | None = None  # Primary dataset/table
+    additional_datasets: list[str] = field(
+        default_factory=list
+    )  # For multi-table queries
 
 
 @dataclass
