@@ -3,10 +3,18 @@
   import hljs from "highlight.js/lib/core";
   import python from "highlight.js/lib/languages/python";
   import sql from "highlight.js/lib/languages/sql";
+  import javascript from "highlight.js/lib/languages/javascript";
+  import json from "highlight.js/lib/languages/json";
+  import bash from "highlight.js/lib/languages/bash";
   import { sanitizeCodeArtifacts } from "$lib/codeSanitizer";
 
   hljs.registerLanguage("python", python);
   hljs.registerLanguage("sql", sql);
+  hljs.registerLanguage("javascript", javascript);
+  hljs.registerLanguage("typescript", javascript);
+  hljs.registerLanguage("json", json);
+  hljs.registerLanguage("bash", bash);
+  hljs.registerLanguage("shell", bash);
 
   export let code = "";
   export let language = "";
@@ -35,12 +43,21 @@
       return "";
     }
     try {
-      const normalized = lang.includes("python")
-        ? "python"
-        : lang.includes("sql")
-          ? "sql"
-          : "plaintext";
-      if (normalized === "plaintext") {
+      const langMap: Record<string, string> = {
+        python: "python",
+        py: "python",
+        sql: "sql",
+        javascript: "javascript",
+        js: "javascript",
+        typescript: "typescript",
+        ts: "typescript",
+        json: "json",
+        bash: "bash",
+        shell: "shell",
+        sh: "bash",
+      };
+      const normalized = langMap[lang] ?? (lang.includes("python") ? "python" : lang.includes("sql") ? "sql" : null);
+      if (!normalized) {
         return escapeHtml(input);
       }
       return hljs.highlight(input, { language: normalized }).value;
@@ -141,9 +158,9 @@
 
 <style>
   .code-block {
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     border: 1px solid var(--border-soft);
-    background: var(--bg-0);
+    background: #1e1e2e;
     overflow: hidden;
     contain: layout style paint;
     will-change: auto;
@@ -153,28 +170,30 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    border-bottom: 1px solid var(--border-soft);
-    padding: 4px 10px;
-    font-size: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 6px var(--space-4);
+    font-size: 11px;
     font-family: var(--font-mono);
-    color: var(--text-dim);
-    letter-spacing: 0.04em;
+    color: #6c7086;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
+    background: rgba(0, 0, 0, 0.15);
   }
 
   pre {
     margin: 0;
-    padding: var(--space-3);
+    padding: var(--space-4) var(--space-5);
     overflow-x: auto;
     overflow-y: auto;
-    color: var(--text-primary);
+    color: #cdd6f4;
     font-family: var(--font-mono);
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: 14px;
+    line-height: 1.65;
     min-height: 48px;
     max-height: 60vh;
     white-space: pre-wrap;
     scroll-behavior: smooth;
+    tab-size: 4;
   }
 
   pre:has(code) {
@@ -185,47 +204,84 @@
     font-family: inherit;
   }
 
+  /* --- Catppuccin Mocha-inspired syntax theme --- */
+
   :global(.hljs-keyword),
-  :global(.hljs-selector-tag),
-  :global(.hljs-type) {
-    color: #81a1c1;
+  :global(.hljs-selector-tag) {
+    color: #cba6f7;
+    font-weight: 500;
+  }
+
+  :global(.hljs-type),
+  :global(.hljs-built_in) {
+    color: #f9e2af;
   }
 
   :global(.hljs-title),
   :global(.hljs-title.class_),
   :global(.hljs-title.function_) {
-    color: #88c0d0;
+    color: #89b4fa;
   }
 
   :global(.hljs-string),
   :global(.hljs-attr),
   :global(.hljs-template-tag),
   :global(.hljs-template-variable) {
-    color: #a3be8c;
+    color: #a6e3a1;
   }
 
   :global(.hljs-number),
-  :global(.hljs-literal),
+  :global(.hljs-literal) {
+    color: #fab387;
+  }
+
   :global(.hljs-symbol),
   :global(.hljs-bullet) {
-    color: #b48ead;
+    color: #f38ba8;
   }
 
   :global(.hljs-comment),
   :global(.hljs-quote) {
-    color: #616e88;
+    color: #6c7086;
     font-style: italic;
   }
 
-  :global(.hljs-operator),
+  :global(.hljs-operator) {
+    color: #89dceb;
+  }
+
   :global(.hljs-punctuation) {
-    color: #c0c7d5;
+    color: #9399b2;
+  }
+
+  :global(.hljs-variable),
+  :global(.hljs-params) {
+    color: #f2cdcd;
+  }
+
+  :global(.hljs-meta),
+  :global(.hljs-meta keyword) {
+    color: #f5c2e7;
+  }
+
+  :global(.hljs-regexp) {
+    color: #f5c2e7;
+  }
+
+  :global(.hljs-addition) {
+    color: #a6e3a1;
+    background: rgba(166, 227, 161, 0.1);
+  }
+
+  :global(.hljs-deletion) {
+    color: #f38ba8;
+    background: rgba(243, 139, 168, 0.1);
   }
 
   .cursor {
     display: inline-block;
     margin-left: 1px;
-    color: var(--text-dim);
+    color: #cba6f7;
     animation: blink 0.9s step-end infinite;
   }
 

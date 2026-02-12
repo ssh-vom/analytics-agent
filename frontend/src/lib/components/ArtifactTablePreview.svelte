@@ -341,12 +341,12 @@
     width: 100%;
     border-collapse: collapse;
     min-width: 540px;
-    font-size: 12px;
+    font-size: 13px;
   }
 
   th,
   td {
-    padding: 8px 10px;
+    padding: 10px 12px;
     border-bottom: 1px solid var(--border-soft);
     text-align: left;
     white-space: nowrap;
@@ -356,10 +356,11 @@
     position: static;
     background: var(--surface-1);
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: 11px;
     font-family: var(--font-mono);
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    font-weight: 600;
   }
 
   th.sticky {

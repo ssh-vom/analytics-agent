@@ -180,41 +180,47 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--space-1) var(--space-3);
+    padding: var(--space-2) var(--space-4);
     background: var(--bg-1);
   }
 
   .section-title {
     font-family: var(--font-mono);
     font-size: 10px;
-    font-weight: 500;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-dim);
   }
 
   .section-toggle {
-    padding: 1px var(--space-2);
+    padding: 3px var(--space-3);
     background: transparent;
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     color: var(--text-dim);
     font-size: 10px;
     cursor: pointer;
-    transition: color var(--transition-fast);
+    transition: all var(--transition-fast);
   }
 
   .section-toggle:hover {
     color: var(--text-secondary);
     border-color: var(--border-medium);
+    background: var(--surface-hover);
   }
 
   .code-wrapper {
-    padding: var(--space-3);
+    padding: 0;
+  }
+
+  .code-wrapper :global(.code-block) {
+    border: none;
+    border-radius: 0;
   }
 
   .output-content {
-    padding: var(--space-3);
+    padding: var(--space-4);
   }
 
   .error-message {

@@ -30,7 +30,8 @@
   .table-wrap {
     overflow-x: auto;
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
+    background: var(--surface-0);
   }
 
   table {
@@ -42,7 +43,7 @@
 
   th,
   td {
-    padding: 8px 12px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--border-soft);
     text-align: left;
     white-space: nowrap;
@@ -52,15 +53,19 @@
     color: var(--text-dim);
     font-family: var(--font-mono);
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
+    background: var(--surface-1);
+    position: sticky;
+    top: 0;
+    z-index: 1;
   }
 
   td {
     color: var(--text-primary);
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 13px;
   }
 
   tbody tr:last-child td {
@@ -69,5 +74,9 @@
 
   tbody tr:hover td {
     background: var(--surface-hover);
+  }
+
+  tbody tr {
+    transition: background var(--transition-fast);
   }
 </style>

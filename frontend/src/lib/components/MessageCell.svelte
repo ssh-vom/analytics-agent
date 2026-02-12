@@ -197,18 +197,19 @@
   .markdown-content :global(code) {
     font-family: var(--font-mono);
     font-size: 13px;
-    background: var(--surface-1);
+    background: rgba(30, 30, 46, 0.5);
     border: 1px solid var(--border-soft);
     border-radius: var(--radius-sm);
-    padding: 2px 6px;
+    padding: 2px 7px;
+    color: #cba6f7;
   }
 
   .markdown-content :global(pre) {
-    margin: var(--space-2) 0;
-    padding: var(--space-3);
+    margin: var(--space-3) 0;
+    padding: var(--space-4) var(--space-5);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
-    background: var(--bg-0);
+    border-radius: var(--radius-lg);
+    background: #1e1e2e;
     overflow-x: auto;
   }
 
@@ -216,16 +217,18 @@
     padding: 0;
     border: none;
     background: transparent;
-    font-size: 12px;
-    line-height: 1.6;
+    font-size: 14px;
+    line-height: 1.65;
+    color: #cdd6f4;
   }
 
   .markdown-content :global(blockquote) {
-    margin: var(--space-2) 0;
-    padding: var(--space-2) var(--space-3);
-    border-left: 2px solid var(--border-medium);
+    margin: var(--space-3) 0;
+    padding: var(--space-3) var(--space-4);
+    border-left: 3px solid var(--accent-green);
     color: var(--text-muted);
     background: var(--surface-1);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
   }
 
   .markdown-content :global(a) {
