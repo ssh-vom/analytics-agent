@@ -1,11 +1,11 @@
 import unittest
 
-from chat.engine import _extract_output_type, _extract_selected_external_aliases
+from chat.context_parser import extract_output_type, extract_selected_external_aliases
 
 
 class ChatContextParserTests(unittest.TestCase):
     def test_returns_none_when_context_missing(self) -> None:
-        self.assertIsNone(_extract_selected_external_aliases("hello"))
+        self.assertIsNone(extract_selected_external_aliases("hello"))
 
     def test_parses_selected_connector_aliases(self) -> None:
         message = """analyze revenue
@@ -16,7 +16,7 @@ class ChatContextParserTests(unittest.TestCase):
 </context>
 """
         self.assertEqual(
-            _extract_selected_external_aliases(message),
+            extract_selected_external_aliases(message),
             ["warehouse", "archive"],
         )
 
@@ -27,7 +27,7 @@ class ChatContextParserTests(unittest.TestCase):
 - connectors=none
 </context>
 """
-        self.assertEqual(_extract_selected_external_aliases(message), [])
+        self.assertEqual(extract_selected_external_aliases(message), [])
 
     def test_parses_output_type_report(self) -> None:
         message = """please analyze
@@ -36,7 +36,7 @@ class ChatContextParserTests(unittest.TestCase):
 - output_type=report
 </context>
 """
-        self.assertEqual(_extract_output_type(message), "report")
+        self.assertEqual(extract_output_type(message), "report")
 
     def test_parses_output_type_dashboard(self) -> None:
         message = """please analyze
@@ -45,7 +45,7 @@ class ChatContextParserTests(unittest.TestCase):
 - output_type=dashboard
 </context>
 """
-        self.assertEqual(_extract_output_type(message), "dashboard")
+        self.assertEqual(extract_output_type(message), "dashboard")
 
     def test_parses_output_type_none_as_unset(self) -> None:
         message = """please analyze
@@ -54,7 +54,7 @@ class ChatContextParserTests(unittest.TestCase):
 - output_type=none
 </context>
 """
-        self.assertIsNone(_extract_output_type(message))
+        self.assertIsNone(extract_output_type(message))
 
 
 if __name__ == "__main__":

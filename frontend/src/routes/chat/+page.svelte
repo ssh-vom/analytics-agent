@@ -49,6 +49,17 @@
     withoutStreamingState,
   } from "$lib/chat/streamState";
   import {
+    appendRuntimeStateTransition,
+    extractPersistedStateTrace,
+    runtimeStatePath,
+    runtimeStateReasons,
+    stateTransitionFromDelta,
+    withRuntimeStateTrace,
+    type RuntimeStateTransition,
+  } from "$lib/chat/stateTrace";
+  import { computeWorldlineQueueStats } from "$lib/chat/queueStats";
+  import { statusFromDelta, statusFromStreamEvent } from "$lib/chat/streamStatus";
+  import {
     pickActiveJobWorldlineId,
     withAppendedWorldlineEvent,
     withVisibleWorldline,
@@ -97,11 +108,6 @@
   let activeWorldlineQueueDepth = 0;
   let activeWorldlineRunningJobs = 0;
   let activeWorldlineQueuedJobs = 0;
-  type RuntimeStateTransition = {
-    from_state: string | null;
-    to_state: string;
-    reason: string;
-  };
   let stateTraceByWorldline: Record<string, RuntimeStateTransition[]> = {};
 
   // CSV Import state
@@ -130,83 +136,16 @@
   $: currentThread = $activeThread;
   $: isActiveWorldlineSending = Boolean(activeWorldlineId && sendingByWorldline[activeWorldlineId]);
   $: activeStateTrace = stateTraceByWorldline[activeWorldlineId] ?? [];
-  $: activeStatePath = activeStateTrace.map((entry) => entry.to_state).join(" -> ");
-  $: activeStateReasons = activeStateTrace
-    .map((entry) => `${entry.to_state}: ${entry.reason}`)
-    .join(" | ");
+  $: activeStatePath = runtimeStatePath(activeStateTrace);
+  $: activeStateReasons = runtimeStateReasons(activeStateTrace);
   $: hasDraftOutput =
     activeStreamingState.text.length > 0 || activeStreamingState.toolCalls.size > 0;
   $: isEmptyChat = cells.length === 0 && !hasDraftOutput && !isActiveWorldlineSending;
-  $: activeWorldlineQueueDepth = activeWorldlineId
-    ? Object.values($chatJobs.jobsById).filter(
-        (job) =>
-          job.worldline_id === activeWorldlineId &&
-          (job.status === "queued" || job.status === "running"),
-      ).length
-    : 0;
   $: {
-    let running = 0;
-    let queued = 0;
-    if (activeWorldlineId) {
-      for (const job of Object.values($chatJobs.jobsById)) {
-        if (job.worldline_id !== activeWorldlineId) {
-          continue;
-        }
-        if (job.status === "running") {
-          running += 1;
-        } else if (job.status === "queued") {
-          queued += 1;
-        }
-      }
-    }
-    activeWorldlineRunningJobs = running;
-    activeWorldlineQueuedJobs = queued;
-  }
-
-  function normalizeRuntimeStateTransition(value: unknown): RuntimeStateTransition | null {
-    if (!value || typeof value !== "object") {
-      return null;
-    }
-    const record = value as Record<string, unknown>;
-    const toState = typeof record.to === "string" ? record.to : null;
-    if (!toState) {
-      return null;
-    }
-    const fromState =
-      typeof record.from === "string"
-        ? record.from
-        : record.from === null
-          ? null
-          : null;
-    const reason =
-      typeof record.reason === "string" && record.reason.length > 0
-        ? record.reason
-        : "unspecified";
-    return {
-      from_state: fromState,
-      to_state: toState,
-      reason,
-    };
-  }
-
-  function extractPersistedStateTrace(events: TimelineEvent[]): RuntimeStateTransition[] {
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index];
-      if (event.type !== "assistant_message") {
-        continue;
-      }
-      const rawTrace = event.payload?.state_trace;
-      if (!Array.isArray(rawTrace)) {
-        continue;
-      }
-      const parsed = rawTrace
-        .map((entry) => normalizeRuntimeStateTransition(entry))
-        .filter((entry): entry is RuntimeStateTransition => entry !== null);
-      if (parsed.length > 0) {
-        return parsed.slice(-24);
-      }
-    }
-    return [];
+    const queueStats = computeWorldlineQueueStats(activeWorldlineId, $chatJobs.jobsById);
+    activeWorldlineQueueDepth = queueStats.depth;
+    activeWorldlineRunningJobs = queueStats.running;
+    activeWorldlineQueuedJobs = queueStats.queued;
   }
 
   function handleOpenWorldlineEvent(event: Event): void {
@@ -357,17 +296,6 @@
       streamingStateByWorldline,
       worldlineId,
     );
-  }
-
-  function appendStateTransition(
-    worldlineId: string,
-    transition: RuntimeStateTransition,
-  ): void {
-    const existing = stateTraceByWorldline[worldlineId] ?? [];
-    stateTraceByWorldline = {
-      ...stateTraceByWorldline,
-      [worldlineId]: [...existing, transition].slice(-24),
-    };
   }
 
   async function queuePromptAsJob(message: string, worldlineId: string): Promise<void> {
@@ -555,10 +483,11 @@
     eventsByWorldline = withWorldlineEvents(eventsByWorldline, worldlineId, events);
     const persistedTrace = extractPersistedStateTrace(events);
     if (persistedTrace.length > 0 || !stateTraceByWorldline[worldlineId]) {
-      stateTraceByWorldline = {
-        ...stateTraceByWorldline,
-        [worldlineId]: persistedTrace,
-      };
+      stateTraceByWorldline = withRuntimeStateTrace(
+        stateTraceByWorldline,
+        worldlineId,
+        persistedTrace,
+      );
     }
   }
 
@@ -567,10 +496,11 @@
     if (event.type === "assistant_message") {
       const trace = extractPersistedStateTrace([event]);
       if (trace.length > 0) {
-        stateTraceByWorldline = {
-          ...stateTraceByWorldline,
-          [worldlineId]: trace,
-        };
+        stateTraceByWorldline = withRuntimeStateTrace(
+          stateTraceByWorldline,
+          worldlineId,
+          trace,
+        );
       }
     }
   }
@@ -742,10 +672,11 @@
     shouldAutoScroll = true;
     resetStreamingDrafts(requestWorldlineId);
     selectedArtifactId = null;
-    stateTraceByWorldline = {
-      ...stateTraceByWorldline,
-      [requestWorldlineId]: [],
-    };
+    stateTraceByWorldline = withRuntimeStateTrace(
+      stateTraceByWorldline,
+      requestWorldlineId,
+      [],
+    );
 
     // Optimistic user message — show immediately in the feed
     const { id: optimisticId, event: optimisticEvent } = createOptimisticUserMessage(message);
@@ -788,15 +719,7 @@
           }
 
           if (activeWorldlineId === frameWorldlineId) {
-            if (frame.event.type === "tool_call_sql") {
-              statusText = "Running SQL...";
-            } else if (frame.event.type === "tool_call_python") {
-              statusText = "Running Python...";
-            } else if (frame.event.type === "assistant_message") {
-              statusText = "Done";
-            } else {
-              statusText = "Working...";
-            }
+            statusText = statusFromStreamEvent(frame.event.type);
           }
         },
         onDelta: (frame) => {
@@ -804,24 +727,15 @@
           ensureWorldlineVisible(frameWorldlineId);
           const frameStreamingState = streamingStateByWorldline[frameWorldlineId] ?? createStreamingState();
           setStreamingState(frameWorldlineId, applyDelta(frameStreamingState, frame.delta));
-          if (frame.delta.type === "state_transition") {
-            const toState =
-              typeof frame.delta.to_state === "string" ? frame.delta.to_state : "";
-            if (toState) {
-              const fromState =
-                typeof frame.delta.from_state === "string" ? frame.delta.from_state : null;
-              const reason =
-                typeof frame.delta.reason === "string" && frame.delta.reason.length > 0
-                  ? frame.delta.reason
-                  : "unspecified";
-              appendStateTransition(frameWorldlineId, {
-                from_state: fromState,
-                to_state: toState,
-                reason,
-              });
-              if (activeWorldlineId === frameWorldlineId) {
-                statusText = `State: ${toState.replace(/_/g, " ")}`;
-              }
+          const stateTransition = stateTransitionFromDelta(frame.delta);
+          if (stateTransition) {
+            stateTraceByWorldline = appendRuntimeStateTransition(
+              stateTraceByWorldline,
+              frameWorldlineId,
+              stateTransition,
+            );
+            if (activeWorldlineId === frameWorldlineId) {
+              statusText = `State: ${stateTransition.to_state.replace(/_/g, " ")}`;
             }
             if (activeWorldlineId === frameWorldlineId) {
               scrollFeedToBottom();
@@ -829,18 +743,9 @@
             return;
           }
           if (activeWorldlineId === frameWorldlineId) {
-            if (frame.delta.skipped) {
-              if (frame.delta.reason === "invalid_tool_payload") {
-                statusText = "Retrying after invalid tool payload...";
-              } else {
-                statusText = "Skipped repeated tool call...";
-              }
-            } else if (frame.delta.type === "assistant_text" && !frame.delta.done) {
-              statusText = "Composing response...";
-            } else if (frame.delta.type === "tool_call_sql" && !frame.delta.done) {
-              statusText = "Drafting SQL...";
-            } else if (frame.delta.type === "tool_call_python" && !frame.delta.done) {
-              statusText = "Drafting Python...";
+            const deltaStatus = statusFromDelta(frame.delta);
+            if (deltaStatus) {
+              statusText = deltaStatus;
             }
             scrollFeedToBottom();
           }

@@ -23,6 +23,19 @@ from chat.llm_client import (
     ToolDefinition,
 )
 from chat.message_builder import build_llm_messages_from_events
+from chat.context_parser import extract_output_type, extract_selected_external_aliases
+from chat.policy import (
+    missing_required_terminal_tools as find_missing_required_terminal_tools,
+    required_terminal_tools as determine_required_terminal_tools,
+    user_requested_rerun as user_requested_rerun_hint,
+)
+from chat.report_fallback import (
+    AUTO_REPORT_CODE,
+    artifact_is_pdf,
+    assert_auto_report_code_compiles,
+    events_contain_pdf_artifact,
+)
+from chat.state_machine import transition_state
 from chat.streaming_bridge import stream_llm_response
 from chat.tooling import (
     normalize_tool_arguments,
@@ -53,518 +66,7 @@ _ARTIFACT_FILENAME_PATTERN = re.compile(
     r"['\"]([^'\"\n\r]+\.(?:csv|png|jpg|jpeg|pdf|svg|json|parquet|xlsx|html))['\"]",
     re.IGNORECASE,
 )
-_RERUN_HINT_PATTERN = re.compile(
-    r"\b(rerun|re-run|run again|regenerate|recompute|refresh|overwrite|rebuild)\b",
-    re.IGNORECASE,
-)
-_PYTHON_REQUIRED_HINT_PATTERN = re.compile(
-    r"\b(python|plot|chart|graph|visuali[sz]e|matplotlib|pandas|data\s*frame|histogram|scatter|heatmap)\b",
-    re.IGNORECASE,
-)
 _MAX_REQUIRED_TOOL_ENFORCEMENT_RETRIES = 2
-
-_TURN_STATE_TRANSITIONS: dict[str, set[str]] = {
-    "planning": {"data_fetching", "analyzing", "presenting", "completed", "error"},
-    "data_fetching": {"analyzing", "presenting", "error", "completed"},
-    "analyzing": {"data_fetching", "presenting", "error", "completed"},
-    "presenting": {"analyzing", "error", "completed"},
-    "error": {"planning", "completed"},
-    "completed": set(),
-}
-
-_AUTO_REPORT_CODE = r"""
-from datetime import datetime
-from textwrap import shorten
-
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.patches import FancyBboxPatch, Rectangle
-
-try:
-    import pandas as pd
-except Exception:
-    pd = None
-
-
-COLORS = {
-    "ink": "#0F172A",
-    "muted": "#475569",
-    "paper": "#F7FAFC",
-    "card": "#FFFFFF",
-    "brand": "#1D4ED8",
-    "brand_dark": "#1E3A8A",
-    "accent": "#0EA5E9",
-    "ok": "#047857",
-    "grid": "#CBD5E1",
-}
-
-plt.rcParams.update(
-    {
-        "figure.facecolor": COLORS["paper"],
-        "axes.facecolor": COLORS["card"],
-        "axes.edgecolor": COLORS["grid"],
-        "axes.labelcolor": COLORS["ink"],
-        "xtick.color": COLORS["muted"],
-        "ytick.color": COLORS["muted"],
-        "font.size": 10,
-        "axes.titleweight": "bold",
-    }
-)
-
-
-def _load_dataframe():
-    frame = None
-    if "LATEST_SQL_DF" in globals() and LATEST_SQL_DF is not None:
-        try:
-            frame = LATEST_SQL_DF.copy()
-        except Exception:
-            frame = LATEST_SQL_DF
-
-    if frame is None and "LATEST_SQL_RESULT" in globals() and pd is not None:
-        payload = LATEST_SQL_RESULT or {}
-        columns = [
-            column.get("name", "")
-            for column in (payload.get("columns") or [])
-            if isinstance(column, dict)
-        ]
-        rows = payload.get("rows") or []
-        try:
-            frame = pd.DataFrame(rows, columns=columns)
-        except Exception:
-            frame = pd.DataFrame()
-
-    if pd is not None and frame is None:
-        frame = pd.DataFrame()
-    return frame
-
-
-def _numeric_columns(frame):
-    if pd is None:
-        return []
-    out = []
-    for col in frame.columns:
-        try:
-            series = pd.to_numeric(frame[col], errors="coerce")
-            if series.notna().sum() >= 2:
-                out.append(col)
-        except Exception:
-            continue
-    return out
-
-
-def _categorical_columns(frame, numeric_cols):
-    out = []
-    for col in frame.columns:
-        if col in numeric_cols:
-            continue
-        try:
-            non_null = frame[col].dropna()
-            if non_null.empty:
-                continue
-            if non_null.nunique() <= 40:
-                out.append(col)
-        except Exception:
-            continue
-    return out
-
-
-def _datetime_column(frame):
-    if pd is None:
-        return None
-    for col in frame.columns:
-        try:
-            parsed = pd.to_datetime(frame[col], errors="coerce", utc=False)
-            valid_ratio = float(parsed.notna().mean()) if len(parsed) else 0.0
-            if valid_ratio >= 0.7 and parsed.nunique(dropna=True) >= 3:
-                return col
-        except Exception:
-            continue
-    return None
-
-
-def _fmt_num(value):
-    try:
-        number = float(value)
-    except Exception:
-        return str(value)
-    magnitude = abs(number)
-    if magnitude >= 1_000_000_000:
-        return f"{number/1_000_000_000:.2f}B"
-    if magnitude >= 1_000_000:
-        return f"{number/1_000_000:.2f}M"
-    if magnitude >= 1_000:
-        return f"{number/1_000:.2f}K"
-    if magnitude >= 100:
-        return f"{number:,.0f}"
-    if magnitude >= 10:
-        return f"{number:,.1f}"
-    return f"{number:,.2f}"
-
-
-def _fmt_cell(value):
-    if value is None:
-        return ""
-    if isinstance(value, float):
-        return _fmt_num(value)
-    if isinstance(value, int):
-        return f"{value:,}"
-    text = str(value)
-    return shorten(text.replace("\n", " "), width=28, placeholder="...")
-
-
-def _render_cover(pdf, *, rows, cols, num_cols, cat_cols, generated_at):
-    fig = plt.figure(figsize=(11, 8.5), facecolor=COLORS["paper"])
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.axis("off")
-
-    ax.add_patch(Rectangle((0, 0.78), 1, 0.22, transform=ax.transAxes, color=COLORS["brand_dark"]))
-    ax.text(0.06, 0.90, "TextQL Executive Report", color="white", fontsize=28, fontweight="bold", transform=ax.transAxes)
-    ax.text(0.06, 0.84, f"Generated {generated_at}", color="#DBEAFE", fontsize=11, transform=ax.transAxes)
-
-    metrics = [
-        ("Rows", f"{rows:,}"),
-        ("Columns", f"{cols:,}"),
-        ("Numeric Fields", f"{num_cols:,}"),
-        ("Categorical Fields", f"{cat_cols:,}"),
-    ]
-    x_positions = [0.06, 0.30, 0.54, 0.78]
-    for (label, value), x in zip(metrics, x_positions):
-        card = FancyBboxPatch(
-            (x, 0.52),
-            0.16,
-            0.18,
-            boxstyle="round,pad=0.012,rounding_size=0.01",
-            facecolor=COLORS["card"],
-            edgecolor=COLORS["grid"],
-            linewidth=1.0,
-            transform=ax.transAxes,
-        )
-        ax.add_patch(card)
-        ax.text(x + 0.08, 0.63, value, ha="center", va="center", fontsize=18, fontweight="bold", color=COLORS["brand"], transform=ax.transAxes)
-        ax.text(x + 0.08, 0.56, label, ha="center", va="center", fontsize=10, color=COLORS["muted"], transform=ax.transAxes)
-
-    ax.text(
-        0.06,
-        0.40,
-        "This report summarizes the latest SQL result and includes key descriptive charts.",
-        color=COLORS["ink"],
-        fontsize=12,
-        transform=ax.transAxes,
-    )
-    ax.text(
-        0.06,
-        0.34,
-        "Tip: narrow your SQL result to focused business slices for the most actionable report.",
-        color=COLORS["muted"],
-        fontsize=10,
-        transform=ax.transAxes,
-    )
-    pdf.savefig(fig)
-    plt.close(fig)
-
-
-def _render_preview_page(pdf, frame):
-    fig = plt.figure(figsize=(11, 8.5), facecolor=COLORS["paper"])
-    fig.suptitle("Data Snapshot", fontsize=18, fontweight="bold", color=COLORS["ink"], y=0.97)
-    ax = fig.add_axes([0.04, 0.08, 0.92, 0.82])
-    ax.axis("off")
-
-    max_cols = min(7, len(frame.columns))
-    max_rows = min(14, len(frame.index))
-    preview = frame.iloc[:max_rows, :max_cols].copy()
-
-    col_labels = [shorten(str(col), width=20, placeholder="...") for col in preview.columns]
-    rows = [[_fmt_cell(v) for v in row] for row in preview.values.tolist()]
-
-    if not rows:
-        ax.text(0.02, 0.5, "No rows available in the latest SQL result.", fontsize=12, color=COLORS["muted"], transform=ax.transAxes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        return
-
-    table = ax.table(
-        cellText=rows,
-        colLabels=col_labels,
-        cellLoc="left",
-        colLoc="left",
-        bbox=[0.0, 0.0, 1.0, 0.92],
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8.5)
-
-    for (row, col), cell in table.get_celld().items():
-        cell.set_edgecolor(COLORS["grid"])
-        if row == 0:
-            cell.set_facecolor("#E2E8F0")
-            cell.set_text_props(weight="bold", color=COLORS["ink"])
-        elif row % 2 == 0:
-            cell.set_facecolor("#F8FAFC")
-        else:
-            cell.set_facecolor("#FFFFFF")
-
-    ax.text(
-        0.0,
-        0.95,
-        f"Showing first {max_rows} rows and first {max_cols} columns",
-        fontsize=10,
-        color=COLORS["muted"],
-        transform=ax.transAxes,
-    )
-    pdf.savefig(fig)
-    plt.close(fig)
-
-
-def _render_numeric_summary(pdf, frame, numeric_cols):
-    fig = plt.figure(figsize=(11, 8.5), facecolor=COLORS["paper"])
-    fig.suptitle("Numeric Field Summary", fontsize=18, fontweight="bold", color=COLORS["ink"], y=0.97)
-    ax = fig.add_axes([0.04, 0.08, 0.92, 0.82])
-    ax.axis("off")
-
-    if pd is None or not numeric_cols:
-        ax.text(0.02, 0.5, "No numeric columns available for descriptive statistics.", fontsize=12, color=COLORS["muted"], transform=ax.transAxes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        return
-
-    limited = numeric_cols[:8]
-    stats = []
-    for col in limited:
-        series = pd.to_numeric(frame[col], errors="coerce").dropna()
-        if series.empty:
-            continue
-        stats.append(
-            [
-                shorten(str(col), width=24, placeholder="..."),
-                f"{int(series.count()):,}",
-                _fmt_num(series.mean()),
-                _fmt_num(series.median()),
-                _fmt_num(series.min()),
-                _fmt_num(series.max()),
-            ]
-        )
-
-    if not stats:
-        ax.text(0.02, 0.5, "Numeric columns were detected but no valid numeric values were found.", fontsize=12, color=COLORS["muted"], transform=ax.transAxes)
-        pdf.savefig(fig)
-        plt.close(fig)
-        return
-
-    table = ax.table(
-        cellText=stats,
-        colLabels=["Column", "Count", "Mean", "Median", "Min", "Max"],
-        cellLoc="left",
-        colLoc="left",
-        bbox=[0.0, 0.05, 1.0, 0.87],
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    for (row, _col), cell in table.get_celld().items():
-        cell.set_edgecolor(COLORS["grid"])
-        if row == 0:
-            cell.set_facecolor("#E2E8F0")
-            cell.set_text_props(weight="bold", color=COLORS["ink"])
-        elif row % 2 == 0:
-            cell.set_facecolor("#F8FAFC")
-        else:
-            cell.set_facecolor("#FFFFFF")
-
-    ax.text(0.0, 0.95, "Computed from the latest SQL result only.", fontsize=10, color=COLORS["muted"], transform=ax.transAxes)
-    pdf.savefig(fig)
-    plt.close(fig)
-
-
-def _render_histogram(pdf, frame, numeric_col):
-    if pd is None:
-        return
-    series = pd.to_numeric(frame[numeric_col], errors="coerce").dropna()
-    if series.empty:
-        return
-
-    fig, ax = plt.subplots(figsize=(11, 8.5), facecolor=COLORS["paper"])
-    bins = min(24, max(6, int(series.shape[0] ** 0.5)))
-    ax.hist(series, bins=bins, color=COLORS["brand"], alpha=0.9, edgecolor="white")
-    ax.set_title(f"Distribution: {numeric_col}", fontsize=16, pad=14)
-    ax.set_xlabel(str(numeric_col))
-    ax.set_ylabel("Count")
-    ax.grid(axis="y", alpha=0.25)
-    pdf.savefig(fig)
-    plt.close(fig)
-
-
-def _render_category_bar(pdf, frame, category_col, numeric_col):
-    if pd is None:
-        return
-    working = frame[[category_col, numeric_col]].copy()
-    working[numeric_col] = pd.to_numeric(working[numeric_col], errors="coerce")
-    working = working.dropna(subset=[numeric_col])
-    if working.empty:
-        return
-
-    grouped = (
-        working.groupby(category_col, dropna=False)[numeric_col]
-        .sum()
-        .sort_values(ascending=False)
-        .head(10)
-    )
-    if grouped.empty:
-        return
-
-    labels = [shorten(str(idx), width=22, placeholder="...") for idx in grouped.index]
-    values = grouped.values
-
-    fig, ax = plt.subplots(figsize=(11, 8.5), facecolor=COLORS["paper"])
-    bars = ax.bar(labels, values, color=COLORS["accent"], edgecolor="white")
-    ax.set_title(f"Top {category_col} by {numeric_col}", fontsize=16, pad=14)
-    ax.set_xlabel(str(category_col))
-    ax.set_ylabel(f"Sum of {numeric_col}")
-    ax.grid(axis="y", alpha=0.25)
-    ax.tick_params(axis="x", rotation=20)
-    for bar in bars:
-        value = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2, value, _fmt_num(value), ha="center", va="bottom", fontsize=8, color=COLORS["muted"])
-    pdf.savefig(fig)
-    plt.close(fig)
-
-
-def _render_trend(pdf, frame, datetime_col, numeric_col):
-    if pd is None:
-        return
-    working = frame[[datetime_col, numeric_col]].copy()
-    working[datetime_col] = pd.to_datetime(working[datetime_col], errors="coerce", utc=False)
-    working[numeric_col] = pd.to_numeric(working[numeric_col], errors="coerce")
-    working = working.dropna(subset=[datetime_col, numeric_col])
-    if working.empty:
-        return
-
-    daily = (
-        working.groupby(working[datetime_col].dt.date)[numeric_col]
-        .sum()
-        .sort_index()
-    )
-    if daily.shape[0] < 2:
-        return
-
-    fig, ax = plt.subplots(figsize=(11, 8.5), facecolor=COLORS["paper"])
-    ax.plot(daily.index, daily.values, color=COLORS["ok"], linewidth=2.2, marker="o", markersize=3)
-    ax.set_title(f"Trend Over Time: {numeric_col}", fontsize=16, pad=14)
-    ax.set_xlabel(str(datetime_col))
-    ax.set_ylabel(f"Daily sum of {numeric_col}")
-    ax.grid(alpha=0.25)
-    fig.autofmt_xdate()
-    pdf.savefig(fig)
-    plt.close(fig)
-
-
-df = _load_dataframe()
-row_count = int(len(df.index)) if hasattr(df, "index") else 0
-column_count = int(len(df.columns)) if hasattr(df, "columns") else 0
-numeric_cols = _numeric_columns(df) if pd is not None and hasattr(df, "columns") else []
-categorical_cols = _categorical_columns(df, numeric_cols) if pd is not None and hasattr(df, "columns") else []
-date_col = _datetime_column(df) if pd is not None and hasattr(df, "columns") else None
-generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-
-with PdfPages("report.pdf") as pdf:
-    _render_cover(
-        pdf,
-        rows=row_count,
-        cols=column_count,
-        num_cols=len(numeric_cols),
-        cat_cols=len(categorical_cols),
-        generated_at=generated_at,
-    )
-
-    if pd is not None and hasattr(df, "empty") and not df.empty:
-        _render_preview_page(pdf, df)
-        _render_numeric_summary(pdf, df, numeric_cols)
-
-        if numeric_cols:
-            _render_histogram(pdf, df, numeric_cols[0])
-        if categorical_cols and numeric_cols:
-            _render_category_bar(pdf, df, categorical_cols[0], numeric_cols[0])
-        if date_col and numeric_cols:
-            _render_trend(pdf, df, date_col, numeric_cols[0])
-    else:
-        fig = plt.figure(figsize=(11, 8.5), facecolor=COLORS["paper"])
-        ax = fig.add_axes([0, 0, 1, 1])
-        ax.axis("off")
-        ax.text(0.08, 0.72, "No tabular SQL result was available for report charts.", fontsize=14, color=COLORS["ink"], transform=ax.transAxes)
-        ax.text(0.08, 0.66, "Run a SQL query first, then request a report for richer visuals.", fontsize=11, color=COLORS["muted"], transform=ax.transAxes)
-        pdf.savefig(fig)
-        plt.close(fig)
-
-print("Generated report.pdf")
-"""
-
-
-def _extract_context_value(message: str, key: str) -> str | None:
-    match = re.search(r"<context>(.*?)</context>", message, re.IGNORECASE | re.DOTALL)
-    if match is None:
-        return None
-
-    key_prefix = f"{key.lower()}="
-    context_block = match.group(1)
-    for raw_line in context_block.splitlines():
-        line = raw_line.strip()
-        if line.startswith("-"):
-            line = line[1:].strip()
-        if not line.lower().startswith(key_prefix):
-            continue
-        return line.split("=", 1)[1].strip()
-
-    return None
-
-
-def _extract_selected_external_aliases(message: str) -> list[str] | None:
-    raw_value = _extract_context_value(message, "connectors")
-    if raw_value is None:
-        return None
-
-    if not raw_value or raw_value.lower() == "none":
-        return []
-
-    selected: list[str] = []
-    for token in raw_value.split(","):
-        alias = token.strip()
-        if alias and alias not in selected:
-            selected.append(alias)
-    return selected
-
-
-def _extract_output_type(message: str) -> str | None:
-    raw_value = _extract_context_value(message, "output_type")
-    if raw_value is None:
-        return None
-
-    value = raw_value.strip().lower()
-    if value in {"none", "auto"}:
-        return None
-    if value in {"report", "dashboard"}:
-        return value
-    return None
-
-
-def _artifact_is_pdf(artifact: Any) -> bool:
-    if not isinstance(artifact, dict):
-        return False
-
-    artifact_type = str(artifact.get("type", "")).lower()
-    artifact_name = str(artifact.get("name", "")).lower()
-    return artifact_type == "pdf" or artifact_name.endswith(".pdf")
-
-
-def _events_contain_pdf_artifact(events: list[dict[str, Any]]) -> bool:
-    for event in events:
-        if event.get("type") != "tool_result_python":
-            continue
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        artifacts = payload.get("artifacts")
-        if not isinstance(artifacts, list):
-            continue
-        if any(_artifact_is_pdf(artifact) for artifact in artifacts):
-            return True
-    return False
 
 
 @dataclass
@@ -584,8 +86,8 @@ class ChatEngine:
         if not message or not message.strip():
             raise HTTPException(status_code=400, detail="message must not be empty")
 
-        allowed_external_aliases = _extract_selected_external_aliases(message)
-        requested_output_type = _extract_output_type(message)
+        allowed_external_aliases = extract_selected_external_aliases(message)
+        requested_output_type = extract_output_type(message)
 
         # #region agent log
         _debug_log(
@@ -622,8 +124,8 @@ class ChatEngine:
             limit=_RECENT_SIGNATURE_WINDOW,
         )
         recent_artifact_names = self._artifact_name_set(artifact_inventory)
-        user_requested_rerun = self._user_requested_rerun(message)
-        required_terminal_tools = self._required_terminal_tools(
+        user_requested_rerun_flag = user_requested_rerun_hint(message)
+        required_tools = determine_required_terminal_tools(
             message=message,
             requested_output_type=requested_output_type,
         )
@@ -847,7 +349,7 @@ class ChatEngine:
                         break
 
                     if (
-                        not user_requested_rerun
+                        not user_requested_rerun_flag
                         and signature in recent_successful_tool_signatures
                     ):
                         if on_delta is not None and delta_type is not None:
@@ -868,7 +370,7 @@ class ChatEngine:
                         repeated_call_detected = True
                         break
 
-                    if tool_name == "run_python" and not user_requested_rerun:
+                    if tool_name == "run_python" and not user_requested_rerun_flag:
                         code = (tool_call.arguments or {}).get("code")
                         if isinstance(code, str) and code.strip():
                             candidate_names = (
@@ -1125,8 +627,8 @@ class ChatEngine:
                 continue
 
             if response.text:
-                missing_required_tools = self._missing_required_terminal_tools(
-                    required_tools=required_terminal_tools,
+                missing_required_tools = find_missing_required_terminal_tools(
+                    required_tools=required_tools,
                     sql_success_count=sql_success_count,
                     python_success_count=python_success_count,
                 )
@@ -1268,7 +770,7 @@ class ChatEngine:
                 "final_state": turn_state,
                 "sql_success_count": sql_success_count,
                 "python_success_count": python_success_count,
-                "required_tools": sorted(required_terminal_tools),
+                "required_tools": sorted(required_tools),
                 "required_tool_enforcement_failures": required_tool_enforcement_failures,
                 "invalid_tool_payload_failures": invalid_tool_payload_failures,
             },
@@ -1279,7 +781,7 @@ class ChatEngine:
             "state_trace": state_transitions,
             "state_final": turn_state,
             "turn_stats": {
-                "required_tools": sorted(required_terminal_tools),
+                "required_tools": sorted(required_tools),
                 "sql_success_count": sql_success_count,
                 "python_success_count": python_success_count,
                 "invalid_tool_payload_failures": invalid_tool_payload_failures,
@@ -1468,24 +970,17 @@ class ChatEngine:
         turn_events = self._events_since_rowid(
             worldline_id=worldline_id, rowid=starting_rowid
         )
-        if _events_contain_pdf_artifact(turn_events):
+        if events_contain_pdf_artifact(turn_events):
             return False
 
-        try:
-            compile(_AUTO_REPORT_CODE, "<auto_report_fallback>", "exec")
-        except SyntaxError as exc:
-            logger.warning(
-                "Auto report code failed syntax preflight at line %s: %s",
-                exc.lineno,
-                exc.msg,
-            )
+        if not assert_auto_report_code_compiles(logger):
             return False
 
         try:
             result = await execute_python_tool(
                 PythonToolRequest(
                     worldline_id=worldline_id,
-                    code=_AUTO_REPORT_CODE,
+                    code=AUTO_REPORT_CODE,
                     timeout=90,
                     call_id="auto_report_pdf",
                 ),
@@ -1507,7 +1002,7 @@ class ChatEngine:
         artifacts = result.get("artifacts") if isinstance(result, dict) else None
         if not isinstance(artifacts, list):
             return False
-        return any(_artifact_is_pdf(artifact) for artifact in artifacts)
+        return any(artifact_is_pdf(artifact) for artifact in artifacts)
 
     async def _load_worldline_events(self, worldline_id: str) -> list[dict[str, Any]]:
         timeline = await get_worldline_events(
@@ -2025,50 +1520,6 @@ class ChatEngine:
             names.add(candidate.lower())
         return names
 
-    def _user_requested_rerun(self, message: str) -> bool:
-        if not isinstance(message, str):
-            return False
-        return bool(_RERUN_HINT_PATTERN.search(message))
-
-    def _required_terminal_tools(
-        self,
-        *,
-        message: str,
-        requested_output_type: str | None,
-    ) -> set[str]:
-        if not isinstance(message, str):
-            return set()
-
-        visible_message = re.sub(
-            r"<context>[\s\S]*?</context>",
-            "",
-            message,
-            flags=re.IGNORECASE,
-        ).strip()
-        if not visible_message:
-            return set()
-
-        if _PYTHON_REQUIRED_HINT_PATTERN.search(visible_message):
-            return {"run_python"}
-
-        return set()
-
-    def _missing_required_terminal_tools(
-        self,
-        *,
-        required_tools: set[str],
-        sql_success_count: int,
-        python_success_count: int,
-    ) -> set[str]:
-        missing: set[str] = set()
-
-        if "run_sql" in required_tools and sql_success_count <= 0:
-            missing.add("run_sql")
-        if "run_python" in required_tools and python_success_count <= 0:
-            missing.add("run_python")
-
-        return missing
-
     def _build_required_tool_enforcement_message(
         self,
         *,
@@ -2154,52 +1605,15 @@ class ChatEngine:
         transitions: list[dict[str, Any]],
         worldline_id: str,
     ) -> str:
-        if current_state == to_state:
-            return current_state
-
-        allowed = _TURN_STATE_TRANSITIONS.get(current_state, set())
-        if to_state not in allowed:
-            logger.warning(
-                "Invalid state transition: %s -> %s (%s)",
-                current_state,
-                to_state,
-                reason,
-            )
-            transitions.append(
-                {
-                    "from": current_state,
-                    "to": "error",
-                    "reason": f"invalid_transition:{current_state}->{to_state}:{reason}",
-                }
-            )
-            _debug_log(
-                run_id="initial",
-                hypothesis_id="STATE_MACHINE_PHASE2",
-                location="backend/chat/engine.py:_transition_state:invalid",
-                message="Invalid state transition attempted",
-                data={
-                    "worldline_id": worldline_id,
-                    "from": current_state,
-                    "to": to_state,
-                    "reason": reason,
-                },
-            )
-            return "error"
-
-        transitions.append({"from": current_state, "to": to_state, "reason": reason})
-        _debug_log(
-            run_id="initial",
-            hypothesis_id="STATE_MACHINE_PHASE2",
-            location="backend/chat/engine.py:_transition_state",
-            message="State transition",
-            data={
-                "worldline_id": worldline_id,
-                "from": current_state,
-                "to": to_state,
-                "reason": reason,
-            },
+        return transition_state(
+            current_state=current_state,
+            to_state=to_state,
+            reason=reason,
+            transitions=transitions,
+            worldline_id=worldline_id,
+            logger=logger,
+            debug_log=_debug_log,
         )
-        return to_state
 
     # ---- helpers ------------------------------------------------------------
 
