@@ -24,8 +24,10 @@
 
   $: rawCode = callEvent?.payload?.code;
   $: code =
-    typeof rawCode === "string" && rawCode.length > 0
-      ? rawCode
+    typeof rawCode === "string"
+      ? rawCode.length > 0
+        ? rawCode
+        : "# model emitted an empty Python code payload"
       : resultEvent
         ? "# code unavailable (result event arrived before call event)"
         : "";

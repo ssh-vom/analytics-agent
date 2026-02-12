@@ -97,11 +97,17 @@
   let activeWorldlineQueueDepth = 0;
   let activeWorldlineRunningJobs = 0;
   let activeWorldlineQueuedJobs = 0;
+  type RuntimeStateTransition = {
+    from_state: string | null;
+    to_state: string;
+    reason: string;
+  };
+  let stateTraceByWorldline: Record<string, RuntimeStateTransition[]> = {};
 
   // CSV Import state
   let uploadedFiles: File[] = [];
   let worldlineTables: Awaited<ReturnType<typeof fetchWorldlineTables>> | null = null;
-  let outputType: OutputType = "report";
+  let outputType: OutputType = "none";
   let showOutputTypeMenu = false;
   let showConnectorsMenu = false;
   let showSettingsMenu = false;
@@ -123,6 +129,11 @@
   $: cells = groupDisplayItemsIntoCells(displayItems);
   $: currentThread = $activeThread;
   $: isActiveWorldlineSending = Boolean(activeWorldlineId && sendingByWorldline[activeWorldlineId]);
+  $: activeStateTrace = stateTraceByWorldline[activeWorldlineId] ?? [];
+  $: activeStatePath = activeStateTrace.map((entry) => entry.to_state).join(" -> ");
+  $: activeStateReasons = activeStateTrace
+    .map((entry) => `${entry.to_state}: ${entry.reason}`)
+    .join(" | ");
   $: hasDraftOutput =
     activeStreamingState.text.length > 0 || activeStreamingState.toolCalls.size > 0;
   $: isEmptyChat = cells.length === 0 && !hasDraftOutput && !isActiveWorldlineSending;
@@ -302,6 +313,17 @@
     );
   }
 
+  function appendStateTransition(
+    worldlineId: string,
+    transition: RuntimeStateTransition,
+  ): void {
+    const existing = stateTraceByWorldline[worldlineId] ?? [];
+    stateTraceByWorldline = {
+      ...stateTraceByWorldline,
+      [worldlineId]: [...existing, transition].slice(-24),
+    };
+  }
+
   async function queuePromptAsJob(message: string, worldlineId: string): Promise<void> {
     try {
       const contextualMessage = buildContextualMessage(message);
@@ -310,7 +332,7 @@
         message: contextualMessage,
         provider,
         model: model.trim() || undefined,
-        maxIterations: provider === "gemini" ? 10 : 20,
+        maxIterations: 20,
       });
       statusText =
         job.queue_position && job.queue_position > 1
@@ -435,6 +457,7 @@
       activeWorldlineId = "";
       selectedArtifactId = null;
       resetStreamingDrafts();
+      stateTraceByWorldline = {};
 
       await refreshWorldlines();
 
@@ -526,6 +549,7 @@
       worldlines = [];
       eventsByWorldline = {};
       activeWorldlineId = "";
+      stateTraceByWorldline = {};
       
       statusText = "Ready";
       isReady = true;
@@ -656,6 +680,10 @@
     shouldAutoScroll = true;
     resetStreamingDrafts(requestWorldlineId);
     selectedArtifactId = null;
+    stateTraceByWorldline = {
+      ...stateTraceByWorldline,
+      [requestWorldlineId]: [],
+    };
 
     // Optimistic user message — show immediately in the feed
     const { id: optimisticId, event: optimisticEvent } = createOptimisticUserMessage(message);
@@ -673,7 +701,7 @@
         message: contextualMessage,
         provider,
         model: model.trim() || undefined,
-        maxIterations: provider === "gemini" ? 10 : 20,
+        maxIterations: 20,
         onEvent: (frame) => {
           const frameWorldlineId = frame.worldline_id;
           ensureWorldlineVisible(frameWorldlineId);
@@ -714,9 +742,37 @@
           ensureWorldlineVisible(frameWorldlineId);
           const frameStreamingState = streamingStateByWorldline[frameWorldlineId] ?? createStreamingState();
           setStreamingState(frameWorldlineId, applyDelta(frameStreamingState, frame.delta));
+          if (frame.delta.type === "state_transition") {
+            const toState =
+              typeof frame.delta.to_state === "string" ? frame.delta.to_state : "";
+            if (toState) {
+              const fromState =
+                typeof frame.delta.from_state === "string" ? frame.delta.from_state : null;
+              const reason =
+                typeof frame.delta.reason === "string" && frame.delta.reason.length > 0
+                  ? frame.delta.reason
+                  : "unspecified";
+              appendStateTransition(frameWorldlineId, {
+                from_state: fromState,
+                to_state: toState,
+                reason,
+              });
+              if (activeWorldlineId === frameWorldlineId) {
+                statusText = `State: ${toState.replace(/_/g, " ")}`;
+              }
+            }
+            if (activeWorldlineId === frameWorldlineId) {
+              scrollFeedToBottom();
+            }
+            return;
+          }
           if (activeWorldlineId === frameWorldlineId) {
             if (frame.delta.skipped) {
-              statusText = "Skipped repeated tool call...";
+              if (frame.delta.reason === "invalid_tool_payload") {
+                statusText = "Retrying after invalid tool payload...";
+              } else {
+                statusText = "Skipped repeated tool call...";
+              }
             } else if (frame.delta.type === "assistant_text" && !frame.delta.done) {
               statusText = "Composing response...";
             } else if (frame.delta.type === "tool_call_sql" && !frame.delta.done) {
@@ -852,13 +908,6 @@
           <div class="provider-menu">
             <button 
               class="provider-option"
-              class:active={provider === "gemini"}
-              on:click={() => { provider = "gemini"; showProviderMenu = false; }}
-            >
-              Gemini
-            </button>
-            <button 
-              class="provider-option"
               class:active={provider === "openai"}
               on:click={() => { provider = "openai"; showProviderMenu = false; }}
             >
@@ -889,6 +938,9 @@
           <span class="queue-chip">{activeWorldlineQueueDepth} queued</span>
         {/if}
       </span>
+      {#if activeStatePath}
+        <span class="state-path" title={activeStateReasons}>{activeStatePath}</span>
+      {/if}
       
       <button class="db-selector">
         <Database size={16} />
@@ -1013,12 +1065,21 @@
             showDataContextMenu = false;
           }}
         >
-          <span>{outputType === "report" ? "Report" : "Dashboard"}</span>
+          <span>
+            {outputType === "report"
+              ? "Report"
+              : outputType === "dashboard"
+                ? "Dashboard"
+                : "No strict format"}
+          </span>
           <ChevronDown size={13} />
         </button>
         {#if showOutputTypeMenu}
           <div class="context-menu">
             <div class="context-menu-title">Output Type</div>
+            <button type="button" class="context-option" on:click={() => { outputType = "none"; showOutputTypeMenu = false; }}>
+              {outputType === "none" ? "✓ " : ""}No strict format
+            </button>
             <button type="button" class="context-option" on:click={() => { outputType = "report"; showOutputTypeMenu = false; }}>
               {outputType === "report" ? "✓ " : ""}Report
             </button>
@@ -1397,6 +1458,20 @@
   .status.ready {
     color: var(--success);
     border-color: var(--accent-green-muted);
+  }
+
+  .state-path {
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    padding: 5px var(--space-2);
+    border: 1px dashed var(--border-soft);
+    border-radius: var(--radius-sm);
+    background: var(--surface-0);
   }
 
   .queue-chip {

@@ -49,7 +49,7 @@ describe("settingsPersistence", () => {
     const state: SettingsState = {
       theme: "dark",
       notifications: true,
-      defaultProvider: "gemini",
+      defaultProvider: "openrouter",
       apiKey: "should-not-persist",
     };
 
@@ -57,8 +57,21 @@ describe("settingsPersistence", () => {
     expect(persisted).toEqual({
       theme: "dark",
       notifications: true,
-      defaultProvider: "gemini",
+      defaultProvider: "openrouter",
     });
     expect("apiKey" in persisted).toBe(false);
+  });
+
+  it("migrates legacy gemini provider to openrouter", () => {
+    const parsed = parsePersistedSettings(
+      JSON.stringify({
+        theme: "dark",
+        notifications: true,
+        defaultProvider: "gemini",
+      }),
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.settings.defaultProvider).toBe("openrouter");
   });
 });

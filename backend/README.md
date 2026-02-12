@@ -30,7 +30,6 @@ export SANDBOX_IMAGE=my-image:tag
 Set one of:
 
 - `OPENAI_API_KEY`
-- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
 - `OPENROUTER_API_KEY`
 
 Optional OpenRouter config:

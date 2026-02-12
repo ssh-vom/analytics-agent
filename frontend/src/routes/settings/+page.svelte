@@ -15,7 +15,7 @@
     theme: "dark",
     notifications: true,
     apiKey: "",
-    defaultProvider: "gemini",
+    defaultProvider: "openrouter",
   };
 
   let hasChanges = false;
@@ -100,7 +100,6 @@
         </div>
         <div class="setting-control">
           <select bind:value={settings.defaultProvider} on:change={handleChange}>
-            <option value="gemini">Gemini</option>
             <option value="openai">OpenAI</option>
             <option value="openrouter">OpenRouter</option>
           </select>

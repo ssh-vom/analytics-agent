@@ -89,7 +89,8 @@ export interface SseEventFrame {
 export type StreamDeltaType =
   | "assistant_text"
   | "tool_call_sql"
-  | "tool_call_python";
+  | "tool_call_python"
+  | "state_transition";
 
 export interface StreamDeltaPayload {
   type: StreamDeltaType;
@@ -98,6 +99,9 @@ export interface StreamDeltaPayload {
   done?: boolean;
   skipped?: boolean;
   reason?: string;
+  error?: string;
+  from_state?: string | null;
+  to_state?: string;
 }
 
 export interface SseDeltaFrame {

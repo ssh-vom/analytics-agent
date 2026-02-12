@@ -1,5 +1,5 @@
-export type Provider = "gemini" | "openai" | "openrouter";
-export type OutputType = "report" | "dashboard";
+export type Provider = "openai" | "openrouter";
+export type OutputType = "none" | "report" | "dashboard";
 
 export interface ContextSettings {
   webSearch: boolean;
@@ -53,7 +53,11 @@ export function buildContextualMessage(
     .filter((connector) => options.selectedConnectorIds.includes(connector.id))
     .map((connector) => connector.name);
 
-  const contextLines: string[] = [`output_type=${options.outputType}`];
+  const contextLines: string[] = [];
+
+  if (options.outputType !== "none") {
+    contextLines.push(`output_type=${options.outputType}`);
+  }
 
   if (options.selectedContextTables.length > 0) {
     contextLines.push(`tables=${options.selectedContextTables.join(",")}`);
@@ -84,8 +88,6 @@ export function buildContextualMessage(
 
 export function providerLabel(provider: Provider): string {
   switch (provider) {
-    case "gemini":
-      return "Gemini";
     case "openai":
       return "OpenAI";
     case "openrouter":

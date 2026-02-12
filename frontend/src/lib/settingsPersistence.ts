@@ -2,7 +2,7 @@ export interface SettingsState {
   theme: "dark" | "light" | "auto";
   notifications: boolean;
   apiKey: string;
-  defaultProvider: "gemini" | "openai" | "openrouter";
+  defaultProvider: "openai" | "openrouter";
 }
 
 export type PersistedSettings = Omit<SettingsState, "apiKey">;
@@ -23,12 +23,10 @@ export function parsePersistedSettings(raw: string): {
       next.notifications = parsed.notifications;
     }
 
-    if (
-      parsed.defaultProvider === "gemini" ||
-      parsed.defaultProvider === "openai" ||
-      parsed.defaultProvider === "openrouter"
-    ) {
+    if (parsed.defaultProvider === "openai" || parsed.defaultProvider === "openrouter") {
       next.defaultProvider = parsed.defaultProvider;
+    } else if (parsed.defaultProvider === "gemini") {
+      next.defaultProvider = "openrouter";
     }
 
     return {

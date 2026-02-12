@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import time
 
 import chat_api
@@ -146,7 +146,7 @@ class ChatApiTests(unittest.TestCase):
                     chat_api.ChatRequest(
                         worldline_id=worldline_id,
                         message="hello",
-                        provider="gemini",
+                        provider="openrouter",
                     )
                 )
             )
@@ -172,6 +172,123 @@ class ChatApiTests(unittest.TestCase):
 
         self.assertEqual(head_event["type"], "assistant_message")
         self.assertEqual(json.loads(head_event["payload_json"])["text"], "Hello back!")
+
+    def test_chat_report_mode_auto_generates_pdf_artifact(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[LlmResponse(text="Analysis complete.", tool_calls=[])]
+        )
+        fake_execute_python_tool = AsyncMock(
+            return_value={
+                "stdout": "Generated report.pdf\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [
+                    {
+                        "type": "pdf",
+                        "name": "report.pdf",
+                        "artifact_id": "artifact_report",
+                    }
+                ],
+                "previews": {"dataframes": []},
+                "execution_ms": 18,
+            }
+        )
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch(
+                "chat.engine.execute_python_tool",
+                fake_execute_python_tool,
+            ),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message=(
+                            "summarize revenue\n\n"
+                            "<context>\n"
+                            "- output_type=report\n"
+                            "</context>"
+                        ),
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 1)
+        self.assertEqual(fake_execute_python_tool.await_count, 1)
+
+        call_args = fake_execute_python_tool.await_args
+        self.assertIsNotNone(call_args)
+        if call_args is None:
+            self.fail("auto report call args missing")
+        call_request = call_args.args[0]
+        self.assertEqual(call_request.call_id, "auto_report_pdf")
+        self.assertEqual(call_request.worldline_id, worldline_id)
+        self.assertIn("report.pdf", call_request.code)
+
+        assistant_event = result["events"][-1]
+        self.assertEqual(assistant_event["type"], "assistant_message")
+        self.assertIn(
+            "Generated downloadable report artifact: report.pdf",
+            assistant_event["payload"]["text"],
+        )
+
+    def test_chat_dashboard_mode_does_not_auto_generate_pdf(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[LlmResponse(text="Dashboard complete.", tool_calls=[])]
+        )
+        fake_execute_python_tool = AsyncMock(
+            return_value={
+                "stdout": "Generated report.pdf\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [
+                    {
+                        "type": "pdf",
+                        "name": "report.pdf",
+                        "artifact_id": "artifact_report",
+                    }
+                ],
+                "previews": {"dataframes": []},
+                "execution_ms": 18,
+            }
+        )
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch(
+                "chat.engine.execute_python_tool",
+                fake_execute_python_tool,
+            ),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message=(
+                            "summarize revenue\n\n"
+                            "<context>\n"
+                            "- output_type=dashboard\n"
+                            "</context>"
+                        ),
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 1)
+        self.assertEqual(fake_execute_python_tool.await_count, 0)
+        assistant_event = result["events"][-1]
+        self.assertEqual(assistant_event["type"], "assistant_message")
+        self.assertNotIn(
+            "Generated downloadable report artifact", assistant_event["payload"]["text"]
+        )
 
     def test_chat_tool_loop_calls_sql_then_returns_final_message(self) -> None:
         thread_id = self._create_thread()
@@ -259,7 +376,7 @@ class ChatApiTests(unittest.TestCase):
                     chat_api.ChatRequest(
                         worldline_id=worldline_id,
                         message="run this once",
-                        provider="gemini",
+                        provider="openrouter",
                     )
                 )
             )
@@ -273,6 +390,312 @@ class ChatApiTests(unittest.TestCase):
             "repeated the same tool call",
             result["events"][-1]["payload"]["text"],
         )
+
+    def test_chat_skips_recent_identical_successful_tool_call_across_turns(
+        self,
+    ) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+
+        first_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_seed_sql",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(text="seeded", tool_calls=[]),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=first_client):
+            first_result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="run once",
+                        provider="openrouter",
+                    )
+                )
+            )
+
+        self.assertEqual(first_client.calls, 2)
+        self.assertEqual(
+            [event["type"] for event in first_result["events"]],
+            ["user_message", "tool_call_sql", "tool_result_sql", "assistant_message"],
+        )
+
+        second_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_repeat_sql",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 10},
+                        )
+                    ],
+                )
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=second_client):
+            second_result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="continue analysis",
+                        provider="openrouter",
+                    )
+                )
+            )
+
+        self.assertEqual(second_client.calls, 1)
+        self.assertEqual(
+            [event["type"] for event in second_result["events"]],
+            ["user_message", "assistant_message"],
+        )
+        self.assertIn(
+            "already ran recently",
+            second_result["events"][-1]["payload"]["text"],
+        )
+
+    def test_chat_prevents_duplicate_artifact_names_from_python(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_prev_py_call",
+                    worldline_id,
+                    None,
+                    "tool_call_python",
+                    json.dumps(
+                        {
+                            "code": "print('seed')",
+                            "timeout": 30,
+                            "call_id": "call_prev_py",
+                        }
+                    ),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_prev_py_result",
+                    worldline_id,
+                    "event_prev_py_call",
+                    "tool_result_python",
+                    json.dumps(
+                        {
+                            "error": None,
+                            "artifacts": [
+                                {
+                                    "type": "csv",
+                                    "name": "top_by_amount.csv",
+                                    "artifact_id": "artifact_prev_top_by_amount",
+                                }
+                            ],
+                        }
+                    ),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_prev_py_result", worldline_id),
+            )
+            conn.commit()
+
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_new_py",
+                            name="run_python",
+                            arguments={
+                                "code": "import pandas as pd\nLATEST_SQL_DF.to_csv('top_by_amount.csv', index=False)",
+                                "timeout": 30,
+                            },
+                        )
+                    ],
+                )
+            ]
+        )
+        fake_execute_python_tool = AsyncMock(
+            return_value={
+                "stdout": "should_not_run\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [],
+                "previews": {"dataframes": []},
+                "execution_ms": 1,
+            }
+        )
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch("chat.engine.execute_python_tool", fake_execute_python_tool),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="continue the duplicate analysis",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 1)
+        self.assertEqual(fake_execute_python_tool.await_count, 0)
+        self.assertEqual(
+            [event["type"] for event in result["events"]],
+            ["user_message", "assistant_message"],
+        )
+        self.assertIn(
+            "would recreate existing artifacts",
+            result["events"][-1]["payload"]["text"],
+        )
+
+    def test_chat_retries_once_after_empty_python_payload(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_empty_py",
+                            name="run_python",
+                            arguments={},
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_valid_py",
+                            name="run_python",
+                            arguments={
+                                "code": "print('ok')",
+                                "timeout": 10,
+                            },
+                        )
+                    ],
+                ),
+                LlmResponse(text="Completed after correction.", tool_calls=[]),
+            ]
+        )
+        fake_execute_python_tool = AsyncMock(
+            return_value={
+                "stdout": "ok\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [],
+                "previews": {"dataframes": []},
+                "execution_ms": 12,
+            }
+        )
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch("chat.engine.execute_python_tool", fake_execute_python_tool),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="run python",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 3)
+        self.assertEqual(fake_execute_python_tool.await_count, 1)
+        self.assertEqual(
+            [event["type"] for event in result["events"]],
+            ["user_message", "assistant_message"],
+        )
+        self.assertEqual(
+            result["events"][-1]["payload"]["text"],
+            "Completed after correction.",
+        )
+
+    def test_chat_unwraps_json_wrapped_python_code_argument(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_wrapped_py",
+                            name="run_python",
+                            arguments={
+                                "code": '{"code":"print(7)","timeout":30}',
+                                "timeout": 8,
+                            },
+                        )
+                    ],
+                ),
+                LlmResponse(text="done", tool_calls=[]),
+            ]
+        )
+        fake_execute_python_tool = AsyncMock(
+            return_value={
+                "stdout": "7\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [],
+                "previews": {"dataframes": []},
+                "execution_ms": 10,
+            }
+        )
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch("chat.engine.execute_python_tool", fake_execute_python_tool),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="run wrapped python",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 2)
+        self.assertEqual(fake_execute_python_tool.await_count, 1)
+        call_args = fake_execute_python_tool.await_args
+        self.assertIsNotNone(call_args)
+        if call_args is None:
+            self.fail("python tool call args missing")
+        call_request = call_args.args[0]
+        self.assertEqual(call_request.code, "print(7)")
+        self.assertEqual(call_request.timeout, 8)
+        self.assertEqual(result["events"][-1]["payload"]["text"], "done")
 
     def test_chat_allows_many_sql_calls_per_turn(self) -> None:
         """No per-tool-call limit; multiple SQL runs complete and finalize."""
@@ -355,7 +778,7 @@ class ChatApiTests(unittest.TestCase):
             ],
         )
 
-    def test_chat_allows_only_one_successful_python_run_per_turn(self) -> None:
+    def test_chat_allows_multiple_python_runs_per_turn(self) -> None:
         thread_id = self._create_thread()
         worldline_id = self._create_worldline(thread_id)
         fake_client = FakeLlmClient(
@@ -380,19 +803,24 @@ class ChatApiTests(unittest.TestCase):
                         )
                     ],
                 ),
+                LlmResponse(text="Both python steps completed.", tool_calls=[]),
             ]
         )
 
+        run_count = 0
+
         async def fake_execute_python_tool(*args, **kwargs):
+            nonlocal run_count
+            run_count += 1
             return {
-                "stdout": "ok\n",
+                "stdout": f"ok_{run_count}\n",
                 "stderr": "",
                 "error": None,
                 "artifacts": [
                     {
                         "type": "image",
-                        "name": "line_2x.png",
-                        "artifact_id": "artifact_fake",
+                        "name": f"line_step_{run_count}.png",
+                        "artifact_id": f"artifact_fake_{run_count}",
                     }
                 ],
                 "previews": {"dataframes": []},
@@ -416,14 +844,14 @@ class ChatApiTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(fake_client.calls, 2)
+        self.assertEqual(fake_client.calls, 3)
+        self.assertEqual(run_count, 2)
         self.assertEqual(
             [event["type"] for event in result["events"]],
             ["user_message", "assistant_message"],
         )
-        self.assertIn(
-            "Python already ran successfully in this turn",
-            result["events"][-1]["payload"]["text"],
+        self.assertEqual(
+            result["events"][-1]["payload"]["text"], "Both python steps completed."
         )
 
     def test_chat_time_travel_branches_and_continues_on_new_worldline(self) -> None:
@@ -478,7 +906,7 @@ class ChatApiTests(unittest.TestCase):
                     chat_api.ChatRequest(
                         worldline_id=source_worldline_id,
                         message="please branch and continue",
-                        provider="gemini",
+                        provider="openrouter",
                     )
                 )
             )
@@ -541,7 +969,7 @@ class ChatApiTests(unittest.TestCase):
                     chat_api.ChatRequest(
                         worldline_id=worldline_id,
                         message="stream this",
-                        provider="gemini",
+                        provider="openrouter",
                     )
                 )
             )
@@ -736,6 +1164,189 @@ class ChatApiTests(unittest.TestCase):
             {"sql": "SELECT 123 AS value\nFROM (SELECT 1) t", "limit": 5},
         )
 
+    def test_chat_stream_emits_state_transition_deltas(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_state_sql",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 1},
+                        )
+                    ],
+                ),
+                LlmResponse(text="done", tool_calls=[]),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            response = self._run(
+                chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="stream state transitions",
+                        provider="openai",
+                    )
+                )
+            )
+            raw_stream = self._run(self._consume_stream(response))
+            payloads = self._extract_sse_payloads(raw_stream)
+
+        state_deltas = [
+            payload["delta"]
+            for payload in payloads
+            if "delta" in payload and payload["delta"].get("type") == "state_transition"
+        ]
+        self.assertGreaterEqual(len(state_deltas), 4)
+        reasons = [delta.get("reason") for delta in state_deltas]
+        self.assertIn("turn_started", reasons)
+        self.assertIn("tool_call:run_sql", reasons)
+        self.assertIn("tool_result:run_sql_success", reasons)
+        self.assertIn("assistant_message_persisted", reasons)
+        self.assertEqual(state_deltas[0].get("to_state"), "planning")
+
+    def test_chat_stream_retries_invalid_python_payload_without_persisting_error_cells(
+        self,
+    ) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_py_invalid",
+                            name="run_python",
+                            arguments={},
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_py_valid",
+                            name="run_python",
+                            arguments={"code": "print('ok')", "timeout": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(text="python finished", tool_calls=[]),
+            ]
+        )
+        fake_execute_python_tool = AsyncMock(
+            return_value={
+                "stdout": "ok\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [],
+                "previews": {"dataframes": []},
+                "execution_ms": 9,
+            }
+        )
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch("chat.engine.execute_python_tool", fake_execute_python_tool),
+        ):
+            response = self._run(
+                chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="continue with python",
+                        provider="openrouter",
+                    )
+                )
+            )
+            raw_stream = self._run(self._consume_stream(response))
+            payloads = self._extract_sse_payloads(raw_stream)
+
+        self.assertEqual(fake_execute_python_tool.await_count, 1)
+
+        event_payloads = [
+            payload["event"] for payload in payloads if "event" in payload
+        ]
+        event_types = [event["type"] for event in event_payloads]
+        self.assertEqual(
+            event_types,
+            ["user_message", "assistant_message"],
+        )
+
+        invalid_skips = [
+            payload["delta"]
+            for payload in payloads
+            if "delta" in payload
+            and payload["delta"].get("type") == "tool_call_python"
+            and payload["delta"].get("skipped") is True
+            and payload["delta"].get("reason") == "invalid_tool_payload"
+        ]
+        self.assertEqual(len(invalid_skips), 1)
+        self.assertEqual(invalid_skips[0].get("call_id"), "call_py_invalid")
+
+        self.assertFalse(
+            any(event["type"] == "tool_result_python" for event in event_payloads)
+        )
+
+    def test_chat_includes_sql_data_checkpoint_in_followup_llm_context(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+
+        class CaptureClient(FakeLlmClient):
+            def __init__(self, responses: list[LlmResponse]) -> None:
+                super().__init__(responses)
+                self.generate_kwargs: list[dict] = []
+
+            async def generate(self, **kwargs) -> LlmResponse:
+                self.generate_kwargs.append(kwargs)
+                return await super().generate(**kwargs)
+
+        fake_client = CaptureClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_data_intent_sql",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 5},
+                        )
+                    ],
+                ),
+                LlmResponse(text="done", tool_calls=[]),
+            ]
+        )
+
+        with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="query and continue",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 2)
+        self.assertEqual(result["events"][-1]["type"], "assistant_message")
+
+        second_call_messages = fake_client.generate_kwargs[1]["messages"]
+        checkpoint_messages = [
+            msg
+            for msg in second_call_messages
+            if msg.role == "system"
+            and isinstance(msg.content, str)
+            and "SQL-to-Python data checkpoint" in msg.content
+        ]
+        self.assertEqual(len(checkpoint_messages), 1)
+        self.assertIn('"row_count": 1', checkpoint_messages[0].content)
+        self.assertIn("SELECT 1 AS x", checkpoint_messages[0].content)
+
     # ---- new test: assistant_plan when text accompanies tool calls -----------
 
     def test_chat_stream_emits_assistant_plan_when_text_with_tool_calls(self) -> None:
@@ -894,7 +1505,7 @@ class ChatApiTests(unittest.TestCase):
                     chat_api.ChatJobRequest(
                         worldline_id=worldline_id,
                         message="job to ack",
-                        provider="gemini",
+                        provider="openrouter",
                     )
                 )
                 await self._wait_for_job_status(

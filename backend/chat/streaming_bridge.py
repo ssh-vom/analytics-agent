@@ -29,6 +29,7 @@ async def stream_llm_response(
 ) -> LlmResponse:
     text_buffer: list[str] = []
     tool_call_accum: dict[str, dict[str, Any]] = {}
+    tool_call_id_aliases: dict[str, str] = {}
     last_tool_call_id: str | None = None
     emitted_text = False
 
@@ -54,10 +55,15 @@ async def stream_llm_response(
             call_id = chunk.tool_call_id or f"call_{len(tool_call_accum) + 1}"
             last_tool_call_id = call_id
             tool_name = chunk.tool_name or ""
-            tool_call_accum[call_id] = {
-                "name": tool_name,
-                "args_parts": [],
-            }
+            if call_id in tool_call_accum:
+                existing_name = str(tool_call_accum[call_id].get("name", ""))
+                if not existing_name and tool_name:
+                    tool_call_accum[call_id]["name"] = tool_name
+            else:
+                tool_call_accum[call_id] = {
+                    "name": tool_name,
+                    "args_parts": [],
+                }
 
             if emitted_text:
                 await on_delta(
@@ -68,9 +74,24 @@ async def stream_llm_response(
             continue
 
         if chunk.type == "tool_call_delta":
-            call_id = (chunk.tool_call_id or "").strip() or last_tool_call_id or ""
+            raw_call_id = (chunk.tool_call_id or "").strip()
+            call_id = tool_call_id_aliases.get(raw_call_id, raw_call_id)
+            if not call_id:
+                call_id = last_tool_call_id or ""
+
+            if (
+                call_id
+                and call_id not in tool_call_accum
+                and last_tool_call_id
+                and last_tool_call_id in tool_call_accum
+            ):
+                tool_call_id_aliases[call_id] = last_tool_call_id
+                call_id = last_tool_call_id
+
             args_delta = chunk.arguments_delta or ""
-            if call_id and call_id in tool_call_accum:
+            if call_id:
+                if call_id not in tool_call_accum:
+                    tool_call_accum[call_id] = {"name": "", "args_parts": []}
                 accum = tool_call_accum[call_id]
                 if looks_like_complete_tool_args(args_delta):
                     accum["args_parts"] = [args_delta]
@@ -93,7 +114,20 @@ async def stream_llm_response(
             continue
 
         if chunk.type == "tool_call_done":
-            call_id = (chunk.tool_call_id or "").strip() or last_tool_call_id or ""
+            raw_call_id = (chunk.tool_call_id or "").strip()
+            call_id = tool_call_id_aliases.get(raw_call_id, raw_call_id)
+            if not call_id:
+                call_id = last_tool_call_id or ""
+
+            if (
+                call_id
+                and call_id not in tool_call_accum
+                and last_tool_call_id
+                and last_tool_call_id in tool_call_accum
+            ):
+                tool_call_id_aliases[call_id] = last_tool_call_id
+                call_id = last_tool_call_id
+
             accum = tool_call_accum.get(call_id) if call_id else None
             tool_name = accum["name"] if accum else ""
             delta_type = tool_name_to_delta_type(tool_name)

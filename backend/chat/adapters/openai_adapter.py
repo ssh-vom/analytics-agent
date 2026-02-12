@@ -129,6 +129,9 @@ class OpenAiAdapter:
             stream=True,
         )
 
+        id_aliases: dict[str, str] = {}
+        fallback_counter = 0
+
         async for event in stream:
             event_type = getattr(event, "type", "")
 
@@ -144,9 +147,21 @@ class OpenAiAdapter:
                 item = getattr(event, "item", None)
                 item_type = getattr(item, "type", "")
                 if item_type == "function_call":
-                    call_id = getattr(item, "call_id", None) or getattr(
-                        item, "id", None
-                    )
+                    item_id = getattr(item, "id", None)
+                    raw_call_id = getattr(item, "call_id", None)
+                    fallback_counter += 1
+                    if isinstance(raw_call_id, str) and raw_call_id:
+                        call_id = raw_call_id
+                    elif isinstance(item_id, str) and item_id:
+                        call_id = item_id
+                    else:
+                        call_id = f"call_{fallback_counter}"
+
+                    if isinstance(item_id, str) and item_id:
+                        id_aliases[item_id] = call_id
+                    if isinstance(raw_call_id, str) and raw_call_id:
+                        id_aliases[raw_call_id] = call_id
+
                     name = getattr(item, "name", "")
                     yield StreamChunk(
                         type="tool_call_start",
@@ -158,7 +173,21 @@ class OpenAiAdapter:
             # --- function-call argument deltas -------------------------------
             if event_type == "response.function_call_arguments.delta":
                 delta = getattr(event, "delta", "")
-                call_id = getattr(event, "call_id", None) or getattr(event, "item_id", None)
+                raw_call_id = (
+                    getattr(event, "call_id", None)
+                    or getattr(event, "item_id", None)
+                    or getattr(event, "output_item_id", None)
+                )
+                if isinstance(raw_call_id, str) and raw_call_id:
+                    call_id = id_aliases.get(raw_call_id, raw_call_id)
+                else:
+                    call_id = None
+                if (
+                    isinstance(raw_call_id, str)
+                    and raw_call_id
+                    and isinstance(call_id, str)
+                ):
+                    id_aliases[raw_call_id] = call_id
                 if delta:
                     yield StreamChunk(
                         type="tool_call_delta",
@@ -169,7 +198,21 @@ class OpenAiAdapter:
 
             # --- function-call argument stream done --------------------------
             if event_type == "response.function_call_arguments.done":
-                call_id = getattr(event, "call_id", None) or getattr(event, "item_id", None)
+                raw_call_id = (
+                    getattr(event, "call_id", None)
+                    or getattr(event, "item_id", None)
+                    or getattr(event, "output_item_id", None)
+                )
+                if isinstance(raw_call_id, str) and raw_call_id:
+                    call_id = id_aliases.get(raw_call_id, raw_call_id)
+                else:
+                    call_id = None
+                if (
+                    isinstance(raw_call_id, str)
+                    and raw_call_id
+                    and isinstance(call_id, str)
+                ):
+                    id_aliases[raw_call_id] = call_id
                 yield StreamChunk(
                     type="tool_call_done",
                     tool_call_id=call_id,

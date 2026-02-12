@@ -167,7 +167,7 @@ class ChatJobSchedulerTests(unittest.TestCase):
             thread_id=thread_id,
             worldline_id=worldline_id,
             message="execute once",
-            provider="gemini",
+            provider="openrouter",
             model=None,
             max_iterations=6,
         )
@@ -177,7 +177,7 @@ class ChatJobSchedulerTests(unittest.TestCase):
         def engine_factory(
             provider: str | None, model: str | None, max_iterations: int
         ):
-            self.assertEqual(provider, "gemini")
+            self.assertEqual(provider, "openrouter")
             self.assertIsNone(model)
             self.assertEqual(max_iterations, 6)
             return _FakeEngine(output_text="Single execution.", calls=run_calls)

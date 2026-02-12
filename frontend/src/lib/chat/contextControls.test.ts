@@ -65,6 +65,23 @@ describe("contextControls", () => {
     expect(message).toContain("connectors=none");
   });
 
+  it("omits output_type when strict format is none", () => {
+    const message = buildContextualMessage("summarize", {
+      outputType: "none",
+      availableConnectors: [],
+      selectedConnectorIds: [],
+      selectedContextTables: [],
+      contextSettings: {
+        webSearch: false,
+        dashboards: false,
+        textToSql: true,
+        ontology: false,
+      },
+    });
+
+    expect(message).not.toContain("output_type=");
+  });
+
   it("validates stored connectors", () => {
     expect(
       isStoredConnectorList([{ id: "c1", name: "warehouse", isActive: true }]),
@@ -73,7 +90,6 @@ describe("contextControls", () => {
   });
 
   it("maps provider labels", () => {
-    expect(providerLabel("gemini")).toBe("Gemini");
     expect(providerLabel("openai")).toBe("OpenAI");
     expect(providerLabel("openrouter")).toBe("OpenRouter");
   });
