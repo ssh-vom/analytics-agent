@@ -491,3 +491,75 @@ export async function streamChatTurn(options: StreamOptions): Promise<void> {
 
   processor.flush();
 }
+
+// Semantic overrides types
+export interface SemanticOverride {
+  table_name: string;
+  column_name: string;
+  role: "dimension" | "measure" | "time";
+  updated_at?: string;
+}
+
+export interface SemanticOverridesResponse {
+  overrides: SemanticOverride[];
+}
+
+// Semantic overrides API functions
+export async function fetchSemanticOverrides(
+  worldlineId: string,
+): Promise<SemanticOverridesResponse> {
+  return requestJson<SemanticOverridesResponse>(
+    `/api/seed-data/worldlines/${worldlineId}/semantic-overrides`,
+    undefined,
+    "Failed to fetch semantic overrides",
+  );
+}
+
+export async function saveSemanticOverrides(
+  worldlineId: string,
+  overrides: SemanticOverride[],
+): Promise<SemanticOverridesResponse & { count: number }> {
+  return requestJson<SemanticOverridesResponse & { count: number }>(
+    `/api/seed-data/worldlines/${worldlineId}/semantic-overrides`,
+    {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ overrides }),
+    },
+    "Failed to save semantic overrides",
+    true,
+  );
+}
+
+export async function deleteSemanticOverride(
+  worldlineId: string,
+  tableName: string,
+  columnName: string,
+): Promise<{ success: boolean; table_name: string; column_name: string; status: string }> {
+  return requestJson<{
+    success: boolean;
+    table_name: string;
+    column_name: string;
+    status: string;
+  }>(
+    `/api/seed-data/worldlines/${worldlineId}/semantic-overrides/${encodeURIComponent(tableName)}/${encodeURIComponent(columnName)}`,
+    {
+      method: "DELETE",
+    },
+    "Failed to delete semantic override",
+    true,
+  );
+}
+
+export async function invalidateSemanticCache(
+  worldlineId: string,
+): Promise<{ success: boolean; message: string }> {
+  return requestJson<{ success: boolean; message: string }>(
+    `/api/seed-data/worldlines/${worldlineId}/invalidate-semantic-cache`,
+    {
+      method: "POST",
+      headers: JSON_HEADERS,
+    },
+    "Failed to invalidate semantic cache",
+  );
+}

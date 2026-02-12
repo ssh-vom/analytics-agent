@@ -13,6 +13,7 @@
   import { ChevronRight } from "lucide-svelte";
   import { MessageSquare } from "lucide-svelte";
   import { Zap } from "lucide-svelte";
+  import { Columns } from "lucide-svelte";
   import { onDestroy, onMount } from "svelte";
 
   let threadsExpanded = true;
@@ -112,6 +113,7 @@
   $: isSettings = currentPath === "/settings";
   $: isWorldlines = currentPath === "/worldlines";
   $: isData = currentPath === "/data";
+  $: isSchema = currentPath === "/schema";
 </script>
 
 <div class="app-layout">
@@ -188,6 +190,10 @@
         <a href="/data" class="nav-item" class:active={isData}>
           <FileSpreadsheet size={16} />
           <span>Data Sources</span>
+        </a>
+        <a href="/schema" class="nav-item" class:active={isSchema}>
+          <Columns size={16} />
+          <span>Schema</span>
         </a>
         <a href="/connectors" class="nav-item" class:active={isConnectors}>
           <Database size={16} />

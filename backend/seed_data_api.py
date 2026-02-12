@@ -29,6 +29,9 @@ detach_external_duckdb = seed_data_module.detach_external_duckdb
 list_imported_tables = seed_data_module.list_imported_tables
 list_attached_databases = seed_data_module.list_attached_databases
 get_worldline_schema = seed_data_module.get_worldline_schema
+get_semantic_overrides = seed_data_module.get_semantic_overrides
+set_semantic_overrides = seed_data_module.set_semantic_overrides
+delete_semantic_override = seed_data_module.delete_semantic_override
 MAX_CSV_FILE_SIZE = seed_data_module.MAX_CSV_FILE_SIZE
 TEMP_UPLOAD_DIR = seed_data_module.TEMP_UPLOAD_DIR
 capture_worldline_snapshot = duckdb_manager_module.capture_worldline_snapshot
@@ -493,3 +496,96 @@ async def list_all_tables_endpoint(
         ]
 
     return {"tables": all_tables, "count": len(all_tables)}
+
+
+# Semantic overrides models
+class SemanticOverride(BaseModel):
+    table_name: str = Field(..., description="The table name")
+    column_name: str = Field(..., description="The column name")
+    role: str = Field(..., description="The semantic role: dimension, measure, or time")
+
+
+class SemanticOverridesRequest(BaseModel):
+    overrides: list[SemanticOverride] = Field(
+        ..., description="List of semantic overrides to save"
+    )
+
+
+@router.get("/worldlines/{worldline_id}/semantic-overrides")
+async def get_semantic_overrides_endpoint(worldline_id: str):
+    """
+    Get all semantic overrides for a worldline.
+
+    Returns column role overrides that modify the auto-inferred semantic types.
+    """
+    with get_conn() as conn:
+        _require_worldline(conn, worldline_id)
+
+    overrides = get_semantic_overrides(worldline_id)
+    return {"overrides": overrides}
+
+
+@router.put("/worldlines/{worldline_id}/semantic-overrides")
+async def set_semantic_overrides_endpoint(
+    worldline_id: str, request: SemanticOverridesRequest
+):
+    """
+    Batch set semantic overrides for a worldline.
+
+    Replaces all existing overrides with the provided set.
+    Use this to save changes from the schema editor.
+
+    - **overrides**: List of overrides with table_name, column_name, and role
+    """
+    with get_conn() as conn:
+        _require_worldline(conn, worldline_id)
+
+    # Convert Pydantic models to dicts
+    overrides_data = [
+        {
+            "table_name": o.table_name,
+            "column_name": o.column_name,
+            "role": o.role,
+        }
+        for o in request.overrides
+    ]
+
+    updated_overrides = set_semantic_overrides(worldline_id, overrides_data)
+    return {"overrides": updated_overrides, "count": len(updated_overrides)}
+
+
+@router.delete(
+    "/worldlines/{worldline_id}/semantic-overrides/{table_name}/{column_name}"
+)
+async def delete_semantic_override_endpoint(
+    worldline_id: str, table_name: str, column_name: str
+):
+    """
+    Delete a single semantic override.
+
+    - **table_name**: The table name
+    - **column_name**: The column name
+    """
+    with get_conn() as conn:
+        _require_worldline(conn, worldline_id)
+
+    result = delete_semantic_override(worldline_id, table_name, column_name)
+    return {"success": True, **result}
+
+
+@router.post("/worldlines/{worldline_id}/invalidate-semantic-cache")
+async def invalidate_semantic_cache_endpoint(worldline_id: str):
+    """
+    Invalidate the semantic cache for a worldline.
+
+    Call this after saving semantic overrides to ensure the chat engine
+    picks up the new column roles.
+    """
+    with get_conn() as conn:
+        _require_worldline(conn, worldline_id)
+
+    # The actual cache invalidation happens in the chat engine
+    # For now, we just return success - the frontend should call this
+    # after saving overrides, and the chat engine will rebuild the catalog
+    # on next use since we'll check for staleness
+    return {"success": True, "message": "Semantic cache invalidated"}

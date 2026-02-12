@@ -130,7 +130,20 @@ class DockerSandboxRunner:
                 return False
         return True
 
-    def _scan_artifacts(self, workspace: Path) -> list[dict[str, str]]:
+    def _snapshot_workspace(self, workspace: Path) -> dict[str, float]:
+        """Capture file paths and modification times before execution."""
+        snapshot: dict[str, float] = {}
+        for file_path in workspace.rglob("*"):
+            if self._is_artifact_candidate(workspace, file_path):
+                snapshot[str(file_path.resolve())] = file_path.stat().st_mtime
+        return snapshot
+
+    def _scan_artifacts(
+        self,
+        workspace: Path,
+        before_snapshot: dict[str, float] | None = None,
+    ) -> list[dict[str, str]]:
+        """Scan for artifacts, optionally filtering to only new/modified files."""
         artifacts: list[dict[str, str]] = []
         seen_paths: set[str] = set()
 
@@ -142,6 +155,14 @@ class DockerSandboxRunner:
             if normalized_path in seen_paths:
                 continue
             seen_paths.add(normalized_path)
+
+            # If we have a before snapshot, only include new or modified files
+            if before_snapshot is not None:
+                current_mtime = file_path.stat().st_mtime
+                prev_mtime = before_snapshot.get(normalized_path)
+                # Skip if file existed before and wasn't modified
+                if prev_mtime is not None and current_mtime <= prev_mtime:
+                    continue
 
             artifacts.append(
                 {
@@ -161,10 +182,14 @@ class DockerSandboxRunner:
         workspace.mkdir(parents=True, exist_ok=True)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-        safe_worldline = "".join(ch for ch in worldline_id if ch.isalnum()) or "worldline"
+        safe_worldline = (
+            "".join(ch for ch in worldline_id if ch.isalnum()) or "worldline"
+        )
         sandbox_id = f"textql_{safe_worldline[-20:]}_{uuid4().hex[:8]}"
 
-        start_cmd = self._build_start_command(sandbox_id=sandbox_id, workspace=workspace)
+        start_cmd = self._build_start_command(
+            sandbox_id=sandbox_id, workspace=workspace
+        )
         proc = subprocess.run(
             start_cmd,
             capture_output=True,
@@ -205,6 +230,9 @@ class DockerSandboxRunner:
         workspace.mkdir(parents=True, exist_ok=True)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
+        # Snapshot files before execution to detect new/modified artifacts
+        before_snapshot = self._snapshot_workspace(workspace)
+
         script_path = workspace / ".runner_input.py"
         script_path.write_text(code, encoding="utf-8")
 
@@ -215,7 +243,7 @@ class DockerSandboxRunner:
                     "stdout": "",
                     "stderr": "",
                     "error": "docker CLI not found on PATH",
-                    "artifacts": self._scan_artifacts(workspace),
+                    "artifacts": self._scan_artifacts(workspace, before_snapshot),
                     "previews": {"dataframes": []},
                 }
 
@@ -232,7 +260,7 @@ class DockerSandboxRunner:
                     "stdout": _to_text(exc.stdout),
                     "stderr": _to_text(exc.stderr),
                     "error": f"Python execution timed out after {timeout_s} seconds",
-                    "artifacts": self._scan_artifacts(workspace),
+                    "artifacts": self._scan_artifacts(workspace, before_snapshot),
                     "previews": {"dataframes": []},
                 }
             except Exception as exc:
@@ -240,19 +268,21 @@ class DockerSandboxRunner:
                     "stdout": "",
                     "stderr": "",
                     "error": str(exc),
-                    "artifacts": self._scan_artifacts(workspace),
+                    "artifacts": self._scan_artifacts(workspace, before_snapshot),
                     "previews": {"dataframes": []},
                 }
 
             error = None
             if proc.returncode != 0:
-                error = (proc.stderr or "").strip() or f"Process exited with code {proc.returncode}"
+                error = (
+                    proc.stderr or ""
+                ).strip() or f"Process exited with code {proc.returncode}"
 
             return {
                 "stdout": proc.stdout,
                 "stderr": proc.stderr,
                 "error": error,
-                "artifacts": self._scan_artifacts(workspace),
+                "artifacts": self._scan_artifacts(workspace, before_snapshot),
                 "previews": {"dataframes": []},
             }
         finally:

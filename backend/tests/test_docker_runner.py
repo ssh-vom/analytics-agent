@@ -54,7 +54,9 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertEqual(runner.image, "textql-sandbox:py311")
 
     def test_image_can_be_overridden_by_env(self) -> None:
-        with patch.dict(os.environ, {"SANDBOX_IMAGE": "custom/sandbox:latest"}, clear=True):
+        with patch.dict(
+            os.environ, {"SANDBOX_IMAGE": "custom/sandbox:latest"}, clear=True
+        ):
             runner = DockerSandboxRunner()
         self.assertEqual(runner.image, "custom/sandbox:latest")
 
@@ -66,10 +68,13 @@ class DockerRunnerTests(unittest.TestCase):
         def fake_run(*args, **kwargs):
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             (artifacts_dir / "result.md").write_text("ok", encoding="utf-8")
-            return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="ok\n", stderr="")
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=0, stdout="ok\n", stderr=""
+            )
 
-        with patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"), patch(
-            "sandbox.docker_runner.subprocess.run", side_effect=fake_run
+        with (
+            patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"),
+            patch("sandbox.docker_runner.subprocess.run", side_effect=fake_run),
         ):
             out = self._run(
                 runner.execute(
@@ -83,7 +88,10 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertEqual(out["stdout"], "ok\n")
         self.assertEqual(out["error"], None)
         self.assertIn("result.md", [artifact["name"] for artifact in out["artifacts"]])
-        self.assertIn("artifacts", [Path(artifact["path"]).parent.name for artifact in out["artifacts"]])
+        self.assertIn(
+            "artifacts",
+            [Path(artifact["path"]).parent.name for artifact in out["artifacts"]],
+        )
         self.assertFalse((workspace / ".runner_input.py").exists())
 
     def test_execute_discovers_artifacts_saved_in_workspace_root(self) -> None:
@@ -93,10 +101,13 @@ class DockerRunnerTests(unittest.TestCase):
         def fake_run(*args, **kwargs):
             workspace.mkdir(parents=True, exist_ok=True)
             (workspace / "line_2x.png").write_bytes(b"png")
-            return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=0, stdout="", stderr=""
+            )
 
-        with patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"), patch(
-            "sandbox.docker_runner.subprocess.run", side_effect=fake_run
+        with (
+            patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"),
+            patch("sandbox.docker_runner.subprocess.run", side_effect=fake_run),
         ):
             out = self._run(
                 runner.execute(
@@ -109,18 +120,25 @@ class DockerRunnerTests(unittest.TestCase):
 
         names = [artifact["name"] for artifact in out["artifacts"]]
         self.assertIn("line_2x.png", names)
-        found = next(artifact for artifact in out["artifacts"] if artifact["name"] == "line_2x.png")
+        found = next(
+            artifact
+            for artifact in out["artifacts"]
+            if artifact["name"] == "line_2x.png"
+        )
         self.assertEqual(found["type"], "image")
 
     def test_execute_nonzero_sets_error(self) -> None:
         runner = DockerSandboxRunner()
-        with patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"), patch(
-            "sandbox.docker_runner.subprocess.run",
-            return_value=subprocess.CompletedProcess(
-                args=["docker", "run"],
-                returncode=1,
-                stdout="",
-                stderr="boom",
+        with (
+            patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"),
+            patch(
+                "sandbox.docker_runner.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=["docker", "run"],
+                    returncode=1,
+                    stdout="",
+                    stderr="boom",
+                ),
             ),
         ):
             out = self._run(
@@ -144,8 +162,9 @@ class DockerRunnerTests(unittest.TestCase):
             output="partial out",
             stderr="partial err",
         )
-        with patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"), patch(
-            "sandbox.docker_runner.subprocess.run", side_effect=timeout_exc
+        with (
+            patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"),
+            patch("sandbox.docker_runner.subprocess.run", side_effect=timeout_exc),
         ):
             out = self._run(
                 runner.execute(
@@ -181,6 +200,89 @@ class DockerRunnerTests(unittest.TestCase):
         with patch("sandbox.docker_runner.shutil.which", return_value=None):
             with self.assertRaises(RuntimeError):
                 self._run(runner.start("w_no_docker"))
+
+    def test_execute_only_returns_new_or_modified_artifacts(self) -> None:
+        """Artifacts from previous executions should not be re-reported."""
+        runner = DockerSandboxRunner()
+        workspace = runner._workspace_dir("w_dedup")
+        artifacts_dir = workspace / "artifacts"
+        workspace.mkdir(parents=True, exist_ok=True)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pre-existing file from a previous execution
+        preexisting = artifacts_dir / "old_chart.png"
+        preexisting.write_bytes(b"old png")
+
+        import time
+
+        time.sleep(0.01)  # Ensure mtime difference
+
+        def fake_run(*args, **kwargs):
+            # Only create a new file during this execution
+            (artifacts_dir / "new_chart.png").write_bytes(b"new png")
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=0, stdout="ok", stderr=""
+            )
+
+        with (
+            patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"),
+            patch("sandbox.docker_runner.subprocess.run", side_effect=fake_run),
+        ):
+            out = self._run(
+                runner.execute(
+                    sandbox_id="sb_w_dedup",
+                    worldline_id="w_dedup",
+                    code="print('ok')",
+                    timeout_s=5,
+                )
+            )
+
+        artifact_names = [a["name"] for a in out["artifacts"]]
+        # New artifact should be present
+        self.assertIn("new_chart.png", artifact_names)
+        # Pre-existing artifact should NOT be present
+        self.assertNotIn("old_chart.png", artifact_names)
+
+    def test_execute_returns_modified_artifacts(self) -> None:
+        """If a pre-existing file is modified, it should be returned."""
+        runner = DockerSandboxRunner()
+        workspace = runner._workspace_dir("w_modified")
+        artifacts_dir = workspace / "artifacts"
+        workspace.mkdir(parents=True, exist_ok=True)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pre-existing file
+        chart_file = artifacts_dir / "chart.png"
+        chart_file.write_bytes(b"v1")
+
+        import time
+
+        time.sleep(0.01)  # Ensure mtime difference
+
+        def fake_run(*args, **kwargs):
+            # Modify the existing file
+            time.sleep(0.01)
+            chart_file.write_bytes(b"v2 modified")
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=0, stdout="ok", stderr=""
+            )
+
+        with (
+            patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"),
+            patch("sandbox.docker_runner.subprocess.run", side_effect=fake_run),
+        ):
+            out = self._run(
+                runner.execute(
+                    sandbox_id="sb_w_modified",
+                    worldline_id="w_modified",
+                    code="print('ok')",
+                    timeout_s=5,
+                )
+            )
+
+        artifact_names = [a["name"] for a in out["artifacts"]]
+        # Modified file should be returned
+        self.assertIn("chart.png", artifact_names)
 
 
 if __name__ == "__main__":

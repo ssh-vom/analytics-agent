@@ -105,6 +105,20 @@ def _ensure_import_history_table(conn: duckdb.DuckDBPyConnection) -> None:
     """)
 
 
+def _ensure_semantic_overrides_table(conn: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the _semantic_overrides metadata table exists."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _semantic_overrides (
+            id VARCHAR PRIMARY KEY,
+            table_name VARCHAR NOT NULL,
+            column_name VARCHAR NOT NULL,
+            role VARCHAR NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(table_name, column_name)
+        )
+    """)
+
+
 def import_csv_to_worldline(
     worldline_id: str,
     file_path: Path,
@@ -558,5 +572,164 @@ def get_worldline_schema(worldline_id: str) -> dict[str, Any]:
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to get schema: {str(e)}")
+    finally:
+        conn.close()
+
+
+def get_semantic_overrides(worldline_id: str) -> list[dict[str, Any]]:
+    """
+    Get all semantic overrides for a worldline.
+
+    Args:
+        worldline_id: The worldline to query
+
+    Returns:
+        List of override records with table_name, column_name, role
+    """
+    db_path = worldline_db_path(worldline_id)
+
+    if not db_path.exists():
+        return []
+
+    conn = open_worldline_connection(worldline_id)
+
+    try:
+        # Check if overrides table exists
+        table_exists = conn.execute("""
+            SELECT table_name FROM information_schema.tables 
+            WHERE table_name = '_semantic_overrides'
+        """).fetchone()
+
+        if not table_exists:
+            return []
+
+        results = conn.execute("""
+            SELECT table_name, column_name, role, updated_at
+            FROM _semantic_overrides
+            ORDER BY table_name, column_name
+        """).fetchall()
+
+        return [
+            {
+                "table_name": r[0],
+                "column_name": r[1],
+                "role": r[2],
+                "updated_at": r[3],
+            }
+            for r in results
+        ]
+
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def set_semantic_overrides(
+    worldline_id: str, overrides: list[dict[str, str]]
+) -> list[dict[str, Any]]:
+    """
+    Batch set semantic overrides for a worldline.
+    Replaces all existing overrides with the new set.
+
+    Args:
+        worldline_id: The worldline to update
+        overrides: List of overrides, each with table_name, column_name, role
+
+    Returns:
+        The updated list of overrides
+    """
+    conn = open_worldline_connection(worldline_id)
+
+    try:
+        _ensure_semantic_overrides_table(conn)
+
+        # Clear existing overrides
+        conn.execute("DELETE FROM _semantic_overrides")
+
+        # Insert new overrides
+        for override in overrides:
+            override_id = f"override_{uuid4().hex[:12]}"
+            conn.execute(
+                """
+                INSERT INTO _semantic_overrides (id, table_name, column_name, role)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    override_id,
+                    override["table_name"],
+                    override["column_name"],
+                    override["role"],
+                ),
+            )
+
+        conn.commit()
+
+        # Return the updated overrides
+        return get_semantic_overrides(worldline_id)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, detail=f"Failed to set overrides: {str(e)}"
+        )
+    finally:
+        conn.close()
+
+
+def delete_semantic_override(
+    worldline_id: str, table_name: str, column_name: str
+) -> dict[str, Any]:
+    """
+    Delete a single semantic override.
+
+    Args:
+        worldline_id: The worldline to update
+        table_name: The table name
+        column_name: The column name
+
+    Returns:
+        Status of the delete operation
+    """
+    conn = open_worldline_connection(worldline_id)
+
+    try:
+        _ensure_semantic_overrides_table(conn)
+
+        # Check if override exists
+        existing = conn.execute(
+            """
+            SELECT id FROM _semantic_overrides 
+            WHERE table_name = ? AND column_name = ?
+            """,
+            (table_name, column_name),
+        ).fetchone()
+
+        if not existing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Override not found for {table_name}.{column_name}",
+            )
+
+        conn.execute(
+            """
+            DELETE FROM _semantic_overrides 
+            WHERE table_name = ? AND column_name = ?
+            """,
+            (table_name, column_name),
+        )
+        conn.commit()
+
+        return {
+            "table_name": table_name,
+            "column_name": column_name,
+            "status": "deleted",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, detail=f"Failed to delete override: {str(e)}"
+        )
     finally:
         conn.close()

@@ -417,15 +417,62 @@ def build_catalog_for_worldline(
         # Import here to avoid circular imports
         if (__package__ or "").startswith("backend"):
             from backend.duckdb_manager import open_worldline_connection
+            from backend.seed_data import get_semantic_overrides
         else:
             from duckdb_manager import open_worldline_connection
+            from seed_data import get_semantic_overrides
 
         conn = open_worldline_connection(worldline_id)
         catalog = build_catalog_from_duckdb(conn)
         conn.close()
+
+        # Apply user overrides
+        overrides = get_semantic_overrides(worldline_id)
+        if overrides:
+            catalog = apply_overrides(catalog, overrides)
+
         return catalog
     except Exception as e:
         logging.getLogger(__name__).warning(
             f"Failed to build semantic catalog for worldline {worldline_id}: {e}"
         )
         return None
+
+
+def apply_overrides(catalog: SemanticCatalog, overrides: list[dict]) -> SemanticCatalog:
+    """Apply user overrides to column roles in the catalog.
+
+    Args:
+        catalog: The semantic catalog to modify
+        overrides: List of overrides, each with table_name, column_name, role
+
+    Returns:
+        The modified catalog (mutated in place)
+    """
+    # Build lookup: (table, column) -> role
+    override_map: dict[tuple[str, str], ColumnRole] = {}
+    for o in overrides:
+        key = (o["table_name"].lower(), o["column_name"].lower())
+        role = o["role"]
+        if role in ("dimension", "measure", "time", "unknown"):
+            override_map[key] = role  # type: ignore
+
+    # Apply overrides to catalog columns
+    for dataset in catalog.datasets:
+        # Try both full name (schema.table) and short name (table)
+        dataset_name_lower = dataset.name.lower()
+        short_name = dataset_name_lower.split(".")[-1]
+
+        for col in dataset.columns:
+            col_name_lower = col.name.lower()
+
+            # Check both full table name and short name
+            key_full = (dataset_name_lower, col_name_lower)
+            key_short = (short_name, col_name_lower)
+
+            if key_full in override_map:
+                col.role = override_map[key_full]
+            elif key_short in override_map:
+                col.role = override_map[key_short]
+
+    return catalog
