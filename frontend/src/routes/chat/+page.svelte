@@ -69,6 +69,8 @@
     removeUploadedFileByName,
   } from "$lib/chat/csvImportPanel";
   import { refreshWorldlineContextSnapshot } from "$lib/chat/worldlineContext";
+  import { createWorldlineManager } from "$lib/chat/worldlineManager";
+  import { createCSVImportController } from "$lib/chat/csvImportController";
   import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
