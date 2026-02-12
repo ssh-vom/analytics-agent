@@ -77,3 +77,30 @@
   /* Sidebar — wider for better proportions */
   --sidebar-width: 320px;
 }
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-0: #f5f6f8;
+  --bg-1: #ffffff;
+  --bg-2: #f0f2f5;
+  --surface-0: #ffffff;
+  --surface-1: #f6f7f9;
+  --surface-2: #eceff3;
+  --surface-3: #e3e8ef;
+  --surface-hover: rgba(17, 24, 39, 0.04);
+  --surface-active: rgba(17, 24, 39, 0.08);
+
+  --text-primary: #17191d;
+  --text-secondary: #3e4652;
+  --text-muted: #606b79;
+  --text-dim: #7a8594;
+
+  --border-soft: rgba(20, 28, 40, 0.10);
+  --border-medium: rgba(20, 28, 40, 0.16);
+  --border-strong: rgba(20, 28, 40, 0.25);
+
+  --shadow-sm: 0 1px 3px rgba(20, 28, 40, 0.08);
+  --shadow-md: 0 4px 12px rgba(20, 28, 40, 0.12);
+  --shadow-lg: 0 12px 32px rgba(20, 28, 40, 0.16);
+}

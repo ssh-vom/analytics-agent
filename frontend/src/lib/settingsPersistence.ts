@@ -45,3 +45,24 @@ export function buildPersistedSettings(settings: SettingsState): PersistedSettin
     defaultProvider: settings.defaultProvider,
   };
 }
+
+export function resolveThemePreference(
+  theme: SettingsState["theme"] | undefined,
+): "dark" | "light" {
+  if (theme === "light") {
+    return "light";
+  }
+  if (theme === "auto" && typeof window !== "undefined") {
+    return window.matchMedia("(prefers-color-scheme: light)").matches
+      ? "light"
+      : "dark";
+  }
+  return "dark";
+}
+
+export function applyTheme(theme: "dark" | "light"): void {
+  if (typeof document === "undefined") {
+    return;
+  }
+  document.documentElement.setAttribute("data-theme", theme);
+}
