@@ -1,5 +1,13 @@
 <script lang="ts">
   import { ChevronDown } from "lucide-svelte";
+
+  function formatSkipReason(reason: string): string {
+    if (reason === "recent_identical_successful_tool_call") return "already ran";
+    if (reason === "repeated_identical_tool_call") return "repeated in turn";
+    if (reason === "duplicate_artifact_prevented") return "duplicate artifact";
+    if (reason === "invalid_tool_payload") return "invalid payload";
+    return reason;
+  }
   import { ChevronRight } from "lucide-svelte";
   import { GitBranch } from "lucide-svelte";
   import { Clock } from "lucide-svelte";
@@ -11,7 +19,8 @@
   export let title = "";
   export let expandAriaLabel = "Expand tool cell";
   export let collapseAriaLabel = "Collapse tool cell";
-  export let statusLabel: "running" | "error" | "done" | "queued" = "queued";
+  export let statusLabel: "running" | "error" | "done" | "queued" | "skipped" = "queued";
+  export let skipReason: string | undefined;
   export let executionMs: number | undefined;
   export let onBranch: (() => void) | null = null;
   export let accentColor = "var(--text-secondary)";
@@ -52,7 +61,7 @@
       {:else if statusLabel === "done"}
         <CheckCircle size={12} />
       {/if}
-      <span>{statusLabel}</span>
+      <span title={skipReason}>{statusLabel}{#if statusLabel === "skipped" && skipReason}: {formatSkipReason(skipReason)}{/if}</span>
     </div>
 
     {#if executionMs !== undefined}
@@ -170,6 +179,11 @@
 
   .status-badge.queued {
     color: var(--text-dim);
+  }
+
+  .status-badge.skipped {
+    background: var(--accent-orange-muted, #fff3e0);
+    color: var(--accent-orange, #e65100);
   }
 
   .execution-time {

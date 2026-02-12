@@ -98,12 +98,32 @@ class SemanticExecutor:
             self._catalog_cache.clear()
 
 
+_VISUALIZATION_HINTS = (
+    "plot",
+    "chart",
+    "graph",
+    "visuali",
+    "visualize",
+    "matplotlib",
+    "histogram",
+    "scatter",
+    "heatmap",
+    "draw",
+    "figure",
+)
+
+
 async def should_use_semantic_lane(
     user_message: str,
     executor: SemanticExecutor,
     worldline_id: str,
 ) -> tuple[bool, ResolutionResult | None]:
     """Determine if query should use semantic (deterministic) lane."""
+    msg_lower = user_message.lower()
+    # Prefer agentic fallback when user asks for visualization - semantic lane is SQL-only
+    if any(hint in msg_lower for hint in _VISUALIZATION_HINTS):
+        return False, None
+
     # Quick heuristic check - skip semantic for non-analytical queries
     analysis_patterns = [
         "sum",
@@ -117,7 +137,6 @@ async def should_use_semantic_lane(
         "how much",
         "calculate",
     ]
-    msg_lower = user_message.lower()
     if not any(p in msg_lower for p in analysis_patterns):
         return False, None
 

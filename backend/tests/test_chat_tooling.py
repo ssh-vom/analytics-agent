@@ -41,14 +41,23 @@ class ChatToolingNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["code"], "print(42)")
         self.assertEqual(normalized["timeout"], 12)
 
-    def test_does_not_fallback_to_raw_for_incomplete_python_args(self) -> None:
+    def test_extracts_code_from_incomplete_raw_via_regex(self) -> None:
+        # Regex fallback can extract code from _raw even when JSON is incomplete
         normalized = normalize_tool_arguments(
             "run_python",
             {"_raw": '{"code":"print(42)"'},
         )
 
-        self.assertNotIn("code", normalized)
+        self.assertEqual(normalized["code"], "print(42)")
         self.assertEqual(normalized["timeout"], 30)
+
+    def test_normalize_python_arguments_from_query_alias(self) -> None:
+        normalized = normalize_tool_arguments(
+            "run_python",
+            {"query": "print(LATEST_SQL_DF.head())", "timeout": 30},
+        )
+
+        self.assertEqual(normalized["code"], "print(LATEST_SQL_DF.head())")
 
     def test_unwraps_embedded_sql_payload_string(self) -> None:
         normalized = normalize_tool_arguments(

@@ -22,7 +22,16 @@ export function statusFromDelta(delta: StreamDeltaPayload): string | null {
     if (delta.reason === "invalid_tool_payload") {
       return "Retrying after invalid tool payload...";
     }
-    return "Skipped repeated tool call...";
+    if (delta.reason === "recent_identical_successful_tool_call") {
+      return "Skipped (already ran)...";
+    }
+    if (delta.reason === "repeated_identical_tool_call") {
+      return "Skipped (repeated in turn)...";
+    }
+    if (delta.reason === "duplicate_artifact_prevented") {
+      return "Skipped (duplicate artifact)...";
+    }
+    return "Skipped...";
   }
 
   if (delta.type === "assistant_text" && !delta.done) {

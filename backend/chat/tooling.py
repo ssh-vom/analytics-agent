@@ -93,6 +93,28 @@ def looks_like_complete_tool_args(args_delta: str) -> bool:
         return False
 
 
+def chunk_has_non_empty_code_or_sql(args_delta: str, tool_name: str) -> bool:
+    """True if the chunk parses as JSON and has non-empty code/sql content.
+    Used to avoid overwriting accumulated args with empty or partial chunks."""
+    if not args_delta or not isinstance(args_delta, str):
+        return False
+    try:
+        parsed = json.loads(args_delta)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if tool_name == "run_sql":
+        sql = _extract_text_field(parsed.get("sql") or parsed.get("query") or parsed.get("statement"))
+        return sql is not None
+    if tool_name == "run_python":
+        code = _extract_text_field(
+            parsed.get("code") or parsed.get("python") or parsed.get("script") or parsed.get("input")
+        )
+        return code is not None
+    return "sql" in parsed or "code" in parsed
+
+
 def _extract_text_field(value: Any) -> str | None:
     if isinstance(value, str):
         stripped = value.strip()
@@ -142,7 +164,7 @@ def _unwrap_embedded_argument_payload(value: str, *, field: str) -> str:
         return direct
 
     aliases = {
-        "code": ("python", "script", "input"),
+        "code": ("python", "script", "input", "query"),
         "sql": ("query", "statement"),
     }
     for alias in aliases.get(field, ()):
@@ -221,6 +243,8 @@ def normalize_tool_arguments(
             code = _extract_text_field(result.get("script"))
         if code is None:
             code = _extract_text_field(result.get("input"))
+        if code is None:
+            code = _extract_text_field(result.get("query"))
         if code is not None:
             result["code"] = _unwrap_embedded_argument_payload(code, field="code")
 
@@ -234,6 +258,7 @@ def normalize_tool_arguments(
 
         code_field = "sql" if resolved_tool == "run_sql" else "code"
         raw_looks_complete = raw.strip().endswith("}")
+        # Try regex extraction whenever we lack code/sql - including incomplete _raw
         if code_field not in result and (
             resolved_tool not in {"run_sql", "run_python"} or raw_looks_complete
         ):
@@ -242,6 +267,17 @@ def normalize_tool_arguments(
             if match:
                 try:
                     result[code_field] = json.loads(f'"{match.group(1)}"')
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        # Also try regex on incomplete _raw for run_sql/run_python when still missing
+        if code_field not in result and resolved_tool in {"run_sql", "run_python"}:
+            pattern = rf'"{code_field}"\s*:\s*"((?:[^"\\]|\\.)*)"'
+            match = re.search(pattern, raw, re.DOTALL)
+            if match:
+                try:
+                    decoded = json.loads(f'"{match.group(1)}"')
+                    if isinstance(decoded, str) and decoded.strip():
+                        result[code_field] = decoded
                 except (json.JSONDecodeError, ValueError):
                     pass
 
@@ -274,6 +310,23 @@ def tool_signature(*, worldline_id: str, tool_call: ToolCall) -> str:
             "worldline_id": worldline_id,
             "name": tool_call.name,
             "arguments": tool_call.arguments or {},
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def signature_for_dedup(*, worldline_id: str, tool_call: ToolCall) -> str:
+    """Signature for cross-turn dedup, excluding limit/timeout so minor param changes don't block."""
+    args = dict(tool_call.arguments or {})
+    args.pop("limit", None)
+    args.pop("timeout", None)
+    return json.dumps(
+        {
+            "worldline_id": worldline_id,
+            "name": tool_call.name,
+            "arguments": args,
         },
         ensure_ascii=True,
         sort_keys=True,

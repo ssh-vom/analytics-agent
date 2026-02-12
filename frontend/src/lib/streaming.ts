@@ -9,12 +9,31 @@ import { sanitizeCodeArtifacts } from "$lib/codeSanitizer";
 export type DisplayItem =
   | { kind: "event"; event: TimelineEvent }
   | { kind: "streaming_text"; text: string; createdAt: string }
-  | { kind: "streaming_tool"; callId: string; type: "sql" | "python"; code: string; rawArgs: string; createdAt: string };
+  | {
+      kind: "streaming_tool";
+      callId: string;
+      type: "sql" | "python";
+      code: string;
+      rawArgs: string;
+      createdAt: string;
+      skipped?: boolean;
+      skipReason?: string;
+    };
 
 export interface StreamingState {
   text: string;
   textCreatedAt: string;
-  toolCalls: Map<string, { type: "sql" | "python"; code: string; rawArgs: string; createdAt: string }>;
+  toolCalls: Map<
+    string,
+    {
+      type: "sql" | "python";
+      code: string;
+      rawArgs: string;
+      createdAt: string;
+      skipped?: boolean;
+      skipReason?: string;
+    }
+  >;
 }
 
 const FALLBACK_DRAFT_ID: Record<"sql" | "python", string> = {
@@ -163,12 +182,21 @@ export function applyDelta(
   if (!kind) return state;
 
   if (delta.skipped) {
-    const toDelete = resolveDeleteDraftId(state, kind, delta.call_id);
-    if (!toDelete) {
+    const draftId = resolveDeleteDraftId(state, kind, delta.call_id);
+    if (!draftId) {
       return state;
     }
+    const existing = state.toolCalls.get(draftId);
+    if (!existing) {
+      return state;
+    }
+    // Keep the draft but mark as skipped so the cell shows a "Skipped" badge
     const next = new Map(state.toolCalls);
-    next.delete(toDelete);
+    next.set(draftId, {
+      ...existing,
+      skipped: true,
+      skipReason: typeof delta.reason === "string" ? delta.reason : undefined,
+    });
     return { ...state, toolCalls: next };
   }
 
@@ -232,7 +260,12 @@ export function clearFromEvent(
   event: TimelineEvent
 ): StreamingState {
   if (event.type === "assistant_message" || event.type === "assistant_plan") {
-    return { ...state, text: "", textCreatedAt: "" };
+    return {
+      ...state,
+      text: "",
+      textCreatedAt: "",
+      toolCalls: new Map(),
+    };
   }
   if (event.type === "tool_call_sql") {
     const toDelete = resolveDeleteDraftId(state, "sql", event.payload?.call_id);
@@ -278,6 +311,8 @@ export function buildDisplayItems(
       code: data.code,
       rawArgs: data.rawArgs,
       createdAt: data.createdAt,
+      skipped: data.skipped,
+      skipReason: data.skipReason,
     });
   }
   return items;
@@ -289,20 +324,19 @@ export function buildDisplayItems(
 export function streamingToolToEvent(
   item: Extract<DisplayItem, { kind: "streaming_tool" }>
 ): TimelineEvent {
-  if (item.type === "sql") {
-    return {
-      id: `draft-sql-${item.callId}`,
-      parent_event_id: null,
-      type: "tool_call_sql",
-      payload: { sql: item.code, limit: 100, call_id: item.callId },
-      created_at: item.createdAt,
-    };
+  const payload: Record<string, unknown> =
+    item.type === "sql"
+      ? { sql: item.code, limit: 100, call_id: item.callId }
+      : { code: item.code, timeout: 30, call_id: item.callId };
+  if (item.skipped) {
+    payload.skipped = true;
+    payload.skip_reason = item.skipReason;
   }
   return {
-    id: `draft-python-${item.callId}`,
+    id: `draft-${item.type}-${item.callId}`,
     parent_event_id: null,
-    type: "tool_call_python",
-    payload: { code: item.code, timeout: 30, call_id: item.callId },
+    type: item.type === "sql" ? "tool_call_sql" : "tool_call_python",
+    payload,
     created_at: item.createdAt,
   };
 }

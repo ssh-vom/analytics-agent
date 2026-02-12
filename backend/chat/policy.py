@@ -5,12 +5,16 @@ import re
 from typing import Any
 
 _RERUN_HINT_PATTERN = re.compile(
-    r"\b(rerun|re-run|run again|regenerate|recompute|refresh|overwrite|rebuild)\b",
+    r"\b("
+    r"rerun|re-run|run again|try again|retry|again|once more|"
+    r"do it again|regenerate|recompute|refresh|overwrite|rebuild"
+    r")\b",
     re.IGNORECASE,
 )
 
 _PYTHON_REQUIRED_HINT_PATTERN = re.compile(
-    r"\b(python|plot|chart|graph|visuali[sz]e|matplotlib|pandas|data\s*frame|histogram|scatter|heatmap)\b",
+    r"\b(python|plot|chart|graph|visuali[sz]e|matplotlib|pandas|data\s*frame|"
+    r"histogram|scatter|heatmap|draw|visual|figure|breakdown|show me the)\b",
     re.IGNORECASE,
 )
 
@@ -40,6 +44,7 @@ def required_terminal_tools(
 
     if _PYTHON_REQUIRED_HINT_PATTERN.search(visible_message):
         return {"run_python"}
+    # Note: output_type=report does not force run_python - engine has auto_report fallback
 
     return set()
 
@@ -197,9 +202,14 @@ def build_python_preflight_retry_message(
 ) -> str:
     error_code = str(tool_result.get("error_code") or "python_preflight_error")
     error_text = str(tool_result.get("error") or "Python preflight failed")
+    error_snippet = tool_result.get("error_snippet") or tool_result.get("snippet")
+    error_detail = f"{error_code}: {error_text}"
+    if isinstance(error_snippet, str) and error_snippet.strip():
+        error_detail += f" (snippet: {error_snippet[:200].strip()})"
     return (
-        "Correction: the previous run_python execution failed preflight "
-        f"({error_code}: {error_text}). Emit a fresh run_python tool call with "
+        "Correction: the previous run_python execution failed preflight ("
+        + error_detail
+        + "). Emit a fresh run_python tool call with "
         "valid executable Python in `code` (not nested JSON, not comments-only, and "
         "no backend tool function calls). Use LATEST_SQL_RESULT/LATEST_SQL_DF as input. "
         "SQL checkpoint: " + _checkpoint_preview(data_intent_summary)
@@ -212,3 +222,26 @@ def is_empty_python_payload_error(tool_result: dict[str, Any]) -> bool:
         return False
     lowered = error.lower()
     return "non-empty 'code'" in lowered or "empty `code`" in lowered
+
+
+def build_python_execution_retry_message(
+    *,
+    tool_result: dict[str, Any],
+    data_intent_summary: dict[str, Any] | None,
+) -> str:
+    """Nudge the model to fix and retry when Python ran but crashed at runtime."""
+    error = str(tool_result.get("error") or "Execution failed")
+    stderr = str(tool_result.get("stderr") or "")
+    if stderr:
+        stderr_preview = stderr.strip()[:400]
+        if len(stderr.strip()) > 400:
+            stderr_preview += "..."
+        error_detail = f"{error}\nstderr: {stderr_preview}"
+    else:
+        error_detail = error
+    return (
+        "The previous run_python failed at runtime. Fix the error and emit a new run_python call. "
+        f"Error: {error_detail}\n"
+        "Use LATEST_SQL_DF and the data intent checkpoint. SQL checkpoint: "
+        + _checkpoint_preview(data_intent_summary)
+    )

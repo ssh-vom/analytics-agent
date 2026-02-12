@@ -6,6 +6,7 @@ from chat.policy import (
     is_retryable_python_preflight_error,
     missing_required_terminal_tools,
     required_terminal_tools,
+    user_requested_rerun,
     validate_tool_payload,
 )
 from chat.report_fallback import AUTO_REPORT_CODE
@@ -111,6 +112,11 @@ class StateMachineTests(unittest.TestCase):
         )
 
         self.assertEqual(missing, {"run_python"})
+
+    def test_user_requested_rerun_detects_try_again(self) -> None:
+        self.assertTrue(user_requested_rerun("try again"))
+        self.assertTrue(user_requested_rerun("please retry this query"))
+        self.assertFalse(user_requested_rerun("summarize the results"))
 
     def test_retryable_python_preflight_error_classification(self) -> None:
         self.assertTrue(

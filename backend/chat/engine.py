@@ -37,6 +37,7 @@ from chat.data_intent import (
     upsert_data_intent_message,
 )
 from chat.policy import (
+    build_python_execution_retry_message,
     build_python_preflight_retry_message,
     build_required_tool_enforcement_message,
     build_tool_payload_correction_message,
@@ -57,6 +58,7 @@ from chat.state_machine import transition_state
 from chat.streaming_bridge import stream_llm_response
 from chat.tooling import (
     normalize_tool_arguments,
+    signature_for_dedup,
     tool_definitions,
     tool_name_to_delta_type,
     tool_signature,
@@ -76,7 +78,8 @@ from semantic.compiler import compile_query_spec, get_compilation_summary
 
 logger = logging.getLogger(__name__)
 
-_RECENT_SIGNATURE_WINDOW = 24
+_RECENT_SIGNATURE_WINDOW = 24  # turn-local repeated-call check (full signature)
+_RECENT_HISTORY_SIGNATURE_WINDOW = 5  # cross-turn "already ran recently" (dedup signature)
 _MAX_INVALID_TOOL_PAYLOAD_RETRIES: dict[str, int] = {
     "run_sql": 2,
     "run_python": 3,
@@ -86,13 +89,14 @@ _ARTIFACT_FILENAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _MAX_REQUIRED_TOOL_ENFORCEMENT_RETRIES = 2
+_MAX_PYTHON_EXECUTION_ERROR_RETRIES = 2
 
 
 @dataclass
 class ChatEngine:
     llm_client: LlmClient
     max_iterations: int = 20
-    max_output_tokens: int | None = 1500
+    max_output_tokens: int | None = None
     worldline_service: WorldlineService = field(default_factory=WorldlineService)
     _semantic_executor: SemanticExecutor | None = field(default=None, repr=False)
 
@@ -163,7 +167,8 @@ class ChatEngine:
         recent_successful_tool_signatures = self._recent_successful_tool_signatures(
             worldline_id=active_worldline_id,
             events=history_events,
-            limit=_RECENT_SIGNATURE_WINDOW,
+            limit=_RECENT_HISTORY_SIGNATURE_WINDOW,
+            use_dedup_signature=True,
         )
         recent_artifact_names = artifact_name_set(artifact_inventory)
         user_requested_rerun_flag = user_requested_rerun_hint(message)
@@ -193,6 +198,8 @@ class ChatEngine:
         )
         # #endregion
         final_text: str | None = None
+        stopped_due_to_invalid_payload = False
+        stopped_due_to_guard_stop = False
         successful_tool_signatures: set[str] = set()
         successful_tool_results: dict[str, dict[str, Any]] = {}
         turn_artifact_names: set[str] = set()
@@ -204,6 +211,7 @@ class ChatEngine:
             "run_sql": 0,
             "run_python": 0,
         }
+        python_execution_error_count = 0
         turn_state = "planning"
         state_transitions: list[dict[str, Any]] = [
             {"from": None, "to": "planning", "reason": "turn_started"}
@@ -248,6 +256,7 @@ class ChatEngine:
             if response.tool_calls:
                 repeated_call_detected = False
                 invalid_payload_retry_requested = False
+                python_execution_retry_requested = False
                 for raw_tool_call in response.tool_calls:
                     tool_name = (raw_tool_call.name or "").strip()
                     normalized_arguments = normalize_tool_arguments(
@@ -353,11 +362,11 @@ class ChatEngine:
                             invalid_payload_retry_requested = True
                             break
 
+                        stopped_due_to_invalid_payload = True
                         if tool_name == "run_python":
                             final_text = (
-                                "I stopped after repeated invalid Python tool payloads "
-                                "(empty/invalid `code`). I can continue once the model emits "
-                                "a valid run_python call."
+                                "I couldn't execute the Python code. Please try asking again "
+                                "or rephrasing (e.g. 'run Python to plot X' or 'visualize the data')."
                             )
                         else:
                             final_text = (
@@ -383,34 +392,40 @@ class ChatEngine:
                                     "reason": "repeated_identical_tool_call",
                                 },
                             )
-                        final_text = (
-                            "I stopped because the model repeated the same tool call "
-                            "with identical arguments in this turn."
-                        )
-                        repeated_call_detected = True
-                        break
-
-                    if (
-                        not user_requested_rerun_flag
-                        and signature in recent_successful_tool_signatures
-                    ):
-                        if on_delta is not None and delta_type is not None:
-                            await on_delta(
-                                active_worldline_id,
-                                {
-                                    "type": delta_type,
-                                    "call_id": tool_call.id or None,
-                                    "skipped": True,
-                                    "reason": "recent_identical_successful_tool_call",
-                                },
+                        messages.append(
+                            ChatMessage(
+                                role="system",
+                                content=(
+                                    "You repeated an identical tool call in this turn. "
+                                    "Do not repeat it again. Either emit a different tool "
+                                    "call that advances the task or produce the final answer "
+                                    "using prior results."
+                                ),
                             )
-                        final_text = (
-                            "I skipped this tool call because an identical successful "
-                            "call already ran recently in this worldline. "
-                            "If you want a fresh rerun, ask me to rerun or overwrite it."
                         )
-                        repeated_call_detected = True
-                        break
+                        continue
+
+                    if not user_requested_rerun_flag:
+                        dedup_signature = signature_for_dedup(
+                            worldline_id=active_worldline_id,
+                            tool_call=tool_call,
+                        )
+                        if dedup_signature in recent_successful_tool_signatures:
+                            if on_delta is not None and delta_type is not None:
+                                await on_delta(
+                                    active_worldline_id,
+                                    {
+                                        "type": delta_type,
+                                        "call_id": tool_call.id or None,
+                                        "skipped": True,
+                                        "reason": "recent_identical_successful_tool_call",
+                                    },
+                                )
+                            final_text = (
+                                "Similar query ran recently; ask me to rerun if you need fresh results."
+                            )
+                            repeated_call_detected = True
+                            break
 
                     if tool_name == "run_python" and not user_requested_rerun_flag:
                         code = (tool_call.arguments or {}).get("code")
@@ -481,7 +496,8 @@ class ChatEngine:
                             self._recent_successful_tool_signatures(
                                 worldline_id=active_worldline_id,
                                 events=history_events,
-                                limit=_RECENT_SIGNATURE_WINDOW,
+                                limit=_RECENT_HISTORY_SIGNATURE_WINDOW,
+                                use_dedup_signature=True,
                             )
                         )
                         recent_artifact_names = artifact_name_set(artifact_inventory)
@@ -489,6 +505,7 @@ class ChatEngine:
                         # Reset per-turn state for the new worldline context
                         sql_success_count = 0
                         python_success_count = 0
+                        python_execution_error_count = 0
                         successful_tool_signatures.clear()
                         turn_state = await self._transition_state_and_emit(
                             current_state=turn_state,
@@ -538,17 +555,22 @@ class ChatEngine:
                             invalid_payload_retry_requested = True
                             break
                         else:
+                            stopped_due_to_invalid_payload = True
                             final_text = (
-                                "I stopped after repeated invalid Python tool payloads "
-                                "(empty/invalid `code`). I'll continue once a valid Python "
-                                "tool call is provided."
+                                "I couldn't execute the Python code. Please try asking again "
+                                "or rephrasing (e.g. 'run Python to plot X' or 'visualize the data')."
                             )
                             repeated_call_detected = True
                             break
 
                     if not tool_result.get("error"):
                         successful_tool_signatures.add(signature)
-                        recent_successful_tool_signatures.add(signature)
+                        recent_successful_tool_signatures.add(
+                            signature_for_dedup(
+                                worldline_id=active_worldline_id,
+                                tool_call=tool_call,
+                            )
+                        )
                         successful_tool_results[signature] = tool_result
                         if tool_name == "run_sql":
                             sql_success_count += 1
@@ -639,6 +661,7 @@ class ChatEngine:
                                 invalid_payload_retry_requested = True
                                 break
 
+                            stopped_due_to_invalid_payload = True
                             final_text = (
                                 "I stopped after repeated Python preflight failures "
                                 "(syntax/tool-usage issues). I can continue once a valid "
@@ -646,7 +669,38 @@ class ChatEngine:
                             )
                             repeated_call_detected = True
                             break
+
+                        # Execution error: Python ran but crashed - nudge to fix and retry
+                        if (
+                            tool_name == "run_python"
+                            and tool_result.get("error")
+                            and not is_retryable_python_preflight_error(tool_result)
+                            and not is_empty_python_payload_error(tool_result)
+                        ):
+                            python_execution_error_count += 1
+                            if (
+                                python_execution_error_count
+                                <= _MAX_PYTHON_EXECUTION_ERROR_RETRIES
+                            ):
+                                messages.append(
+                                    ChatMessage(
+                                        role="system",
+                                        content=build_python_execution_retry_message(
+                                            tool_result=tool_result,
+                                            data_intent_summary=data_intent_summary,
+                                        ),
+                                    ),
+                                )
+                                python_execution_retry_requested = True
+                                break
+                            final_text = (
+                                "Python execution failed repeatedly. Please try "
+                                "rephrasing your request or simplifying the analysis."
+                            )
+                            repeated_call_detected = True
+                            break
                 if repeated_call_detected:
+                    stopped_due_to_guard_stop = True
                     if final_text:
                         turn_state = await self._transition_state_and_emit(
                             current_state=turn_state,
@@ -657,7 +711,7 @@ class ChatEngine:
                             on_delta=on_delta,
                         )
                     break
-                if invalid_payload_retry_requested:
+                if invalid_payload_retry_requested or python_execution_retry_requested:
                     continue
                 continue
 
@@ -777,7 +831,16 @@ class ChatEngine:
                 on_delta=on_delta,
             )
 
-        if requested_output_type == "report":
+        # Skip report fallback when we had invalid Python payloads - don't paper over failures
+        had_invalid_python_payloads = (
+            invalid_tool_payload_failures.get("run_python", 0) > 0
+        )
+        if (
+            requested_output_type == "report"
+            and not stopped_due_to_invalid_payload
+            and not stopped_due_to_guard_stop
+            and not had_invalid_python_payloads
+        ):
             report_generated = await self._ensure_report_pdf_artifact(
                 worldline_id=active_worldline_id,
                 starting_rowid=starting_rowid_by_worldline[active_worldline_id],
@@ -1181,10 +1244,12 @@ class ChatEngine:
         worldline_id: str,
         events: list[dict[str, Any]],
         limit: int,
+        use_dedup_signature: bool = False,
     ) -> set[str]:
         if limit <= 0:
             return set()
 
+        sig_fn = signature_for_dedup if use_dedup_signature else self._tool_signature
         by_id = {event.get("id"): event for event in events}
         signatures: set[str] = set()
 
@@ -1212,18 +1277,18 @@ class ChatEngine:
             parent_payload = parent.get("payload")
             if not isinstance(parent_payload, dict):
                 continue
+            if str(parent_payload.get("call_id") or "") == "auto_report_pdf":
+                continue
 
             args = dict(parent_payload)
             args.pop("call_id", None)
             normalized_args = normalize_tool_arguments(tool_name, args)
-            signature = self._tool_signature(
-                worldline_id=worldline_id,
-                tool_call=ToolCall(
-                    id=str(parent.get("id") or ""),
-                    name=tool_name,
-                    arguments=normalized_args,
-                ),
+            tc = ToolCall(
+                id=str(parent.get("id") or ""),
+                name=tool_name,
+                arguments=normalized_args,
             )
+            signature = sig_fn(worldline_id=worldline_id, tool_call=tc)
             signatures.add(signature)
             if len(signatures) >= limit:
                 break

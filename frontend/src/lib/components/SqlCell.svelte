@@ -21,13 +21,17 @@
   $: hasError = Boolean(result?.error);
   $: isRunning = Boolean(callEvent) && !resultEvent;
   $: isDraft = Boolean(callEvent) && !resultEvent;
-  $: statusLabel = isRunning
-    ? "running"
-    : hasError
-      ? "error"
-      : result
-        ? "done"
-        : "queued";
+  $: isSkipped = Boolean(callEvent?.payload?.skipped);
+  $: skipReason = typeof callEvent?.payload?.skip_reason === "string" ? callEvent.payload.skip_reason : undefined;
+  $: statusLabel = isSkipped
+    ? "skipped"
+    : isRunning
+      ? "running"
+      : hasError
+        ? "error"
+        : result
+          ? "done"
+          : "queued";
 </script>
 
 <article class="sql-cell message-entrance">
@@ -37,6 +41,7 @@
     expandAriaLabel="Expand SQL cell"
     collapseAriaLabel="Collapse SQL cell"
     {statusLabel}
+    {skipReason}
     executionMs={result?.execution_ms}
     {onBranch}
     accentColor="var(--accent-orange)"

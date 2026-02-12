@@ -345,7 +345,7 @@ class ChatApiTests(unittest.TestCase):
             "The query returned one row.",
         )
 
-    def test_chat_stops_repeated_identical_tool_calls_in_turn(self) -> None:
+    def test_chat_skips_repeated_identical_tool_calls_in_turn_and_continues(self) -> None:
         thread_id = self._create_thread()
         worldline_id = self._create_worldline(thread_id)
         fake_client = FakeLlmClient(
@@ -370,6 +370,7 @@ class ChatApiTests(unittest.TestCase):
                         )
                     ],
                 ),
+                LlmResponse(text="Used prior result without rerunning.", tool_calls=[]),
             ]
         )
 
@@ -384,14 +385,14 @@ class ChatApiTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(fake_client.calls, 2)
+        self.assertEqual(fake_client.calls, 3)
         self.assertEqual(
             [event["type"] for event in result["events"]],
             ["user_message", "tool_call_sql", "tool_result_sql", "assistant_message"],
         )
-        self.assertIn(
-            "repeated the same tool call",
+        self.assertEqual(
             result["events"][-1]["payload"]["text"],
+            "Used prior result without rerunning.",
         )
 
     def test_chat_skips_recent_identical_successful_tool_call_across_turns(
@@ -465,8 +466,144 @@ class ChatApiTests(unittest.TestCase):
             ["user_message", "assistant_message"],
         )
         self.assertIn(
-            "already ran recently",
+            "rerun",
             second_result["events"][-1]["payload"]["text"],
+        )
+
+    def test_chat_allows_recent_identical_call_when_user_requests_retry(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+
+        first_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_seed_retry_sql",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(text="seeded", tool_calls=[]),
+            ]
+        )
+        with patch.object(chat_api, "build_llm_client", return_value=first_client):
+            self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="run once",
+                        provider="openrouter",
+                    )
+                )
+            )
+
+        second_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_retry_sql",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(text="rerun done", tool_calls=[]),
+            ]
+        )
+        with patch.object(chat_api, "build_llm_client", return_value=second_client):
+            second_result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="try again",
+                        provider="openrouter",
+                    )
+                )
+            )
+
+        self.assertEqual(second_client.calls, 2)
+        self.assertEqual(
+            [event["type"] for event in second_result["events"]],
+            ["user_message", "tool_call_sql", "tool_result_sql", "assistant_message"],
+        )
+
+    def test_chat_report_mode_skips_fallback_after_guard_stop(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_guard_1",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 1},
+                        )
+                    ],
+                ),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_guard_2",
+                            name="run_sql",
+                            arguments={"sql": "SELECT 1 AS x", "limit": 1},
+                        )
+                    ],
+                ),
+            ]
+        )
+        fake_execute_python_tool = AsyncMock(
+            return_value={
+                "stdout": "Generated report.pdf\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [
+                    {
+                        "type": "pdf",
+                        "name": "report.pdf",
+                        "artifact_id": "artifact_report",
+                    }
+                ],
+                "previews": {"dataframes": []},
+                "execution_ms": 10,
+            }
+        )
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch("chat.engine.execute_python_tool", fake_execute_python_tool),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message=(
+                            "analyze the table\n\n"
+                            "<context>\n"
+                            "- output_type=report\n"
+                            "</context>"
+                        ),
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 2)
+        self.assertEqual(fake_execute_python_tool.await_count, 0)
+        self.assertIn(
+            "repeated the same tool call",
+            result["events"][-1]["payload"]["text"],
+        )
+        self.assertNotIn(
+            "Generated downloadable report artifact",
+            result["events"][-1]["payload"]["text"],
         )
 
     def test_chat_prevents_duplicate_artifact_names_from_python(self) -> None:
@@ -1040,7 +1177,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertTrue(payloads[-1]["done"])
 
     def test_chat_stream_emits_tool_call_skipped_for_repeated_call(self) -> None:
-        """When repeated-call guard stops execution, stream emits skipped delta."""
+        """Repeated-call guard emits skipped delta and keeps turn alive."""
         thread_id = self._create_thread()
         worldline_id = self._create_worldline(thread_id)
         fake_client = FakeLlmClient(
@@ -1065,6 +1202,7 @@ class ChatApiTests(unittest.TestCase):
                         )
                     ],
                 ),
+                LlmResponse(text="used previous result", tool_calls=[]),
             ]
         )
 

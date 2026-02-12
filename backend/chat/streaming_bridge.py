@@ -12,6 +12,7 @@ from chat.llm_client import (
     ToolDefinition,
 )
 from chat.tooling import (
+    chunk_has_non_empty_code_or_sql,
     looks_like_complete_tool_args,
     normalize_tool_arguments,
     tool_name_to_delta_type,
@@ -93,8 +94,14 @@ async def stream_llm_response(
                 if call_id not in tool_call_accum:
                     tool_call_accum[call_id] = {"name": "", "args_parts": []}
                 accum = tool_call_accum[call_id]
+                tool_name = accum.get("name") or ""
                 if looks_like_complete_tool_args(args_delta):
-                    accum["args_parts"] = [args_delta]
+                    # Only replace accumulated parts when the new chunk is strictly better
+                    # (has non-empty code/sql). Never replace with empty or partial content.
+                    if chunk_has_non_empty_code_or_sql(args_delta, tool_name):
+                        accum["args_parts"] = [args_delta]
+                    else:
+                        accum["args_parts"].append(args_delta)
                 else:
                     accum["args_parts"].append(args_delta)
 

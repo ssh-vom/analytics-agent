@@ -27,7 +27,7 @@
     typeof rawCode === "string"
       ? rawCode.length > 0
         ? rawCode
-        : "# model emitted an empty Python code payload"
+        : "# Code could not be extracted. The model may have sent invalid arguments."
       : resultEvent
         ? "# code unavailable (result event arrived before call event)"
         : "";
@@ -37,13 +37,17 @@
   $: fileArtifacts = artifacts.filter((artifact) => artifact.type !== "image");
   $: isRunning = Boolean(callEvent) && !resultEvent;
   $: isDraft = Boolean(callEvent) && !resultEvent;
-  $: statusLabel = isRunning
-    ? "running"
-    : result?.error
-      ? "error"
-      : result
-        ? "done"
-        : "queued";
+  $: isSkipped = Boolean(callEvent?.payload?.skipped);
+  $: skipReason = typeof callEvent?.payload?.skip_reason === "string" ? callEvent.payload.skip_reason : undefined;
+  $: statusLabel = isSkipped
+    ? "skipped"
+    : isRunning
+      ? "running"
+      : result?.error
+        ? "error"
+        : result
+          ? "done"
+          : "queued";
 
   function getArtifactTarget(): string | undefined {
     return artifactLinkMode === "download" ? "_blank" : undefined;
@@ -69,6 +73,7 @@
     expandAriaLabel="Expand Python cell"
     collapseAriaLabel="Collapse Python cell"
     {statusLabel}
+    {skipReason}
     executionMs={result?.execution_ms}
     {onBranch}
     accentColor="var(--accent-purple)"
