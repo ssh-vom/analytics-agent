@@ -1,4 +1,4 @@
-"""Semantic layer for TextQL - auto-inferred ontology and deterministic SQL generation."""
+"""Semantic layer for TextQL - LLM-powered ontology and deterministic SQL generation."""
 
 from semantic.types import (
     SemanticCatalog,
@@ -13,8 +13,16 @@ from semantic.types import (
 )
 from semantic.catalog import build_catalog_for_worldline
 from semantic.resolver import resolve_query
+from semantic.resolver_llm import resolve_query_with_llm, LLMSemanticResolver
 from semantic.compiler import compile_query_spec
 from semantic.executor import SemanticExecutor, should_use_semantic_lane
+from semantic.prompts import build_resolution_prompt, build_clarification_prompt
+from semantic.validator import (
+    validate_llm_response,
+    validate_query_spec,
+    build_resolution_result,
+    ResolutionError,
+)
 
 __all__ = [
     # Types
@@ -27,10 +35,21 @@ __all__ = [
     "TimeRange",
     "OrderBy",
     "ResolutionResult",
-    # Functions
+    # Main functions
     "build_catalog_for_worldline",
     "resolve_query",
+    "resolve_query_with_llm",
     "compile_query_spec",
     "SemanticExecutor",
     "should_use_semantic_lane",
+    # LLM resolver
+    "LLMSemanticResolver",
+    # Prompts
+    "build_resolution_prompt",
+    "build_clarification_prompt",
+    # Validation
+    "validate_llm_response",
+    "validate_query_spec",
+    "build_resolution_result",
+    "ResolutionError",
 ]
