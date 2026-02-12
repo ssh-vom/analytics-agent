@@ -17,14 +17,9 @@
   import { activeThread, threads } from "$lib/stores/threads";
   import { chatJobs } from "$lib/stores/chatJobs";
   import {
-    branchWorldline,
     createChatJob,
     createThread,
-    createWorldline,
-    fetchThreadWorldlines,
-    fetchWorldlineEvents,
     streamChatTurn,
-    importCSV,
     fetchWorldlineTables,
   } from "$lib/api/client";
   import {
@@ -64,10 +59,7 @@
     withVisibleWorldline,
     withWorldlineEvents,
   } from "$lib/chat/worldlineState";
-  import {
-    extractCsvFiles,
-    removeUploadedFileByName,
-  } from "$lib/chat/csvImportPanel";
+  import { removeUploadedFileByName } from "$lib/chat/csvImportPanel";
   import { refreshWorldlineContextSnapshot } from "$lib/chat/worldlineContext";
   import { createWorldlineManager } from "$lib/chat/worldlineManager";
   import { createCSVImportController } from "$lib/chat/csvImportController";
@@ -149,6 +141,31 @@
     activeWorldlineRunningJobs = queueStats.running;
     activeWorldlineQueuedJobs = queueStats.queued;
   }
+
+  // Controllers
+  const worldlineManager = createWorldlineManager({
+    get threadId() { return threadId; },
+    setWorldlines: (w) => { worldlines = w; },
+    setActiveWorldlineId: (id) => { activeWorldlineId = id; },
+    persistPreferredWorldline,
+    setWorldlineEvents,
+    onStatusChange: (s) => { statusText = s; },
+    onScroll: () => scrollFeedToBottom(true),
+    refreshContextTables: refreshWorldlineContextTables,
+    eventsByWorldline,
+  });
+
+  const csvController = createCSVImportController({
+    get uploadedFiles() { return uploadedFiles; },
+    setUploadedFiles: (f) => { uploadedFiles = f; },
+    setStatusText: (s) => { statusText = s; },
+    setSelectedContextTables: (t) => { selectedContextTables = Array.isArray(t) ? t : t(selectedContextTables); },
+    setWorldlineTables: (t) => { worldlineTables = t; },
+    get activeWorldlineId() { return activeWorldlineId; },
+    removeUploadedFile: (filename) => {
+      uploadedFiles = removeUploadedFileByName(uploadedFiles, filename);
+    },
+  });
 
   function handleOpenWorldlineEvent(event: Event): void {
     const detail = (event as CustomEvent<{ threadId?: string; worldlineId?: string }>).detail;
@@ -520,57 +537,27 @@
     }
   }
 
+  // Worldline functions delegated to controller
   async function refreshWorldlines(): Promise<void> {
-    if (!threadId) {
-      return;
-    }
-    const response = await fetchThreadWorldlines(threadId);
-    worldlines = response.worldlines;
+    await worldlineManager.refreshWorldlines();
   }
 
   async function loadWorldline(worldlineId: string): Promise<void> {
-    const events = await fetchWorldlineEvents(worldlineId);
-    setWorldlineEvents(worldlineId, events);
-    scrollFeedToBottom(true);
+    await worldlineManager.loadWorldline(worldlineId);
   }
 
   async function selectWorldline(worldlineId: string): Promise<void> {
-    activeWorldlineId = worldlineId;
-    persistPreferredWorldline(worldlineId);
-    selectedArtifactId = null;
-    if (!eventsByWorldline[worldlineId]) {
-      await loadWorldline(worldlineId);
-    }
-    await refreshWorldlineContextTables();
-    scrollFeedToBottom(true);
+    await worldlineManager.selectWorldline(worldlineId);
   }
 
   async function handleWorldlineSelect(
     event: CustomEvent<{ id: string }>,
   ): Promise<void> {
-    await selectWorldline(event.detail.id);
+    await worldlineManager.selectWorldline(event.detail.id);
   }
 
   async function branchFromEvent(eventId: string): Promise<void> {
-    if (!activeWorldlineId || !eventId) {
-      return;
-    }
-    try {
-      statusText = "Branching worldline...";
-      const response = await branchWorldline(
-        activeWorldlineId,
-        eventId,
-        `branch-${worldlines.length + 1}`,
-      );
-      activeWorldlineId = response.new_worldline_id;
-      persistPreferredWorldline(activeWorldlineId);
-      await refreshWorldlines();
-      await loadWorldline(activeWorldlineId);
-      await refreshWorldlineContextTables();
-      statusText = "Branch created";
-    } catch (error) {
-      statusText = error instanceof Error ? error.message : "Branch failed";
-    }
+    await worldlineManager.branchFromEvent(eventId, activeWorldlineId, worldlines);
   }
 
   function handleArtifactSelect(event: CustomEvent<{ artifactId: string }>): void {
@@ -579,28 +566,7 @@
   }
 
   async function ensureWorldline(): Promise<string | null> {
-    // If we already have a worldline, use it
-    if (activeWorldlineId) {
-      return activeWorldlineId;
-    }
-    
-    // If we have a thread but no worldline, create one lazily
-    if (threadId) {
-      statusText = "Creating worldline...";
-      try {
-        const worldline = await createWorldline(threadId, "main");
-        activeWorldlineId = worldline.worldline_id;
-        persistPreferredWorldline(activeWorldlineId);
-        await refreshWorldlines();
-        statusText = "Ready";
-        return activeWorldlineId;
-      } catch (error) {
-        statusText = error instanceof Error ? error.message : "Failed to create worldline";
-        return null;
-      }
-    }
-    
-    return null;
+    return worldlineManager.ensureWorldline(activeWorldlineId);
   }
 
   async function sendPrompt(): Promise<void> {
@@ -759,19 +725,9 @@
     return providerLabel(provider);
   }
 
-  // CSV Import functions
+  // CSV Import functions delegated to controller
   function handleFileSelect(event: Event) {
-    const input = event.target as HTMLInputElement;
-    const csvFiles = extractCsvFiles(input.files);
-    if (csvFiles.length === 0) {
-      return;
-    }
-    uploadedFiles = [...uploadedFiles, ...csvFiles];
-    statusText =
-      uploadedFiles.length === 1
-        ? `Attached ${uploadedFiles[0].name}. It will import when you send.`
-        : `Attached ${uploadedFiles.length} CSV files. They will import when you send.`;
-    input.value = "";
+    csvController.handleFileSelect(event);
   }
 
   function removeUploadedFile(filename: string) {
@@ -781,40 +737,12 @@
   async function runCSVImport(
     worldlineId: string,
     file: File,
-  ): Promise<Awaited<ReturnType<typeof importCSV>>> {
-    try {
-      const result = await importCSV(worldlineId, file);
-      removeUploadedFile(file.name);
-
-      if (activeWorldlineId === worldlineId) {
-        selectedContextTables = [...new Set([...selectedContextTables, result.table_name])];
-      }
-
-      statusText = `Imported ${result.row_count} rows from ${file.name} into ${result.table_name}`;
-      return result;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : "Import failed";
-      statusText = `Import failed: ${detail}`;
-      throw error instanceof Error ? error : new Error(detail);
-    }
+  ): Promise<{ table_name: string; row_count: number }> {
+    return csvController.runCSVImport(worldlineId, file);
   }
 
   async function importUploadedFilesBeforeSend(worldlineId: string): Promise<void> {
-    if (uploadedFiles.length === 0) {
-      return;
-    }
-
-    const filesToImport = [...uploadedFiles];
-    statusText =
-      filesToImport.length === 1
-        ? `Importing ${filesToImport[0].name}...`
-        : `Importing ${filesToImport.length} files...`;
-
-    for (const file of filesToImport) {
-      await runCSVImport(worldlineId, file);
-    }
-
-    worldlineTables = await fetchWorldlineTables(worldlineId);
+    await csvController.importUploadedFilesBeforeSend(worldlineId);
   }
 </script>
 
