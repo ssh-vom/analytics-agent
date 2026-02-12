@@ -51,7 +51,6 @@ Set at least one LLM API key:
 
 - `OPENROUTER_API_KEY` (default provider)
 - `OPENAI_API_KEY`
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY`
 
 ## Useful API Endpoints
 
