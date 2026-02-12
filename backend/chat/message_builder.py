@@ -215,7 +215,7 @@ def build_llm_messages_from_events(events: list[dict[str, Any]]) -> list[ChatMes
     assistant_emitted_for_turn = False
 
     for event in events_chrono:
-        event_type = event.get("type")
+        event_type = str(event.get("type") or "")
         payload = event.get("payload", {})
 
         if event_type == "user_message":

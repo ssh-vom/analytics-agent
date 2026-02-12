@@ -158,7 +158,8 @@ class ChatApiTests(unittest.TestCase):
             ["user_message", "assistant_message"],
         )
         self.assertEqual(result["events"][0]["payload"], {"text": "hello"})
-        self.assertEqual(result["events"][1]["payload"], {"text": "Hello back!"})
+        self.assertEqual(result["events"][1]["payload"]["text"], "Hello back!")
+        self.assertIn("state_trace", result["events"][1]["payload"])
 
         with meta.get_conn() as conn:
             worldline_row = conn.execute(
@@ -1346,6 +1347,139 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(len(checkpoint_messages), 1)
         self.assertIn('"row_count": 1', checkpoint_messages[0].content)
         self.assertIn("SELECT 1 AS x", checkpoint_messages[0].content)
+
+    def test_chat_stream_enforces_python_tool_before_finalizing_python_intent(
+        self,
+    ) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(text="I can do that.", tool_calls=[]),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_stream_required_py",
+                            name="run_python",
+                            arguments={"code": "print('stream')", "timeout": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(text="stream done", tool_calls=[]),
+            ]
+        )
+        fake_execute_python_tool = AsyncMock(
+            return_value={
+                "stdout": "stream\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [],
+                "previews": {"dataframes": []},
+                "execution_ms": 8,
+            }
+        )
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch("chat.engine.execute_python_tool", fake_execute_python_tool),
+        ):
+            response = self._run(
+                chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="continue with python chart",
+                        provider="openrouter",
+                    )
+                )
+            )
+            raw_stream = self._run(self._consume_stream(response))
+            payloads = self._extract_sse_payloads(raw_stream)
+
+        self.assertEqual(fake_client.calls, 3)
+        self.assertEqual(fake_execute_python_tool.await_count, 1)
+
+        event_types = [
+            payload["event"]["type"] for payload in payloads if "event" in payload
+        ]
+        self.assertEqual(
+            event_types,
+            ["user_message", "assistant_message"],
+        )
+
+        state_deltas = [
+            payload["delta"]
+            for payload in payloads
+            if "delta" in payload and payload["delta"].get("type") == "state_transition"
+        ]
+        reasons = [delta.get("reason") for delta in state_deltas]
+        self.assertIn("required_tool_missing:run_python", reasons)
+        self.assertIn("retry_after_missing_required_tool", reasons)
+
+    def test_chat_enforces_python_tool_before_finalizing_python_intent(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(text="I can summarize that for you.", tool_calls=[]),
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_required_py",
+                            name="run_python",
+                            arguments={"code": "print('ok')", "timeout": 10},
+                        )
+                    ],
+                ),
+                LlmResponse(text="Python analysis complete.", tool_calls=[]),
+            ]
+        )
+        fake_execute_python_tool = AsyncMock(
+            return_value={
+                "stdout": "ok\n",
+                "stderr": "",
+                "error": None,
+                "artifacts": [],
+                "previews": {"dataframes": []},
+                "execution_ms": 14,
+            }
+        )
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch("chat.engine.execute_python_tool", fake_execute_python_tool),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="Please continue with python analysis and make a chart",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 3)
+        self.assertEqual(fake_execute_python_tool.await_count, 1)
+        self.assertEqual(
+            [event["type"] for event in result["events"]],
+            ["user_message", "assistant_message"],
+        )
+
+        assistant_payload = result["events"][-1]["payload"]
+        self.assertEqual(assistant_payload["text"], "Python analysis complete.")
+        self.assertEqual(
+            assistant_payload["turn_stats"]["required_tools"], ["run_python"]
+        )
+        self.assertEqual(assistant_payload["turn_stats"]["python_success_count"], 1)
+        transition_reasons = [
+            str(transition.get("reason"))
+            for transition in assistant_payload.get("state_trace", [])
+            if isinstance(transition, dict)
+        ]
+        self.assertIn("required_tool_missing:run_python", transition_reasons)
+        self.assertIn("retry_after_missing_required_tool", transition_reasons)
 
     # ---- new test: assistant_plan when text accompanies tool calls -----------
 

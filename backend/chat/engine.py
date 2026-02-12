@@ -57,6 +57,11 @@ _RERUN_HINT_PATTERN = re.compile(
     r"\b(rerun|re-run|run again|regenerate|recompute|refresh|overwrite|rebuild)\b",
     re.IGNORECASE,
 )
+_PYTHON_REQUIRED_HINT_PATTERN = re.compile(
+    r"\b(python|plot|chart|graph|visuali[sz]e|matplotlib|pandas|data\s*frame|histogram|scatter|heatmap)\b",
+    re.IGNORECASE,
+)
+_MAX_REQUIRED_TOOL_ENFORCEMENT_RETRIES = 2
 
 _TURN_STATE_TRANSITIONS: dict[str, set[str]] = {
     "planning": {"data_fetching", "analyzing", "presenting", "completed", "error"},
@@ -618,6 +623,10 @@ class ChatEngine:
         )
         recent_artifact_names = self._artifact_name_set(artifact_inventory)
         user_requested_rerun = self._user_requested_rerun(message)
+        required_terminal_tools = self._required_terminal_tools(
+            message=message,
+            requested_output_type=requested_output_type,
+        )
         # #region agent log
         _debug_log(
             run_id="initial",
@@ -643,8 +652,10 @@ class ChatEngine:
         successful_tool_signatures: set[str] = set()
         successful_tool_results: dict[str, dict[str, Any]] = {}
         turn_artifact_names: set[str] = set()
+        sql_success_count = 0
         python_success_count = 0
         empty_response_retries = 0
+        required_tool_enforcement_failures = 0
         invalid_tool_payload_failures: dict[str, int] = {
             "run_sql": 0,
             "run_python": 0,
@@ -936,6 +947,7 @@ class ChatEngine:
                         )
                         turn_artifact_names.clear()
                         # Reset per-turn state for the new worldline context
+                        sql_success_count = 0
                         python_success_count = 0
                         successful_tool_signatures.clear()
                         turn_state = await self._transition_state_and_emit(
@@ -1000,6 +1012,7 @@ class ChatEngine:
                         recent_successful_tool_signatures.add(signature)
                         successful_tool_results[signature] = tool_result
                         if tool_name == "run_sql":
+                            sql_success_count += 1
                             turn_state = await self._transition_state_and_emit(
                                 current_state=turn_state,
                                 to_state="analyzing",
@@ -1073,6 +1086,62 @@ class ChatEngine:
                 continue
 
             if response.text:
+                missing_required_tools = self._missing_required_terminal_tools(
+                    required_tools=required_terminal_tools,
+                    sql_success_count=sql_success_count,
+                    python_success_count=python_success_count,
+                )
+                if missing_required_tools:
+                    required_tool_enforcement_failures += 1
+                    turn_state = await self._transition_state_and_emit(
+                        current_state=turn_state,
+                        to_state="error",
+                        reason=(
+                            "required_tool_missing:"
+                            + ",".join(sorted(missing_required_tools))
+                        ),
+                        transitions=state_transitions,
+                        worldline_id=active_worldline_id,
+                        on_delta=on_delta,
+                    )
+
+                    if (
+                        required_tool_enforcement_failures
+                        <= _MAX_REQUIRED_TOOL_ENFORCEMENT_RETRIES
+                    ):
+                        messages.append(
+                            ChatMessage(
+                                role="system",
+                                content=self._build_required_tool_enforcement_message(
+                                    missing_required_tools=missing_required_tools,
+                                    data_intent_summary=data_intent_summary,
+                                ),
+                            )
+                        )
+                        turn_state = await self._transition_state_and_emit(
+                            current_state=turn_state,
+                            to_state="planning",
+                            reason="retry_after_missing_required_tool",
+                            transitions=state_transitions,
+                            worldline_id=active_worldline_id,
+                            on_delta=on_delta,
+                        )
+                        continue
+
+                    final_text = (
+                        "I stopped because the model kept replying without required tool "
+                        "execution (" + ", ".join(sorted(missing_required_tools)) + ")."
+                    )
+                    turn_state = await self._transition_state_and_emit(
+                        current_state=turn_state,
+                        to_state="presenting",
+                        reason="required_tool_missing_stop",
+                        transitions=state_transitions,
+                        worldline_id=active_worldline_id,
+                        on_delta=on_delta,
+                    )
+                    break
+
                 turn_state = await self._transition_state_and_emit(
                     current_state=turn_state,
                     to_state="presenting",
@@ -1158,14 +1227,30 @@ class ChatEngine:
                 "worldline_id": active_worldline_id,
                 "transitions": state_transitions,
                 "final_state": turn_state,
+                "sql_success_count": sql_success_count,
                 "python_success_count": python_success_count,
+                "required_tools": sorted(required_terminal_tools),
+                "required_tool_enforcement_failures": required_tool_enforcement_failures,
+                "invalid_tool_payload_failures": invalid_tool_payload_failures,
             },
         )
 
+        assistant_payload = {
+            "text": final_text,
+            "state_trace": state_transitions,
+            "state_final": turn_state,
+            "turn_stats": {
+                "required_tools": sorted(required_terminal_tools),
+                "sql_success_count": sql_success_count,
+                "python_success_count": python_success_count,
+                "invalid_tool_payload_failures": invalid_tool_payload_failures,
+                "required_tool_enforcement_failures": required_tool_enforcement_failures,
+            },
+        }
         assistant_event = self._append_worldline_event(
             worldline_id=active_worldline_id,
             event_type="assistant_message",
-            payload={"text": final_text},
+            payload=assistant_payload,
         )
         if on_event is not None:
             await on_event(active_worldline_id, assistant_event)
@@ -1922,6 +2007,73 @@ class ChatEngine:
         if not isinstance(message, str):
             return False
         return bool(_RERUN_HINT_PATTERN.search(message))
+
+    def _required_terminal_tools(
+        self,
+        *,
+        message: str,
+        requested_output_type: str | None,
+    ) -> set[str]:
+        if not isinstance(message, str):
+            return set()
+
+        visible_message = re.sub(
+            r"<context>[\s\S]*?</context>",
+            "",
+            message,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not visible_message:
+            return set()
+
+        if _PYTHON_REQUIRED_HINT_PATTERN.search(visible_message):
+            return {"run_python"}
+
+        return set()
+
+    def _missing_required_terminal_tools(
+        self,
+        *,
+        required_tools: set[str],
+        sql_success_count: int,
+        python_success_count: int,
+    ) -> set[str]:
+        missing: set[str] = set()
+
+        if "run_sql" in required_tools and sql_success_count <= 0:
+            missing.add("run_sql")
+        if "run_python" in required_tools and python_success_count <= 0:
+            missing.add("run_python")
+
+        return missing
+
+    def _build_required_tool_enforcement_message(
+        self,
+        *,
+        missing_required_tools: set[str],
+        data_intent_summary: dict[str, Any] | None,
+    ) -> str:
+        missing_sorted = sorted(missing_required_tools)
+        if missing_sorted == ["run_python"]:
+            checkpoint = (
+                json.dumps(data_intent_summary, ensure_ascii=True, default=str)
+                if data_intent_summary
+                else "none"
+            )
+            if len(checkpoint) > 900:
+                checkpoint = checkpoint[:900] + "...(truncated)"
+            return (
+                "Your previous reply skipped required Python execution. "
+                "Emit a run_python tool call now with non-empty executable `code` (not a plan). "
+                "Use LATEST_SQL_RESULT/LATEST_SQL_DF and the SQL checkpoint when relevant. "
+                "SQL checkpoint: " + checkpoint
+            )
+
+        return (
+            "Your previous reply skipped required tool execution ("
+            + ", ".join(missing_sorted)
+            + "). Emit the required tool call(s) now before finalizing."
+        )
 
     def _is_empty_python_payload_error(self, tool_result: dict[str, Any]) -> bool:
         error = tool_result.get("error") if isinstance(tool_result, dict) else None

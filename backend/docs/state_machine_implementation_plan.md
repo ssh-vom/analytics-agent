@@ -12,6 +12,24 @@ Last updated: 2026-02-12
 1. Output format default is `none` ("No strict format").
 2. Use **Option A**: include artifact inventory in every LLM context call.
 3. Provider surface remains simplified (OpenAI/OpenRouter only).
+4. Keep **free-form Python** as the primary execution mode (no template-only lock-in).
+5. Adopt a **hybrid semantic layer**: schema introspection + manual business overrides.
+6. State machine must be authoritative (guarding execution/presentation), not just observability.
+
+## Codebase Reality Check (Current)
+
+Hotspots that currently increase regression risk and reduce readability:
+
+- `backend/chat/engine.py` is oversized and mixed-concern (runtime orchestration + report generator payload + policy helpers).
+- `frontend/src/routes/chat/+page.svelte` is oversized and carries orchestration, streaming, job, context, and UI duties in one place.
+- Some logic is duplicated across engine/message builder layers (artifact/context behavior).
+- Minimal lint/format/type quality gates are currently enforced in the repo.
+
+Refactor intent for this plan update:
+
+- Reduce LOC in the largest high-churn files.
+- Improve readability and module boundaries.
+- Make behavior easier to reason about and extend safely.
 
 ## Why This Plan
 
@@ -30,6 +48,8 @@ Research-aligned direction (based on TextQL public architecture/docs):
 3. No explicit artifact inventory memory fed to the model each iteration.
 4. Python call reliability suffers from argument-shape drift and streaming ID mismatch edge cases.
 5. No explicit state machine transitions governing planning/fetching/analyzing/presenting.
+6. Core orchestration code is too concentrated in monolith files, making correctness changes costly.
+7. Readability/style consistency is not protected by repo-level quality gates.
 
 ## Target State Machine
 
@@ -103,6 +123,7 @@ Plan:
 Acceptance:
 - Every turn has traceable state transitions.
 - Invalid transitions are rejected with a clear internal error code/message.
+- Transition guards are the source of truth for whether a turn may finalize.
 
 ## Workstream D: Python Reliability Hardening
 
@@ -133,6 +154,63 @@ Plan:
 Acceptance:
 - Fewer redundant SQL/Python loops.
 - Better continuity when user asks "continue" / "refine this".
+
+## Workstream H: Code Reduction + Readability Refactor
+
+Goal: reduce complexity in high-risk files while preserving behavior.
+
+Plan:
+1. Split runtime concerns out of `backend/chat/engine.py` into focused modules:
+   - `backend/chat/state_machine.py` (states/transitions/guards)
+   - `backend/chat/policy.py` (dedup/retry/required-tool policy)
+   - `backend/chat/context_parser.py` (context block parsing)
+   - `backend/chat/report_fallback.py` (report generator payload + helpers)
+2. Remove dead/unused helpers and duplicated logic paths after extraction.
+3. Decompose `frontend/src/routes/chat/+page.svelte` into route-shell + feature modules (stream/session/composer/state trace).
+4. Keep contracts stable while reducing surface area per file/function.
+
+Acceptance:
+- `backend/chat/engine.py` is reduced to orchestration-only responsibilities.
+- `frontend/src/routes/chat/+page.svelte` no longer owns most orchestration logic.
+- Extracted modules have clear ownership and lower cognitive load.
+
+## Workstream I: Engineering Standards + Quality Gates
+
+Goal: keep readability/extensibility improvements durable.
+
+Plan:
+1. Introduce backend lint/format/type checks (ruff-style baseline, import ordering, basic complexity caps).
+2. Introduce frontend lint/type checks (ESLint + TypeScript checks) and wire into CI/test workflow.
+3. Add lightweight code standards for new modules:
+   - avoid mixed concerns in single files
+   - prefer typed payload contracts at boundaries
+   - centralize reason code taxonomy
+   - keep functions focused and short
+
+Acceptance:
+- New/updated modules follow consistent style.
+- Core runtime files fail fast on style/type regressions.
+- Future edits are simpler to review and safer to merge.
+
+## Workstream J: Hybrid Semantic Layer (MVP)
+
+Goal: deterministic answers for covered business asks while preserving agentic fallback.
+
+Plan:
+1. Add semantic catalog package:
+   - `backend/semantic/catalog.py` for schema introspection
+   - `backend/semantic/catalog_overrides.yaml` for manual business mapping/synonyms
+2. Add resolver/compiler:
+   - `backend/semantic/resolver.py` (user terms -> semantic entities + confidence)
+   - `backend/semantic/compiler.py` (QuerySpec -> deterministic SQL)
+3. Runtime lane selection:
+   - high confidence -> deterministic SQL lane
+   - low confidence -> existing tool-calling lane
+
+Acceptance:
+- Ontology-covered intents compile to deterministic SQL.
+- Uncovered intents still work through agentic fallback without breaking flow.
+- Semantic layer remains lightweight and maintainable.
 
 ## Workstream F: Observability + Error Taxonomy
 
@@ -173,6 +251,15 @@ Backend:
 - `backend/chat/message_builder.py` (artifact inventory injection)
 - `backend/chat/tooling.py` (argument normalization/idempotency helpers)
 - `backend/chat/streaming_bridge.py` (stream call-id robustness)
+- `backend/chat/state_machine.py` (new, authoritative transitions/guards)
+- `backend/chat/policy.py` (new, retry/dedup/required-tool policy)
+- `backend/chat/context_parser.py` (new, context parsing)
+- `backend/chat/report_fallback.py` (new, report fallback payload/helpers)
+- `backend/semantic/catalog.py` (new, schema + override merge)
+- `backend/semantic/resolver.py` (new, semantic resolution)
+- `backend/semantic/compiler.py` (new, QuerySpec compiler)
+- `backend/semantic/types.py` (new, semantic/queryspec contracts)
+- `backend/semantic/catalog_overrides.yaml` (new, manual override source)
 - `backend/tools.py` (optional artifact dedup persistence hooks)
 - `backend/tests/test_chat_api.py`
 - `backend/tests/test_chat_context_parser.py`
@@ -183,18 +270,27 @@ Backend:
 
 Frontend:
 - `frontend/src/lib/components/PythonCell.svelte` (clearer failure context)
+- `frontend/src/routes/chat/+page.svelte` (decomposition into route shell)
+- `frontend/src/lib/chat/*` (expanded feature modules for stream/session/composer state)
 - optional: status badges for skip/dedup reasons in tool cells
 
 ## Implementation Phases
 
-Phase 1 (Demo stability, 1-2 days):
-- Workstreams A + B (phase1) + D + key tests.
+Phase 0 (Stability unblock, 0.5-1 day):
+- Fix deterministic runtime issues first (including report fallback payload integrity).
+- Add Python compile preflight and typed retry reasons before sandbox execution.
 
-Phase 2 (Predictable orchestration, 1-2 days):
-- Workstreams C + E + tests.
+Phase 1 (Architecture extraction, 1-2 days):
+- Workstreams C + H (state machine extraction + engine decomposition).
 
-Phase 3 (Durability, 1-2 days):
-- Workstream B (phase2 fingerprinting) + F + regression suite.
+Phase 2 (Semantic MVP, 1-2 days):
+- Workstream J (hybrid semantic layer + deterministic lane).
+
+Phase 3 (Reliability + durability, 1-2 days):
+- Workstreams A + B (phase1/phase2) + E + F.
+
+Phase 4 (Readability hardening, 1 day):
+- Workstream I + frontend chat route decomposition completion.
 
 ## Acceptance Criteria (End-to-End)
 
@@ -203,9 +299,12 @@ Phase 3 (Durability, 1-2 days):
 3. Python empty-code and stream mismatch errors are rare and recoverable.
 4. State transitions are explicit and observable.
 5. Full backend/frontend tests pass.
+6. Free-form Python remains default, but malformed code is caught pre-execution with clear recovery.
+7. Hybrid semantic coverage yields deterministic SQL for covered intents.
+8. Core hotspot files are reduced and easier to read/extend.
 
 ## Out of Scope (This Plan)
 
-- Full ontology compiler implementation
+- Full enterprise ontology platform (beyond hybrid MVP)
 - Non-OpenAI/OpenRouter provider expansion
 - Cross-org/global memory beyond worldline/thread scope

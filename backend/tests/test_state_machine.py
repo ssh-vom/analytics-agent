@@ -87,6 +87,23 @@ class StateMachineTests(unittest.TestCase):
         self.assertIn("revenue", summary["measures"])
         self.assertIn("SELECT month, revenue", summary["sql_preview"])
 
+    def test_required_terminal_tools_detects_python_intent(self) -> None:
+        required_tools = self.engine._required_terminal_tools(
+            message="please plot a chart in python",
+            requested_output_type=None,
+        )
+
+        self.assertEqual(required_tools, {"run_python"})
+
+    def test_missing_required_terminal_tools(self) -> None:
+        missing = self.engine._missing_required_terminal_tools(
+            required_tools={"run_python"},
+            sql_success_count=0,
+            python_success_count=0,
+        )
+
+        self.assertEqual(missing, {"run_python"})
+
 
 if __name__ == "__main__":
     unittest.main()

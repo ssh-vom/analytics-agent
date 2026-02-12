@@ -163,6 +163,52 @@
     activeWorldlineQueuedJobs = queued;
   }
 
+  function normalizeRuntimeStateTransition(value: unknown): RuntimeStateTransition | null {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    const toState = typeof record.to === "string" ? record.to : null;
+    if (!toState) {
+      return null;
+    }
+    const fromState =
+      typeof record.from === "string"
+        ? record.from
+        : record.from === null
+          ? null
+          : null;
+    const reason =
+      typeof record.reason === "string" && record.reason.length > 0
+        ? record.reason
+        : "unspecified";
+    return {
+      from_state: fromState,
+      to_state: toState,
+      reason,
+    };
+  }
+
+  function extractPersistedStateTrace(events: TimelineEvent[]): RuntimeStateTransition[] {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event.type !== "assistant_message") {
+        continue;
+      }
+      const rawTrace = event.payload?.state_trace;
+      if (!Array.isArray(rawTrace)) {
+        continue;
+      }
+      const parsed = rawTrace
+        .map((entry) => normalizeRuntimeStateTransition(entry))
+        .filter((entry): entry is RuntimeStateTransition => entry !== null);
+      if (parsed.length > 0) {
+        return parsed.slice(-24);
+      }
+    }
+    return [];
+  }
+
   function handleOpenWorldlineEvent(event: Event): void {
     const detail = (event as CustomEvent<{ threadId?: string; worldlineId?: string }>).detail;
     if (!detail?.worldlineId) {
@@ -507,10 +553,26 @@
 
   function setWorldlineEvents(worldlineId: string, events: TimelineEvent[]): void {
     eventsByWorldline = withWorldlineEvents(eventsByWorldline, worldlineId, events);
+    const persistedTrace = extractPersistedStateTrace(events);
+    if (persistedTrace.length > 0 || !stateTraceByWorldline[worldlineId]) {
+      stateTraceByWorldline = {
+        ...stateTraceByWorldline,
+        [worldlineId]: persistedTrace,
+      };
+    }
   }
 
   function appendEvent(worldlineId: string, event: TimelineEvent): void {
     eventsByWorldline = withAppendedWorldlineEvent(eventsByWorldline, worldlineId, event);
+    if (event.type === "assistant_message") {
+      const trace = extractPersistedStateTrace([event]);
+      if (trace.length > 0) {
+        stateTraceByWorldline = {
+          ...stateTraceByWorldline,
+          [worldlineId]: trace,
+        };
+      }
+    }
   }
 
   function ensureWorldlineVisible(worldlineId: string): void {
