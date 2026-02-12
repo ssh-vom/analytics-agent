@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import {
     attachExternalDuckDB,
+    attachExternalDuckDBUpload,
     detachExternalDuckDB,
     fetchWorldlineSchema,
   } from "$lib/api/client";
@@ -28,6 +29,8 @@
 
   let showModal = false;
   let newConnectorType: "duckdb" | "sqlite" | "postgres" | "mysql" = "duckdb";
+  let newConnectorFile: File | null = null;
+  let fileInputKey = 0;
   let newConnectorPath = "";
   let newConnectorAlias = "";
   let submitting = false;
@@ -67,7 +70,7 @@
   }
 
   async function addConnector(): Promise<void> {
-    if (!worldlineId || !newConnectorPath.trim() || submitting) {
+    if (!worldlineId || submitting) {
       return;
     }
 
@@ -81,13 +84,22 @@
 
     submitting = true;
     try {
-      const result = await attachExternalDuckDB(
-        worldlineId,
-        newConnectorPath.trim(),
-        newConnectorAlias.trim() || undefined,
-      );
+      const alias = newConnectorAlias.trim() || undefined;
+      const result = newConnectorFile
+        ? await attachExternalDuckDBUpload(worldlineId, newConnectorFile, alias)
+        : newConnectorPath.trim()
+          ? await attachExternalDuckDB(worldlineId, newConnectorPath.trim(), alias)
+          : null;
+
+      if (!result) {
+        formError = "Choose a DuckDB file or provide a database path.";
+        return;
+      }
+
       formSuccess = `Attached as ${result.alias}`;
       showModal = false;
+      newConnectorFile = null;
+      fileInputKey += 1;
       newConnectorPath = "";
       newConnectorAlias = "";
       newConnectorType = "duckdb";
@@ -122,6 +134,15 @@
   function closeModal(): void {
     showModal = false;
     formError = "";
+    newConnectorFile = null;
+    fileInputKey += 1;
+    newConnectorPath = "";
+    newConnectorAlias = "";
+  }
+
+  function handleFileSelection(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    newConnectorFile = input.files && input.files[0] ? input.files[0] : null;
   }
 
   function formatDate(isoDate: string): string {
@@ -258,15 +279,32 @@
         </div>
 
         <div class="form-group">
+          <label for="file-picker">DuckDB file</label>
+          {#key fileInputKey}
+            <input
+              id="file-picker"
+              type="file"
+              accept=".duckdb,.db"
+              on:change={handleFileSelection}
+              disabled={submitting}
+            />
+          {/key}
+          {#if newConnectorFile}
+            <span class="file-selected">Selected: {newConnectorFile.name}</span>
+          {/if}
+          <span class="form-hint">Preferred: use the picker to upload and attach.</span>
+        </div>
+
+        <div class="form-group">
           <label for="connection">Database file path</label>
           <input
             id="connection"
             type="text"
             bind:value={newConnectorPath}
-            placeholder="/absolute/path/to/database.duckdb"
-            required
+            placeholder="Optional fallback: /absolute/path/to/database.duckdb"
             disabled={submitting}
           />
+          <span class="form-hint">Optional fallback for files already on backend disk.</span>
         </div>
 
         <div class="form-group">
@@ -291,7 +329,11 @@
           <button type="button" class="btn-secondary" on:click={closeModal} disabled={submitting}>
             Cancel
           </button>
-          <button type="submit" class="btn-primary" disabled={!newConnectorPath.trim() || submitting}>
+          <button
+            type="submit"
+            class="btn-primary"
+            disabled={(!newConnectorFile && !newConnectorPath.trim()) || submitting}
+          >
             {#if submitting}
               <Loader2 size={14} class="spin" />
               <span>Attaching...</span>
@@ -632,6 +674,17 @@
   .form-group select:focus {
     outline: none;
     border-color: var(--accent-orange);
+  }
+
+  .file-selected {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+  }
+
+  .form-hint {
+    font-size: 12px;
+    color: var(--text-dim);
   }
 
   .alert.error {

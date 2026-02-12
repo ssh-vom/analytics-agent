@@ -305,6 +305,62 @@ class SeedDataApiTests(unittest.TestCase):
         )
         self.assertEqual(attached_after_detach["attached_databases"], [])
 
+    def test_attach_duckdb_upload_endpoint_attaches_picker_file(self) -> None:
+        worldline_id = self._create_worldline()
+        source_db_path = Path(self.temp_dir.name) / "picked_source.duckdb"
+
+        conn = duckdb.connect(str(source_db_path))
+        try:
+            conn.execute("CREATE TABLE orders (order_id INTEGER, amount DOUBLE)")
+            conn.execute("INSERT INTO orders VALUES (1, 20.0), (2, 35.5)")
+        finally:
+            conn.close()
+
+        upload = UploadFile(
+            io.BytesIO(source_db_path.read_bytes()),
+            filename="picked_source.duckdb",
+        )
+
+        result = self._run(
+            seed_data_api.attach_duckdb_upload_endpoint(
+                worldline_id=worldline_id,
+                file=upload,
+                alias="picker_db",
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["alias"], "picker_db")
+        self.assertIn(f"worldlines/{worldline_id}/uploads/duckdb", result["db_path"])
+        self.assertTrue(Path(result["db_path"]).exists())
+
+        attached = self._run(
+            seed_data_api.list_attached_databases_endpoint(worldline_id)
+        )
+        by_alias = {row["alias"]: row for row in attached["attached_databases"]}
+        self.assertIn("picker_db", by_alias)
+        self.assertIn("orders", by_alias["picker_db"]["tables"])
+
+    def test_attach_duckdb_upload_rejects_oversized_upload(self) -> None:
+        worldline_id = self._create_worldline()
+        upload = UploadFile(
+            io.BytesIO(b"not-a-real-db-but-large-enough"),
+            filename="large.duckdb",
+        )
+
+        with patch.object(seed_data_api, "MAX_DUCKDB_UPLOAD_SIZE", 8):
+            with self.assertRaises(HTTPException) as ctx:
+                self._run(
+                    seed_data_api.attach_duckdb_upload_endpoint(
+                        worldline_id=worldline_id,
+                        file=upload,
+                        alias="too_big",
+                    )
+                )
+
+        self.assertEqual(ctx.exception.status_code, 413)
+        self.assertIn("File too large", str(ctx.exception.detail))
+
 
 if __name__ == "__main__":
     unittest.main()

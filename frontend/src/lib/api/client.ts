@@ -238,6 +238,40 @@ export async function attachExternalDuckDB(
   );
 }
 
+export async function attachExternalDuckDBUpload(
+  worldlineId: string,
+  file: File,
+  alias?: string,
+): Promise<{
+  success: boolean;
+  alias: string;
+  db_path: string;
+  attached_at: string;
+  event_id: string;
+}> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (alias) {
+    formData.append("alias", alias);
+  }
+
+  return requestJson<{
+    success: boolean;
+    alias: string;
+    db_path: string;
+    attached_at: string;
+    event_id: string;
+  }>(
+    `/api/seed-data/worldlines/${worldlineId}/attach-duckdb-upload`,
+    {
+      method: "POST",
+      body: formData,
+    },
+    "Failed to attach uploaded database",
+    true,
+  );
+}
+
 export async function detachExternalDuckDB(
   worldlineId: string,
   alias: string,

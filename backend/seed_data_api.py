@@ -32,6 +32,7 @@ get_worldline_schema = seed_data_module.get_worldline_schema
 MAX_CSV_FILE_SIZE = seed_data_module.MAX_CSV_FILE_SIZE
 TEMP_UPLOAD_DIR = seed_data_module.TEMP_UPLOAD_DIR
 capture_worldline_snapshot = duckdb_manager_module.capture_worldline_snapshot
+MAX_DUCKDB_UPLOAD_SIZE = 512 * 1024 * 1024
 
 router = APIRouter(prefix="/api/seed-data", tags=["seed-data"])
 
@@ -42,11 +43,16 @@ _TABLE_TYPE_PRIORITY = {
 }
 
 
-def _max_csv_size_label() -> str:
-    return f"{MAX_CSV_FILE_SIZE / 1024 / 1024:.1f}MB"
+def _max_size_label(size_bytes: int) -> str:
+    return f"{size_bytes / 1024 / 1024:.1f}MB"
 
 
-async def _write_upload_with_size_cap(file: UploadFile, *, destination: Path) -> None:
+async def _write_upload_with_size_cap(
+    file: UploadFile,
+    *,
+    destination: Path,
+    max_size_bytes: int,
+) -> None:
     bytes_written = 0
     chunk_size = 1024 * 1024
 
@@ -56,12 +62,23 @@ async def _write_upload_with_size_cap(file: UploadFile, *, destination: Path) ->
             if not chunk:
                 break
             bytes_written += len(chunk)
-            if bytes_written > MAX_CSV_FILE_SIZE:
+            if bytes_written > max_size_bytes:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"File too large. Max size: {_max_csv_size_label()}",
+                    detail=f"File too large. Max size: {_max_size_label(max_size_bytes)}",
                 )
             output.write(chunk)
+
+
+def _safe_upload_filename(filename: str | None, *, fallback: str) -> str:
+    candidate = Path(filename or fallback).name
+    if not candidate:
+        return fallback
+    return candidate
+
+
+def _worldline_duckdb_upload_dir(worldline_id: str) -> Path:
+    return meta_module.DB_DIR / "worldlines" / worldline_id / "uploads" / "duckdb"
 
 
 def _require_worldline(conn, worldline_id: str):
@@ -198,7 +215,11 @@ async def import_csv_endpoint(
     temp_path = TEMP_UPLOAD_DIR / f"{new_id('temp')}_{file.filename}"
 
     try:
-        await _write_upload_with_size_cap(file, destination=temp_path)
+        await _write_upload_with_size_cap(
+            file,
+            destination=temp_path,
+            max_size_bytes=MAX_CSV_FILE_SIZE,
+        )
 
         # Import the CSV
         result = import_csv_to_worldline(
@@ -278,6 +299,67 @@ async def attach_duckdb_endpoint(worldline_id: str, request: AttachExternalDBReq
         "attached_at": result.attached_at,
         "event_id": event_id,
     }
+
+
+@router.post("/worldlines/{worldline_id}/attach-duckdb-upload")
+async def attach_duckdb_upload_endpoint(
+    worldline_id: str,
+    file: UploadFile = File(...),
+    alias: str | None = Form(default=None),
+):
+    """
+    Upload a DuckDB file via file picker, store it in worldline data,
+    and attach it as an external read-only source.
+    """
+    with get_conn() as conn:
+        _require_worldline(conn, worldline_id)
+
+    upload_dir = _worldline_duckdb_upload_dir(worldline_id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    source_filename = _safe_upload_filename(file.filename, fallback="uploaded.duckdb")
+    stored_path = upload_dir / f"{new_id('duckdb')}_{source_filename}"
+    attached_successfully = False
+
+    try:
+        await _write_upload_with_size_cap(
+            file,
+            destination=stored_path,
+            max_size_bytes=MAX_DUCKDB_UPLOAD_SIZE,
+        )
+
+        result = attach_external_duckdb(
+            worldline_id=worldline_id,
+            db_path=str(stored_path),
+            alias=alias,
+        )
+        attached_successfully = True
+
+        event_payload = {
+            "alias": result.alias,
+            "db_path": result.db_path,
+            "attached_at": result.attached_at,
+            "source_filename": source_filename,
+            "upload_mode": "file_picker",
+        }
+
+        event_id = _append_worldline_event_with_retry(
+            worldline_id=worldline_id,
+            event_type="external_db_attached",
+            payload=event_payload,
+        )
+        _record_snapshot_for_event(worldline_id, event_id)
+
+        return {
+            "success": True,
+            "alias": result.alias,
+            "db_path": result.db_path,
+            "attached_at": result.attached_at,
+            "event_id": event_id,
+        }
+    finally:
+        if not attached_successfully and stored_path.exists():
+            stored_path.unlink()
+        await file.close()
 
 
 @router.post("/worldlines/{worldline_id}/detach-duckdb")
