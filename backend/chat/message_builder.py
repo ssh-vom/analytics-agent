@@ -152,6 +152,8 @@ def _summarize_sql_tool_result(payload: dict[str, Any]) -> dict[str, Any]:
 def _summarize_python_tool_result(payload: dict[str, Any]) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "error": payload.get("error"),
+        "error_code": payload.get("error_code"),
+        "retryable": payload.get("retryable"),
         "execution_ms": payload.get("execution_ms"),
     }
 

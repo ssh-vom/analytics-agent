@@ -48,7 +48,9 @@ class PythonToolTests(unittest.TestCase):
         return asyncio.run(coro)
 
     def _create_thread(self, title: str = "python-tool-test-thread") -> str:
-        response = self._run(threads.create_thread(threads.CreateThreadRequest(title=title)))
+        response = self._run(
+            threads.create_thread(threads.CreateThreadRequest(title=title))
+        )
         return response["thread_id"]
 
     def _create_worldline(self, thread_id: str, name: str = "main") -> str:
@@ -206,11 +208,54 @@ class PythonToolTests(unittest.TestCase):
             [row["type"] for row in event_rows],
             ["tool_call_python", "tool_result_python"],
         )
-        self.assertEqual(
-            json.loads(event_rows[1]["payload_json"]),
-            {"error": "sandbox crashed"},
-        )
+        error_payload = json.loads(event_rows[1]["payload_json"])
+        self.assertEqual(error_payload["error"], "sandbox crashed")
+        self.assertEqual(error_payload["error_code"], "python_runtime_error")
+        self.assertFalse(error_payload["retryable"])
         self.assertEqual(worldline_row["head_event_id"], event_rows[-1]["id"])
+
+    def test_python_tool_compile_preflight_sets_typed_result_without_sandbox(
+        self,
+    ) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        fake_manager = FakeSandboxManager()
+
+        with patch.object(tools, "_sandbox_manager", fake_manager):
+            with self.assertRaises(HTTPException) as ctx:
+                self._run(
+                    tools.run_python(
+                        tools.PythonToolRequest(
+                            worldline_id=worldline_id,
+                            code="def broken(:\n    pass",
+                            timeout=10,
+                        )
+                    )
+                )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("syntax preflight", str(ctx.exception.detail))
+        self.assertEqual(fake_manager.calls, [])
+
+        with meta.get_conn() as conn:
+            event_rows = conn.execute(
+                """
+                SELECT id, type, payload_json
+                FROM events
+                WHERE worldline_id = ?
+                ORDER BY rowid
+                """,
+                (worldline_id,),
+            ).fetchall()
+
+        self.assertEqual(
+            [row["type"] for row in event_rows],
+            ["tool_call_python", "tool_result_python"],
+        )
+        error_payload = json.loads(event_rows[1]["payload_json"])
+        self.assertEqual(error_payload["error_code"], "python_compile_error")
+        self.assertTrue(error_payload["retryable"])
+        self.assertIn("line", error_payload)
 
     def test_python_tool_replays_prior_successful_code(self) -> None:
         thread_id = self._create_thread()

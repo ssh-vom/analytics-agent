@@ -72,7 +72,7 @@ _TURN_STATE_TRANSITIONS: dict[str, set[str]] = {
     "completed": set(),
 }
 
-_AUTO_REPORT_CODE = """
+_AUTO_REPORT_CODE = r"""
 from datetime import datetime
 from textwrap import shorten
 
@@ -1054,10 +1054,23 @@ class ChatEngine:
                                     recent_artifact_names.add(name)
                                     turn_artifact_names.add(name)
                     else:
+                        error_code = ""
+                        if isinstance(tool_result, dict):
+                            raw_error_code = tool_result.get("error_code")
+                            if (
+                                isinstance(raw_error_code, str)
+                                and raw_error_code.strip()
+                            ):
+                                error_code = raw_error_code.strip()
+
+                        transition_reason = f"tool_result:{tool_name}_error"
+                        if error_code:
+                            transition_reason = f"{transition_reason}:{error_code}"
+
                         turn_state = await self._transition_state_and_emit(
                             current_state=turn_state,
                             to_state="error",
-                            reason=f"tool_result:{tool_name}_error",
+                            reason=transition_reason,
                             transitions=state_transitions,
                             worldline_id=active_worldline_id,
                             on_delta=on_delta,
@@ -1070,6 +1083,32 @@ class ChatEngine:
                             worldline_id=active_worldline_id,
                             on_delta=on_delta,
                         )
+
+                        if self._is_retryable_python_preflight_error(tool_result):
+                            invalid_tool_payload_failures["run_python"] += 1
+                            if (
+                                invalid_tool_payload_failures["run_python"]
+                                <= _MAX_INVALID_TOOL_PAYLOAD_RETRIES["run_python"]
+                            ):
+                                messages.append(
+                                    ChatMessage(
+                                        role="system",
+                                        content=self._build_python_preflight_retry_message(
+                                            tool_result=tool_result,
+                                            data_intent_summary=data_intent_summary,
+                                        ),
+                                    )
+                                )
+                                invalid_payload_retry_requested = True
+                                break
+
+                            final_text = (
+                                "I stopped after repeated Python preflight failures "
+                                "(syntax/tool-usage issues). I can continue once a valid "
+                                "run_python call is emitted."
+                            )
+                            repeated_call_detected = True
+                            break
                 if repeated_call_detected:
                     if final_text:
                         turn_state = await self._transition_state_and_emit(
@@ -1380,6 +1419,11 @@ class ChatEngine:
                 )
                 return result, None
             except HTTPException as exc:
+                if isinstance(exc.detail, dict):
+                    result_payload: dict[str, Any] = dict(exc.detail)
+                    if "status_code" not in result_payload:
+                        result_payload["status_code"] = exc.status_code
+                    return result_payload, None
                 return {"error": str(exc.detail), "status_code": exc.status_code}, None
             except Exception as exc:  # pragma: no cover
                 return {"error": str(exc)}, None
@@ -1428,6 +1472,16 @@ class ChatEngine:
             return False
 
         try:
+            compile(_AUTO_REPORT_CODE, "<auto_report_fallback>", "exec")
+        except SyntaxError as exc:
+            logger.warning(
+                "Auto report code failed syntax preflight at line %s: %s",
+                exc.lineno,
+                exc.msg,
+            )
+            return False
+
+        try:
             result = await execute_python_tool(
                 PythonToolRequest(
                     worldline_id=worldline_id,
@@ -1455,34 +1509,6 @@ class ChatEngine:
             return False
         return any(_artifact_is_pdf(artifact) for artifact in artifacts)
 
-    async def _persist_failed_tool_call(
-        self,
-        worldline_id: str,
-        call_type: str,
-        result_type: str,
-        call_payload: dict[str, Any],
-        result_payload: dict[str, Any],
-        on_event: Callable[[str, dict[str, Any]], Awaitable[None]],
-    ) -> None:
-        """Persist a tool call and its error result so the user sees the attempt."""
-        call_event = self._append_worldline_event(
-            worldline_id=worldline_id,
-            event_type=call_type,
-            payload=call_payload,
-        )
-        if on_event is not None:
-            await on_event(worldline_id, call_event)
-
-        result_event = self._append_worldline_event(
-            worldline_id=worldline_id,
-            event_type=result_type,
-            payload=result_payload,
-        )
-        if on_event is not None:
-            await on_event(worldline_id, result_event)
-
-    # ---- message building ---------------------------------------------------
-
     async def _load_worldline_events(self, worldline_id: str) -> list[dict[str, Any]]:
         timeline = await get_worldline_events(
             worldline_id=worldline_id,
@@ -1491,10 +1517,6 @@ class ChatEngine:
         )
         events = timeline.get("events", [])
         return list(events)
-
-    async def _build_llm_messages(self, worldline_id: str) -> list[ChatMessage]:
-        events = await self._load_worldline_events(worldline_id)
-        return build_llm_messages_from_events(events)
 
     def _artifact_inventory_from_events(
         self, events: list[dict[str, Any]]
@@ -2073,6 +2095,47 @@ class ChatEngine:
             "Your previous reply skipped required tool execution ("
             + ", ".join(missing_sorted)
             + "). Emit the required tool call(s) now before finalizing."
+        )
+
+    def _is_retryable_python_preflight_error(
+        self,
+        tool_result: dict[str, Any],
+    ) -> bool:
+        if not isinstance(tool_result, dict):
+            return False
+
+        if tool_result.get("retryable") is not True:
+            return False
+
+        error_code = str(tool_result.get("error_code") or "").strip().lower()
+        return error_code in {
+            "python_compile_error",
+            "python_execution_payload_compile_error",
+            "python_tool_invocation_forbidden",
+        }
+
+    def _build_python_preflight_retry_message(
+        self,
+        *,
+        tool_result: dict[str, Any],
+        data_intent_summary: dict[str, Any] | None,
+    ) -> str:
+        error_code = str(tool_result.get("error_code") or "python_preflight_error")
+        error_text = str(tool_result.get("error") or "Python preflight failed")
+        checkpoint = (
+            json.dumps(data_intent_summary, ensure_ascii=True, default=str)
+            if data_intent_summary
+            else "none"
+        )
+        if len(checkpoint) > 900:
+            checkpoint = checkpoint[:900] + "...(truncated)"
+
+        return (
+            "Correction: the previous run_python execution failed preflight "
+            f"({error_code}: {error_text}). Emit a fresh run_python tool call with "
+            "valid executable Python in `code` (not nested JSON, not comments-only, and "
+            "no backend tool function calls). Use LATEST_SQL_RESULT/LATEST_SQL_DF as input. "
+            "SQL checkpoint: " + checkpoint
         )
 
     def _is_empty_python_payload_error(self, tool_result: dict[str, Any]) -> bool:

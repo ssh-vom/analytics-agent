@@ -1,6 +1,6 @@
 import unittest
 
-from chat.engine import ChatEngine
+from chat.engine import ChatEngine, _AUTO_REPORT_CODE
 
 
 class _DummyLlmClient:
@@ -103,6 +103,29 @@ class StateMachineTests(unittest.TestCase):
         )
 
         self.assertEqual(missing, {"run_python"})
+
+    def test_retryable_python_preflight_error_classification(self) -> None:
+        self.assertTrue(
+            self.engine._is_retryable_python_preflight_error(
+                {
+                    "error": "syntax",
+                    "error_code": "python_compile_error",
+                    "retryable": True,
+                }
+            )
+        )
+        self.assertFalse(
+            self.engine._is_retryable_python_preflight_error(
+                {
+                    "error": "runtime",
+                    "error_code": "python_runtime_error",
+                    "retryable": False,
+                }
+            )
+        )
+
+    def test_auto_report_code_compiles(self) -> None:
+        compile(_AUTO_REPORT_CODE, "<auto_report_code>", "exec")
 
 
 if __name__ == "__main__":

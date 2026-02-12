@@ -195,6 +195,12 @@ class PythonToolRequest(BaseModel):
     call_id: str | None = None
 
 
+class PythonPreflightError(Exception):
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        super().__init__(str(payload.get("error") or "python preflight failed"))
+
+
 def _load_event_chain(conn, head_event_id: str | None) -> list[dict]:
     if head_event_id is None:
         return []
@@ -311,6 +317,73 @@ def _detect_tool_invocations_in_python(code: str) -> list[str]:
     return found
 
 
+def _format_syntax_error(exc: SyntaxError) -> dict[str, Any]:
+    line = exc.lineno if isinstance(exc.lineno, int) and exc.lineno > 0 else None
+    column = exc.offset if isinstance(exc.offset, int) and exc.offset > 0 else None
+
+    location_parts: list[str] = []
+    if line is not None:
+        location_parts.append(f"line {line}")
+    if column is not None:
+        location_parts.append(f"column {column}")
+    location_text = ""
+    if location_parts:
+        location_text = " at " + ", ".join(location_parts)
+
+    message = str(exc.msg or "invalid syntax")
+    text = f"Python code failed syntax preflight{location_text}: {message}."
+    if isinstance(exc.text, str) and exc.text.strip():
+        text += f" Offending line: {exc.text.strip()}"
+
+    payload: dict[str, Any] = {
+        "error": text,
+        "error_code": "python_compile_error",
+        "retryable": True,
+    }
+    if line is not None:
+        payload["line"] = line
+    if column is not None:
+        payload["column"] = column
+    return payload
+
+
+def _python_preflight_error_payload(
+    *,
+    code: str,
+    execution_code: str,
+) -> dict[str, Any] | None:
+    invalid_tool_calls = _detect_tool_invocations_in_python(code)
+    if invalid_tool_calls:
+        return {
+            "error": (
+                "Python code attempted to call backend tools directly "
+                f"({', '.join(invalid_tool_calls)}). Use tool calls at the model level "
+                "(run_sql/run_python) and keep Python as plain executable analysis code."
+            ),
+            "error_code": "python_tool_invocation_forbidden",
+            "retryable": True,
+            "invalid_tool_calls": invalid_tool_calls,
+        }
+
+    try:
+        compile(code, "<run_python_code>", "exec")
+    except SyntaxError as exc:
+        return _format_syntax_error(exc)
+
+    try:
+        compile(execution_code, "<run_python_execution_payload>", "exec")
+    except SyntaxError as exc:
+        payload = _format_syntax_error(exc)
+        payload["error_code"] = "python_execution_payload_compile_error"
+        payload["error"] = (
+            "Generated execution payload failed syntax preflight before sandbox run: "
+            + str(payload.get("error") or "python compile error")
+        )
+        return payload
+
+    return None
+
+
 async def execute_python_tool(
     body: PythonToolRequest,
     on_event: ToolEventCallback | None = None,
@@ -383,28 +456,26 @@ async def execute_python_tool(
         )
 
         try:
-            invalid_tool_calls = _detect_tool_invocations_in_python(body.code)
-            if invalid_tool_calls:
+            preflight_error_payload = _python_preflight_error_payload(
+                code=body.code,
+                execution_code=execution_code,
+            )
+            if preflight_error_payload is not None:
                 # #region agent log
                 _debug_log(
                     run_id="initial",
                     hypothesis_id="H9",
-                    location="backend/tools.py:execute_python_tool:invalid_tool_call_in_python",
-                    message="Detected backend tool invocation inside python code",
+                    location="backend/tools.py:execute_python_tool:preflight_error",
+                    message="Python preflight blocked sandbox execution",
                     data={
                         "worldline_id": body.worldline_id,
                         "call_id": body.call_id,
-                        "invalid_tool_calls": invalid_tool_calls,
-                        "code_preview": body.code[:220],
+                        "error_code": preflight_error_payload.get("error_code"),
+                        "error": preflight_error_payload.get("error"),
                     },
                 )
                 # #endregion
-                raise ValueError(
-                    "Python code attempted to call backend tools directly "
-                    f"({', '.join(invalid_tool_calls)}). "
-                    "Use tool calls at the model level: call run_sql first, then run_python "
-                    "with plain Python that only processes provided data."
-                )
+                raise PythonPreflightError(preflight_error_payload)
 
             # #region agent log
             _debug_log(
@@ -499,6 +570,19 @@ async def execute_python_tool(
             )
             # #endregion
             return api_result
+        except PythonPreflightError as exc:
+            await _append_worldline_event(
+                conn,
+                worldline_id=body.worldline_id,
+                parent_event_id=call_event_id,
+                event_type="tool_result_python",
+                payload=exc.payload,
+                on_event=on_event,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=exc.payload,
+            )
         except EventStoreConflictError:
             conn.rollback()
             raise HTTPException(
@@ -526,7 +610,11 @@ async def execute_python_tool(
                 worldline_id=body.worldline_id,
                 parent_event_id=call_event_id,
                 event_type="tool_result_python",
-                payload={"error": str(exc)},
+                payload={
+                    "error": str(exc),
+                    "error_code": "python_runtime_error",
+                    "retryable": False,
+                },
                 on_event=on_event,
             )
             raise HTTPException(status_code=400, detail=str(exc))

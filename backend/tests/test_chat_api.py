@@ -230,6 +230,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(call_request.call_id, "auto_report_pdf")
         self.assertEqual(call_request.worldline_id, worldline_id)
         self.assertIn("report.pdf", call_request.code)
+        compile(call_request.code, "<auto_report_from_engine>", "exec")
 
         assistant_event = result["events"][-1]
         self.assertEqual(assistant_event["type"], "assistant_message")
