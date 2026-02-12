@@ -225,6 +225,7 @@ pnpm-debug.log*
 
 # --- Runtime app data / artifacts ---
 backend/data/worldlines/
+backend/data/demo/
 backend/data/meta.db-shm
 backend/data/meta.db-wal
 backend/.pytest_cache/
