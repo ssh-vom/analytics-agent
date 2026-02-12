@@ -76,9 +76,15 @@
   .floating-layer {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.35);
-    backdrop-filter: blur(1px);
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(6px);
     z-index: 90;
+    animation: overlayFadeIn 0.2s ease forwards;
+  }
+
+  @keyframes overlayFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 
   .floating-panel {
@@ -90,11 +96,23 @@
     height: min(82vh, calc(100vh - 80px));
     background: var(--bg-1);
     border: 1px solid var(--border-medium);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
     box-shadow: var(--shadow-lg);
     display: flex;
     flex-direction: column;
     min-height: 0;
+    animation: panelScaleIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  @keyframes panelScaleIn {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
   }
 
   .floating-header {
@@ -129,21 +147,22 @@
   }
 
   .floating-close {
-    width: 22px;
-    height: 22px;
+    width: 26px;
+    height: 26px;
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     background: transparent;
     color: var(--text-dim);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    transition: color var(--transition-fast);
+    transition: all var(--transition-fast);
   }
 
   .floating-close:hover {
     color: var(--text-primary);
     border-color: var(--border-medium);
+    background: var(--surface-hover);
   }
 
   .viewer-download {

@@ -408,13 +408,13 @@
     padding: var(--space-4);
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
-    transition: all var(--transition-fast);
+    border-radius: var(--radius-xl);
+    transition: all var(--transition-normal);
   }
 
   .worldline-card:hover {
     border-color: var(--border-medium);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--shadow-md);
   }
 
   .worldline-card.active {
@@ -463,7 +463,7 @@
     color: var(--accent-orange);
     font-size: 11px;
     font-weight: 600;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-full);
     text-transform: uppercase;
   }
 
@@ -499,7 +499,7 @@
     padding: var(--space-2) var(--space-3);
     background: var(--surface-1);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     color: var(--text-secondary);
     font-size: 13px;
     display: inline-flex;
@@ -541,7 +541,7 @@
     padding: var(--space-5);
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
   }
 
   .worldlines-info h3 {

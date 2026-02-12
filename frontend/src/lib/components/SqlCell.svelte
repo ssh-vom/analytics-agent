@@ -136,14 +136,15 @@
   .sql-cell {
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     overflow: hidden;
-    transition: border-color var(--transition-fast);
+    transition: border-color var(--transition-normal), box-shadow var(--transition-normal);
     flex-shrink: 0;
   }
 
   .sql-cell:hover {
     border-color: var(--border-medium);
+    box-shadow: var(--shadow-sm);
   }
 
   .row-count-badge {

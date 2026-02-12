@@ -63,16 +63,17 @@
 <style>
   .message {
     display: flex;
-    gap: var(--space-3);
+    gap: var(--space-4);
     padding: var(--space-5);
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
-    transition: border-color var(--transition-fast);
+    border-radius: var(--radius-lg);
+    transition: border-color var(--transition-normal), box-shadow var(--transition-normal);
   }
 
   .message:hover {
     border-color: var(--border-medium);
+    box-shadow: var(--shadow-sm);
   }
 
   .message.user {
@@ -80,7 +81,7 @@
   }
 
   .message.plan {
-    border-left: 2px solid var(--accent-cyan);
+    border-left: 3px solid var(--accent-cyan);
   }
 
   .message-gutter {
@@ -91,9 +92,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
-    border-radius: var(--radius-sm);
+    width: 34px;
+    height: 34px;
+    border-radius: var(--radius-md);
     background: var(--surface-2);
     color: var(--text-dim);
   }
@@ -133,10 +134,10 @@
   }
 
   .role-name {
-    font-family: var(--font-heading);
-    font-size: 13px;
+    font-family: var(--font-mono);
+    font-size: 11px;
     font-weight: 500;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
     color: var(--text-muted);
     text-transform: uppercase;
   }
@@ -236,24 +237,27 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: 4px var(--space-2);
+    padding: 4px var(--space-3);
     background: transparent;
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: 11px;
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition: all var(--transition-normal);
     opacity: 0;
+    transform: translateX(4px);
   }
 
   .message:hover .branch-btn {
     opacity: 1;
+    transform: translateX(0);
   }
 
   .branch-btn:hover {
     border-color: var(--border-medium);
     color: var(--text-secondary);
+    background: var(--surface-hover);
   }
 
   @media (max-width: 640px) {

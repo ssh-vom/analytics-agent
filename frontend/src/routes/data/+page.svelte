@@ -487,7 +487,7 @@
     padding: var(--space-5);
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
   }
 
   .section-header {
@@ -581,11 +581,13 @@
     background: var(--accent-cyan-muted);
     border-color: var(--accent-cyan);
     color: var(--accent-cyan);
+    border-radius: var(--radius-lg);
   }
 
   .action-btn.primary:hover:not(:disabled) {
     background: var(--accent-cyan);
     color: #111;
+    box-shadow: 0 4px 12px rgba(54, 197, 176, 0.25);
   }
 
   .action-btn.danger {
@@ -633,7 +635,7 @@
     padding: var(--space-5);
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
   }
 
   .tables-list,

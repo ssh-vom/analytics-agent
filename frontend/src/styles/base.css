@@ -11,6 +11,8 @@ body {
 
 body {
   font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
   color: var(--text-primary);
   background: var(--bg-0);
   -webkit-font-smoothing: antialiased;
@@ -27,10 +29,36 @@ input,
 textarea,
 select {
   font-family: inherit;
+  font-size: inherit;
 }
 
 button {
   cursor: pointer;
+}
+
+/* Smooth focus ring for interactive elements */
+:focus-visible {
+  outline: 2px solid var(--accent-green);
+  outline-offset: 2px;
+}
+
+/* Scroll styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-medium);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
 }
 
 .spin {

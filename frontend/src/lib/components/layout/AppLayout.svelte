@@ -256,21 +256,21 @@
   }
 
   .sidebar-header {
-    padding: var(--space-4) var(--space-4) var(--space-3);
+    padding: var(--space-5) var(--space-5) var(--space-4);
     border-bottom: 1px solid var(--border-soft);
   }
 
   .logo {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-3);
     text-decoration: none;
     color: var(--text-primary);
   }
 
   .logo-text {
     font-family: var(--font-heading);
-    font-size: 18px;
+    font-size: 17px;
     font-weight: 400;
     letter-spacing: 0.02em;
   }
@@ -278,7 +278,7 @@
   .sidebar-content {
     flex: 1;
     overflow: hidden;
-    padding: var(--space-4);
+    padding: var(--space-4) var(--space-3);
   }
 
   .section {
@@ -321,17 +321,17 @@
   .section-content {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding-top: var(--space-1);
+    gap: var(--space-1);
+    padding-top: var(--space-2);
     min-height: 0;
   }
 
   .thread-list {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     overflow-y: auto;
-    max-height: min(56vh, calc(100vh - 260px));
+    max-height: min(56vh, calc(100vh - 280px));
     padding-right: 2px;
   }
 
@@ -342,9 +342,9 @@
     padding: var(--space-3) var(--space-3);
     background: transparent;
     border: none;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     cursor: pointer;
-    transition: background var(--transition-fast);
+    transition: background var(--transition-fast), box-shadow var(--transition-fast);
     text-align: left;
   }
 
@@ -354,18 +354,19 @@
 
   .thread-card.active {
     background: var(--surface-active);
+    box-shadow: inset 3px 0 0 var(--accent-green);
   }
 
   .thread-info {
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 2px;
     min-width: 0;
   }
 
   .thread-name {
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
     white-space: nowrap;
     overflow: hidden;
@@ -374,7 +375,7 @@
 
   .thread-meta {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: 11px;
   }
 
   .thread-meta-row {
@@ -409,11 +410,12 @@
   }
 
   .active-indicator {
-    width: 5px;
-    height: 5px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     background: var(--accent-green);
     flex-shrink: 0;
+    box-shadow: 0 0 6px rgba(62, 207, 142, 0.5);
   }
 
   .new-thread-btn {
@@ -424,7 +426,7 @@
     margin-top: var(--space-2);
     background: transparent;
     border: 1px dashed var(--border-medium);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     color: var(--text-muted);
     font-size: 13px;
     cursor: pointer;
@@ -433,19 +435,19 @@
 
   .new-thread-btn:hover {
     background: var(--surface-hover);
-    border-color: var(--text-dim);
-    color: var(--text-secondary);
+    border-color: var(--accent-green);
+    color: var(--accent-green);
   }
 
   .sidebar-footer {
-    padding: var(--space-4);
+    padding: var(--space-4) var(--space-3);
     border-top: 1px solid var(--border-soft);
   }
 
   .nav-menu {
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: var(--space-1);
     margin-bottom: var(--space-4);
   }
 
@@ -453,29 +455,31 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    padding: var(--space-3) var(--space-3);
+    padding: 10px var(--space-3);
     color: var(--text-muted);
     text-decoration: none;
-    border-radius: var(--radius-sm);
-    font-size: 14px;
+    border-radius: var(--radius-md);
+    font-size: 13px;
     transition: all var(--transition-fast);
   }
 
   .nav-item:hover {
-    color: var(--text-secondary);
+    color: var(--text-primary);
     background: var(--surface-hover);
   }
 
   .nav-item.active {
     color: var(--accent-green);
     background: var(--accent-green-muted);
+    font-weight: 500;
   }
 
   .version {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: 11px;
     font-family: var(--font-mono);
     text-align: center;
+    opacity: 0.6;
   }
 
   .main-content {
@@ -497,13 +501,25 @@
 
   .job-toast {
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     background: var(--bg-1);
-    box-shadow: var(--shadow-sm);
-    padding: var(--space-3);
+    box-shadow: var(--shadow-md);
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+    animation: toastSlideIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  }
+
+  @keyframes toastSlideIn {
+    from {
+      opacity: 0;
+      transform: translateY(12px) scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
   }
 
   .job-toast.failed {

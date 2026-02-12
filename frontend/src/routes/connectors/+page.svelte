@@ -406,7 +406,7 @@
     padding: var(--space-3) var(--space-4);
     background: var(--accent-orange);
     border: none;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     color: #111;
     font-size: 14px;
     font-weight: 600;
@@ -456,13 +456,13 @@
     padding: var(--space-4);
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
-    transition: all var(--transition-fast);
+    border-radius: var(--radius-xl);
+    transition: all var(--transition-normal);
   }
 
   .connector-card:hover {
     border-color: var(--border-medium);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--shadow-md);
   }
 
   .connector-header {
@@ -571,7 +571,7 @@
     padding: var(--space-8);
     text-align: center;
     border: 1px dashed var(--border-medium);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
     color: var(--text-muted);
   }
 
@@ -591,6 +591,7 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
     display: flex;
     align-items: center;
     justify-content: center;

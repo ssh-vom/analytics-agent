@@ -142,8 +142,13 @@
     gap: 6px;
     border: 1px solid var(--border-soft);
     border-radius: var(--radius-md);
-    padding: 4px 10px;
+    padding: 6px 12px;
     background: var(--surface-1);
+    transition: border-color var(--transition-fast);
+  }
+
+  .picker:hover {
+    border-color: var(--border-medium);
   }
 
   .picker-label {
@@ -190,7 +195,7 @@
 
   .picker-menu {
     position: absolute;
-    top: calc(100% + 6px);
+    top: calc(100% + 8px);
     left: 0;
     min-width: 320px;
     max-width: min(440px, 80vw);
@@ -198,13 +203,25 @@
     overflow-y: auto;
     background: var(--surface-0);
     border: 1px solid var(--border-medium);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg);
     padding: var(--space-2);
     z-index: 220;
     display: flex;
     flex-direction: column;
     gap: 2px;
+    animation: pickerDropIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  @keyframes pickerDropIn {
+    from {
+      opacity: 0;
+      transform: translateY(-4px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
   }
 
   .empty-state {
@@ -220,13 +237,14 @@
     width: 100%;
     border: none;
     background: transparent;
-    border-radius: var(--radius-sm);
-    padding: 6px var(--space-2);
+    border-radius: var(--radius-md);
+    padding: 8px var(--space-3);
     color: var(--text-secondary);
     font-size: 13px;
     text-align: left;
     cursor: pointer;
     font-family: var(--font-mono);
+    transition: background var(--transition-fast), color var(--transition-fast);
   }
 
   .tree-row:hover {

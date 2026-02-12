@@ -112,7 +112,7 @@
   .settings-section {
     background: var(--surface-0);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
     overflow: hidden;
   }
 
@@ -138,7 +138,7 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
-    padding: var(--space-4) var(--space-5);
+    padding: var(--space-5) var(--space-5);
     border-bottom: 1px solid var(--border-soft);
   }
 
@@ -173,7 +173,7 @@
   .theme-toggle {
     display: inline-block;
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     background: var(--surface-1);
     color: var(--text-primary);
     padding: var(--space-2) var(--space-3);
@@ -181,7 +181,7 @@
     align-items: center;
     gap: var(--space-2);
     min-width: 180px;
-    transition: border-color var(--transition-fast), background var(--transition-fast);
+    transition: all var(--transition-normal);
   }
 
   .theme-toggle:hover {
@@ -213,6 +213,7 @@
     display: inline-flex;
     align-items: center;
     padding: 2px;
+    transition: background var(--transition-normal);
   }
 
   .toggle-thumb::before {

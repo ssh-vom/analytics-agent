@@ -86,9 +86,9 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--border-soft);
-    min-height: 40px;
+    min-height: 44px;
     flex-shrink: 0;
   }
 
@@ -152,8 +152,8 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: 1px 6px;
-    border-radius: var(--radius-sm);
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
     font-size: 10px;
     font-weight: 500;
     font-family: var(--font-mono);
@@ -200,25 +200,28 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: 2px var(--space-2);
+    padding: 4px var(--space-3);
     background: transparent;
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     color: var(--text-dim);
     font-size: 11px;
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition: all var(--transition-normal);
     opacity: 0;
+    transform: translateX(4px);
     flex-shrink: 0;
   }
 
   .cell-header:hover .branch-btn {
     opacity: 1;
+    transform: translateX(0);
   }
 
   .branch-btn:hover {
     border-color: var(--border-medium);
     color: var(--text-secondary);
+    background: var(--surface-hover);
   }
 
   .spin {

@@ -7,7 +7,7 @@
 @keyframes messageSlideIn {
   from {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -25,19 +25,19 @@
 }
 
 .message-entrance {
-  animation: messageSlideIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: messageSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .message-entrance-fast {
-  animation: messageFadeIn 0.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: messageFadeIn 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 /* Stagger delays for multiple messages */
 .message-entrance:nth-child(1) { animation-delay: 0ms; }
-.message-entrance:nth-child(2) { animation-delay: 50ms; }
-.message-entrance:nth-child(3) { animation-delay: 100ms; }
-.message-entrance:nth-child(4) { animation-delay: 150ms; }
-.message-entrance:nth-child(5) { animation-delay: 200ms; }
+.message-entrance:nth-child(2) { animation-delay: 60ms; }
+.message-entrance:nth-child(3) { animation-delay: 120ms; }
+.message-entrance:nth-child(4) { animation-delay: 180ms; }
+.message-entrance:nth-child(5) { animation-delay: 240ms; }
 
 /* ============================================
    STREAMING / TYPING INDICATORS
@@ -182,23 +182,25 @@
    ============================================ */
 
 .btn-hover {
-  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .btn-hover:hover {
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
 }
 
 .btn-hover:active {
   transform: translateY(0);
+  box-shadow: none;
 }
 
 .btn-press {
-  transition: transform 0.1s ease;
+  transition: transform 0.12s ease;
 }
 
 .btn-press:active {
-  transform: scale(0.97);
+  transform: scale(0.96);
 }
 
 /* ============================================
@@ -227,29 +229,29 @@
 @keyframes panelSlideDown {
   from {
     opacity: 0;
-    transform: translateY(-8px);
+    transform: translateY(-6px) scale(0.97);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
 @keyframes panelSlideUp {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(6px) scale(0.97);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
 @keyframes fadeScale {
   from {
     opacity: 0;
-    transform: scale(0.95);
+    transform: scale(0.94);
   }
   to {
     opacity: 1;
@@ -258,17 +260,17 @@
 }
 
 .dropdown-entrance {
-  animation: panelSlideDown 0.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: panelSlideDown 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   transform-origin: top center;
 }
 
 .context-menu-entrance {
-  animation: panelSlideUp 0.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: panelSlideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   transform-origin: bottom center;
 }
 
 .modal-entrance {
-  animation: fadeScale 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: fadeScale 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 /* ============================================
@@ -405,12 +407,12 @@
    ============================================ */
 
 .hover-lift {
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .hover-lift:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
 }
 
 /* ============================================

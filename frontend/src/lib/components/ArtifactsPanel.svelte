@@ -376,20 +376,22 @@
 
   .empty-state {
     margin: auto;
-    max-width: 180px;
+    max-width: 200px;
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
+    gap: var(--space-3);
     align-items: center;
     justify-content: center;
     color: var(--text-dim);
     text-align: center;
     font-size: 12px;
+    padding: var(--space-6);
+    opacity: 0.7;
   }
 
   .empty-state p {
     margin: 0;
-    line-height: 1.4;
+    line-height: 1.5;
   }
 
   .panel-note {
@@ -415,9 +417,14 @@
     flex-direction: column;
     gap: var(--space-2);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     background: var(--surface-0);
-    transition: border-color var(--transition-fast);
+    transition: border-color var(--transition-normal), box-shadow var(--transition-normal);
+  }
+
+  .artifact-card:hover {
+    border-color: var(--border-medium);
+    box-shadow: var(--shadow-sm);
   }
 
   .artifact-select {
