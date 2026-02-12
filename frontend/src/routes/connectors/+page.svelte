@@ -1,126 +1,148 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getStoredJson } from "$lib/storage";
-  import type { Connector } from "$lib/types";
-  import { Plus } from "lucide-svelte";
+  import {
+    attachExternalDuckDB,
+    detachExternalDuckDB,
+    fetchWorldlineSchema,
+  } from "$lib/api/client";
+  import { AlertCircle } from "lucide-svelte";
+  import { CheckCircle2 } from "lucide-svelte";
   import { Database } from "lucide-svelte";
+  import { Loader2 } from "lucide-svelte";
+  import { Plus } from "lucide-svelte";
   import { Trash2 } from "lucide-svelte";
-  import { Check } from "lucide-svelte";
   import { X } from "lucide-svelte";
 
-  let connectors: Connector[] = [];
-  let showModal = false;
-  let newConnectorName = "";
-  let newConnectorType: Connector["type"] = "duckdb";
-  let newConnectorString = "";
+  type AttachedConnector = {
+    alias: string;
+    db_path: string;
+    db_type: string;
+    attached_at: string;
+    tables: string[];
+  };
 
-  function isStoredConnector(value: unknown): value is Connector {
-    if (typeof value !== "object" || value === null) {
-      return false;
+  let worldlineId = "";
+  let loading = true;
+  let errorMessage = "";
+  let connectors: AttachedConnector[] = [];
+
+  let showModal = false;
+  let newConnectorType: "duckdb" | "sqlite" | "postgres" | "mysql" = "duckdb";
+  let newConnectorPath = "";
+  let newConnectorAlias = "";
+  let submitting = false;
+  let formError = "";
+  let formSuccess = "";
+
+  onMount(() => {
+    const saved = localStorage.getItem("textql_active_worldline");
+    if (!saved) {
+      loading = false;
+      errorMessage = "No active worldline selected. Open Chat and select a worldline first.";
+      return;
     }
-    const connector = value as Partial<Connector>;
+
+    worldlineId = saved;
+    void loadConnectors();
+  });
+
+  async function loadConnectors(): Promise<void> {
+    if (!worldlineId) {
+      loading = false;
+      return;
+    }
+
+    loading = true;
+    errorMessage = "";
+    try {
+      const schema = await fetchWorldlineSchema(worldlineId);
+      connectors = [...schema.attached_databases].sort((a, b) =>
+        b.attached_at.localeCompare(a.attached_at),
+      );
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : "Failed to load connectors";
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function addConnector(): Promise<void> {
+    if (!worldlineId || !newConnectorPath.trim() || submitting) {
+      return;
+    }
+
+    formError = "";
+    formSuccess = "";
+
+    if (newConnectorType !== "duckdb") {
+      formError = "Only DuckDB is available right now. Other connector types are coming soon.";
+      return;
+    }
+
+    submitting = true;
+    try {
+      const result = await attachExternalDuckDB(
+        worldlineId,
+        newConnectorPath.trim(),
+        newConnectorAlias.trim() || undefined,
+      );
+      formSuccess = `Attached as ${result.alias}`;
+      showModal = false;
+      newConnectorPath = "";
+      newConnectorAlias = "";
+      newConnectorType = "duckdb";
+      await loadConnectors();
+    } catch (error) {
+      formError = error instanceof Error ? error.message : "Failed to attach connector";
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function removeConnector(alias: string): Promise<void> {
+    if (!worldlineId) {
+      return;
+    }
+
+    if (!confirm(`Detach connector "${alias}" from this worldline?`)) {
+      return;
+    }
+
+    errorMessage = "";
+    formSuccess = "";
+    try {
+      await detachExternalDuckDB(worldlineId, alias);
+      formSuccess = `Detached ${alias}`;
+      await loadConnectors();
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : "Failed to detach connector";
+    }
+  }
+
+  function closeModal(): void {
+    showModal = false;
+    formError = "";
+  }
+
+  function formatDate(isoDate: string): string {
+    const date = new Date(isoDate);
     return (
-      typeof connector.id === "string" &&
-      typeof connector.name === "string" &&
-      (connector.type === "sqlite" ||
-        connector.type === "postgres" ||
-        connector.type === "duckdb" ||
-        connector.type === "mysql") &&
-      typeof connector.connectionString === "string" &&
-      typeof connector.isActive === "boolean" &&
-      (connector.lastConnected === undefined ||
-        typeof connector.lastConnected === "string")
+      date.toLocaleDateString(undefined, {
+        month: "numeric",
+        day: "numeric",
+        year: "numeric",
+      }) +
+      ", " +
+      date.toLocaleTimeString(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+      })
     );
   }
 
-  function isStoredConnectors(value: unknown): value is Connector[] {
-    return Array.isArray(value) && value.every((item) => isStoredConnector(item));
-  }
-
-  onMount(() => {
-    // Load connectors from localStorage
-    const saved = getStoredJson<Connector[]>("textql_connectors", isStoredConnectors);
-    if (saved) {
-      connectors = saved;
-    } else {
-      // Default connector
-      connectors = [
-        {
-          id: "default",
-          name: "local.db",
-          type: "duckdb",
-          connectionString: "file:local.db",
-          isActive: true,
-          lastConnected: new Date().toISOString(),
-        },
-      ];
-      saveConnectors();
-    }
-  });
-
-  function saveConnectors() {
-    localStorage.setItem("textql_connectors", JSON.stringify(connectors));
-  }
-
-  function addConnector() {
-    if (!newConnectorName || !newConnectorString) return;
-
-    const newConnector: Connector = {
-      id: crypto.randomUUID(),
-      name: newConnectorName,
-      type: newConnectorType,
-      connectionString: newConnectorString,
-      isActive: false,
-      lastConnected: new Date().toISOString(),
-    };
-
-    connectors = [...connectors, newConnector];
-    saveConnectors();
-    
-    // Reset form
-    newConnectorName = "";
-    newConnectorString = "";
-    showModal = false;
-  }
-
-  function deleteConnector(id: string) {
-    connectors = connectors.filter((c) => c.id !== id);
-    saveConnectors();
-  }
-
-  function setActiveConnector(id: string) {
-    connectors = connectors.map((c) => ({
-      ...c,
-      isActive: c.id === id,
-    }));
-    saveConnectors();
-  }
-
-  function formatDate(dateString: string): string {
-    const date = new Date(dateString);
-    return date.toLocaleDateString(undefined, {
-      month: "numeric",
-      day: "numeric",
-      year: "numeric",
-    }) + ", " + 
-    date.toLocaleTimeString(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
-
-  function getTypeBadgeColor(type: string): string {
-    switch (type) {
-      case "sqlite":
-        return "var(--accent-blue)";
-      case "postgres":
-        return "var(--accent-purple)";
-      case "duckdb":
-        return "var(--accent-orange)";
-      case "mysql":
-        return "var(--accent-cyan)";
-      default:
-        return "var(--text-muted)";
+  function handleModalKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      closeModal();
     }
   }
 </script>
@@ -130,133 +152,152 @@
     <div class="header-content">
       <div>
         <h1>Connectors</h1>
-        <p class="subtitle">Manage database connections for your analysis sessions</p>
+        <p class="subtitle">Connect DuckDB files to the active worldline for analysis.</p>
       </div>
-      <button class="new-connector-btn" on:click={() => showModal = true}>
-        <Plus size={18} />
-        <span>New Connector</span>
-      </button>
-    </div>
-  </header>
-
-  <main class="connectors-list">
-    {#each connectors as connector}
-      <div class="connector-card" class:active={connector.isActive}>
-        <div class="connector-header">
-          <div class="connector-info">
-            <Database size={20} />
-            <span class="connector-name">{connector.name}</span>
-            <span 
-              class="type-badge"
-              style="background: {getTypeBadgeColor(connector.type)}20; color: {getTypeBadgeColor(connector.type)}"
-            >
-              {connector.type.toUpperCase()}
-            </span>
-            {#if connector.isActive}
-              <span class="status-badge active">
-                <span class="status-dot"></span>
-                Active
-              </span>
-            {/if}
-          </div>
-          <div class="connector-actions">
-            {#if !connector.isActive}
-              <button 
-                class="action-btn connect"
-                on:click={() => setActiveConnector(connector.id)}
-              >
-                <Check size={16} />
-                <span>Connect</span>
-              </button>
-            {:else}
-              <button 
-                class="action-btn disconnect"
-                on:click={() => setActiveConnector("")}
-              >
-                <X size={16} />
-                <span>Disconnect</span>
-              </button>
-            {/if}
-            <button 
-              class="action-btn delete"
-              on:click={() => deleteConnector(connector.id)}
-            >
-              <Trash2 size={16} />
-            </button>
-          </div>
-        </div>
-        <div class="connector-details">
-          <code class="connection-string">{connector.connectionString}</code>
-          <span class="last-connected">
-            Last connected: {formatDate(connector.lastConnected || connector.id)}
-          </span>
-        </div>
-      </div>
-    {/each}
-
-    {#if connectors.length === 0}
-      <div class="empty-state">
-        <Database size={48} />
-        <h3>No connectors configured</h3>
-        <p>Add a database connection to start analyzing your data</p>
-        <button class="new-connector-btn" on:click={() => showModal = true}>
+      <div class="header-actions">
+        {#if worldlineId}
+          <span class="worldline-badge">Worldline: {worldlineId.slice(0, 12)}</span>
+        {/if}
+        <button class="new-connector-btn" on:click={() => (showModal = true)}>
           <Plus size={18} />
           <span>New Connector</span>
         </button>
       </div>
+    </div>
+  </header>
+
+  <main class="connectors-list">
+    {#if loading}
+      <div class="loading-state">
+        <Loader2 size={18} class="spin" />
+        <span>Loading connectors...</span>
+      </div>
+    {:else if errorMessage}
+      <div class="error-state">
+        <AlertCircle size={16} />
+        <span>{errorMessage}</span>
+      </div>
+    {:else}
+      {#if formSuccess}
+        <div class="success-state">
+          <CheckCircle2 size={16} />
+          <span>{formSuccess}</span>
+        </div>
+      {/if}
+
+      {#if connectors.length > 0}
+        {#each connectors as connector}
+          <div class="connector-card">
+            <div class="connector-header">
+              <div class="connector-info">
+                <Database size={20} />
+                <span class="connector-name">{connector.alias}</span>
+                <span class="type-badge">{connector.db_type.toUpperCase()}</span>
+                <span class="status-badge">
+                  <span class="status-dot"></span>
+                  Attached
+                </span>
+              </div>
+
+              <button
+                class="action-btn delete"
+                on:click={() => removeConnector(connector.alias)}
+                title="Detach connector"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+
+            <div class="connector-details">
+              <code class="connection-string">{connector.db_path}</code>
+              <span class="last-connected">Attached: {formatDate(connector.attached_at)}</span>
+            </div>
+            <div class="connector-meta">{connector.tables.length} tables available</div>
+          </div>
+        {/each}
+      {:else}
+        <div class="empty-state">
+          <Database size={48} />
+          <h3>No connectors attached</h3>
+          <p>Attach a DuckDB file to make it available to this worldline and chat analysis.</p>
+          <button class="new-connector-btn" on:click={() => (showModal = true)}>
+            <Plus size={18} />
+            <span>Attach Connector</span>
+          </button>
+        </div>
+      {/if}
     {/if}
   </main>
 </div>
 
 {#if showModal}
-  <div class="modal-overlay" on:click|self={() => showModal = false}>
-    <div class="modal">
+  <div
+    class="modal-overlay"
+    role="button"
+    tabindex="0"
+    on:click|self={closeModal}
+    on:keydown={handleModalKeydown}
+  >
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Attach connector">
       <header class="modal-header">
         <h2>New Connector</h2>
-        <button class="close-btn" on:click={() => showModal = false}>
+        <button class="close-btn" on:click={closeModal}>
           <X size={20} />
         </button>
       </header>
-      
+
       <form class="modal-form" on:submit|preventDefault={addConnector}>
         <div class="form-group">
-          <label for="name">Name</label>
-          <input 
-            id="name"
-            type="text" 
-            bind:value={newConnectorName}
-            placeholder="e.g., Production DB"
-            required
-          />
-        </div>
-        
-        <div class="form-group">
           <label for="type">Database Type</label>
-          <select id="type" bind:value={newConnectorType}>
+          <select id="type" bind:value={newConnectorType} disabled={submitting}>
             <option value="duckdb">DuckDB</option>
-            <option value="sqlite">SQLite</option>
-            <option value="postgres">PostgreSQL</option>
-            <option value="mysql">MySQL</option>
+            <option value="sqlite" disabled>SQLite (coming soon)</option>
+            <option value="postgres" disabled>PostgreSQL (coming soon)</option>
+            <option value="mysql" disabled>MySQL (coming soon)</option>
           </select>
         </div>
-        
+
         <div class="form-group">
-          <label for="connection">Connection String</label>
-          <input 
+          <label for="connection">Database file path</label>
+          <input
             id="connection"
-            type="text" 
-            bind:value={newConnectorString}
-            placeholder="e.g., file:mydb.db or postgresql://localhost:5432/mydb"
+            type="text"
+            bind:value={newConnectorPath}
+            placeholder="/absolute/path/to/database.duckdb"
             required
+            disabled={submitting}
           />
         </div>
-        
+
+        <div class="form-group">
+          <label for="alias">Alias (optional)</label>
+          <input
+            id="alias"
+            type="text"
+            bind:value={newConnectorAlias}
+            placeholder="e.g., warehouse"
+            disabled={submitting}
+          />
+        </div>
+
+        {#if formError}
+          <div class="alert error">
+            <AlertCircle size={14} />
+            <span>{formError}</span>
+          </div>
+        {/if}
+
         <div class="modal-actions">
-          <button type="button" class="btn-secondary" on:click={() => showModal = false}>
+          <button type="button" class="btn-secondary" on:click={closeModal} disabled={submitting}>
             Cancel
           </button>
-          <button type="submit" class="btn-primary">
-            Add Connector
+          <button type="submit" class="btn-primary" disabled={!newConnectorPath.trim() || submitting}>
+            {#if submitting}
+              <Loader2 size={14} class="spin" />
+              <span>Attaching...</span>
+            {:else}
+              <span>Attach Connector</span>
+            {/if}
           </button>
         </div>
       </form>
@@ -278,11 +319,17 @@
   }
 
   .header-content {
+    max-width: 1200px;
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: var(--space-4);
-    max-width: 1200px;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
   }
 
   h1 {
@@ -299,8 +346,18 @@
     font-size: 15px;
   }
 
+  .worldline-badge {
+    font-size: 12px;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-full);
+    padding: 6px 10px;
+    background: var(--surface-1);
+    font-family: var(--font-mono);
+  }
+
   .new-connector-btn {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4);
@@ -317,15 +374,39 @@
   .new-connector-btn:hover {
     background: var(--accent-orange-hover);
     transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
   }
 
   .connectors-list {
-    padding: var(--space-6) var(--space-8);
     max-width: 1200px;
+    padding: var(--space-6) var(--space-8);
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+  }
+
+  .loading-state,
+  .error-state,
+  .success-state {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-lg);
+    background: var(--surface-0);
+    color: var(--text-muted);
+    padding: var(--space-4);
+  }
+
+  .error-state {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: var(--danger-muted);
+  }
+
+  .success-state {
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+    background: var(--accent-cyan-muted);
   }
 
   .connector-card {
@@ -341,16 +422,12 @@
     box-shadow: var(--shadow-sm);
   }
 
-  .connector-card.active {
-    border-color: var(--border-accent);
-    background: linear-gradient(135deg, var(--surface-0) 0%, var(--accent-orange-muted) 100%);
-  }
-
   .connector-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     margin-bottom: var(--space-3);
+    gap: var(--space-2);
   }
 
   .connector-info {
@@ -358,6 +435,7 @@
     align-items: center;
     gap: var(--space-3);
     color: var(--text-secondary);
+    min-width: 0;
   }
 
   .connector-name {
@@ -372,10 +450,12 @@
     font-size: 11px;
     font-weight: 600;
     font-family: var(--font-mono);
+    color: var(--accent-orange);
+    background: var(--accent-orange-muted);
   }
 
   .status-badge {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: var(--space-1);
     padding: var(--space-1) var(--space-2);
@@ -383,66 +463,27 @@
     color: var(--accent-cyan);
     border-radius: var(--radius-md);
     font-size: 12px;
-    font-weight: 500;
   }
 
-  .status-badge.active .status-dot {
+  .status-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background: var(--accent-cyan);
-    animation: pulse 2s ease-in-out infinite;
-  }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-  }
-
-  .connector-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   .action-btn {
-    display: flex;
+    display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: var(--space-1);
-    padding: var(--space-2) var(--space-3);
-    background: var(--surface-1);
-    border: 1px solid var(--border-soft);
+    padding: var(--space-2);
+    background: transparent;
+    border: 1px solid transparent;
     border-radius: var(--radius-md);
-    color: var(--text-secondary);
-    font-size: 13px;
+    color: var(--danger);
     cursor: pointer;
     transition: all var(--transition-fast);
-  }
-
-  .action-btn:hover {
-    background: var(--surface-hover);
-    border-color: var(--border-medium);
-    color: var(--text-primary);
-  }
-
-  .action-btn.connect {
-    background: var(--accent-cyan-muted);
-    border-color: var(--accent-cyan);
-    color: var(--accent-cyan);
-  }
-
-  .action-btn.connect:hover {
-    background: var(--accent-cyan);
-    color: #111;
-  }
-
-  .action-btn.disconnect {
-    background: var(--border-soft);
-  }
-
-  .action-btn.delete {
-    padding: var(--space-2);
-    color: var(--danger);
   }
 
   .action-btn.delete:hover {
@@ -454,7 +495,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: var(--space-4);
+    gap: var(--space-3);
   }
 
   .connection-string {
@@ -464,9 +505,17 @@
     color: var(--text-muted);
     font-family: var(--font-mono);
     font-size: 13px;
+    word-break: break-all;
   }
 
   .last-connected {
+    color: var(--text-dim);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .connector-meta {
+    margin-top: var(--space-2);
     color: var(--text-dim);
     font-size: 13px;
   }
@@ -475,16 +524,12 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
     gap: var(--space-4);
     padding: var(--space-8);
     text-align: center;
+    border: 1px dashed var(--border-medium);
+    border-radius: var(--radius-lg);
     color: var(--text-muted);
-  }
-
-  .empty-state :global(svg) {
-    color: var(--accent-orange);
-    opacity: 0.5;
   }
 
   .empty-state h3 {
@@ -496,10 +541,9 @@
 
   .empty-state p {
     margin: 0;
-    font-size: 14px;
+    max-width: 52ch;
   }
 
-  /* Modal */
   .modal-overlay {
     position: fixed;
     inset: 0;
@@ -509,11 +553,12 @@
     justify-content: center;
     z-index: 1000;
     padding: var(--space-4);
+    border: none;
   }
 
   .modal {
     width: 100%;
-    max-width: 480px;
+    max-width: 520px;
     background: var(--surface-0);
     border: 1px solid var(--border-medium);
     border-radius: var(--radius-xl);
@@ -537,7 +582,7 @@
   }
 
   .close-btn {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 32px;
@@ -547,7 +592,6 @@
     border-radius: var(--radius-md);
     color: var(--text-muted);
     cursor: pointer;
-    transition: all var(--transition-fast);
   }
 
   .close-btn:hover {
@@ -582,7 +626,6 @@
     border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: 14px;
-    transition: all var(--transition-fast);
   }
 
   .form-group input:focus,
@@ -591,48 +634,99 @@
     border-color: var(--accent-orange);
   }
 
-  .form-group input::placeholder {
-    color: var(--text-dim);
+  .alert.error {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    background: var(--danger-muted);
+    font-size: 13px;
   }
 
   .modal-actions {
     display: flex;
     justify-content: flex-end;
     gap: var(--space-3);
-    padding-top: var(--space-2);
+  }
+
+  .btn-secondary,
+  .btn-primary {
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md);
+    font-size: 14px;
+    cursor: pointer;
   }
 
   .btn-secondary {
-    padding: var(--space-2) var(--space-4);
     background: transparent;
     border: 1px solid var(--border-medium);
-    border-radius: var(--radius-md);
     color: var(--text-secondary);
-    font-size: 14px;
-    cursor: pointer;
-    transition: all var(--transition-fast);
   }
 
   .btn-secondary:hover {
     background: var(--surface-hover);
-    border-color: var(--border-strong);
     color: var(--text-primary);
   }
 
   .btn-primary {
-    padding: var(--space-2) var(--space-4);
-    background: var(--accent-orange);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
     border: none;
-    border-radius: var(--radius-md);
+    background: var(--accent-orange);
     color: #111;
-    font-size: 14px;
     font-weight: 600;
-    cursor: pointer;
-    transition: all var(--transition-fast);
   }
 
-  .btn-primary:hover {
+  .btn-primary:hover:not(:disabled) {
     background: var(--accent-orange-hover);
-    transform: translateY(-1px);
+  }
+
+  .btn-primary:disabled,
+  .btn-secondary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  :global(svg.spin) {
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (max-width: 860px) {
+    .page-header,
+    .connectors-list {
+      padding-left: var(--space-4);
+      padding-right: var(--space-4);
+    }
+
+    .header-content {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .header-actions {
+      justify-content: space-between;
+    }
+
+    .connector-details {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .last-connected {
+      white-space: normal;
+    }
   }
 </style>

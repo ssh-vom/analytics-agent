@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import duckdb
 from fastapi import HTTPException, UploadFile
 
 import meta
@@ -248,6 +249,61 @@ class SeedDataApiTests(unittest.TestCase):
         self.assertEqual(matching[0].get("source_filename"), "scores.csv")
         self.assertIn("columns", matching[0])
         self.assertTrue(matching[0]["columns"])
+
+    def test_attach_lists_external_tables_and_detach_clears_alias(self) -> None:
+        worldline_id = self._create_worldline()
+        external_db_path = Path(self.temp_dir.name) / "finance_demo.duckdb"
+
+        conn = duckdb.connect(str(external_db_path))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE finance_daily (
+                    trading_date DATE,
+                    revenue DOUBLE
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO finance_daily VALUES
+                    ('2026-01-01', 1000.0),
+                    ('2026-01-02', 1200.0)
+                """
+            )
+        finally:
+            conn.close()
+
+        attach_result = self._run(
+            seed_data_api.attach_duckdb_endpoint(
+                worldline_id,
+                seed_data_api.AttachExternalDBRequest(
+                    db_path=str(external_db_path),
+                    alias="warehouse",
+                ),
+            )
+        )
+        self.assertTrue(attach_result["success"])
+
+        attached = self._run(
+            seed_data_api.list_attached_databases_endpoint(worldline_id)
+        )
+        by_alias = {row["alias"]: row for row in attached["attached_databases"]}
+        self.assertIn("warehouse", by_alias)
+        self.assertIn("finance_daily", by_alias["warehouse"]["tables"])
+
+        detach_result = self._run(
+            seed_data_api.detach_duckdb_endpoint(
+                worldline_id,
+                seed_data_api.DetachExternalDBRequest(alias="warehouse"),
+            )
+        )
+        self.assertTrue(detach_result["success"])
+
+        attached_after_detach = self._run(
+            seed_data_api.list_attached_databases_endpoint(worldline_id)
+        )
+        self.assertEqual(attached_after_detach["attached_databases"], [])
 
 
 if __name__ == "__main__":

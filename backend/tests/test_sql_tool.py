@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 import duckdb_manager
 import meta
+import seed_data
 import threads
 import tools
 import worldlines
@@ -30,7 +31,9 @@ class SqlToolTests(unittest.TestCase):
         return asyncio.run(coro)
 
     def _create_thread(self, title: str = "sql-tool-test-thread") -> str:
-        response = self._run(threads.create_thread(threads.CreateThreadRequest(title=title)))
+        response = self._run(
+            threads.create_thread(threads.CreateThreadRequest(title=title))
+        )
         return response["thread_id"]
 
     def _create_worldline(self, thread_id: str, name: str = "main") -> str:
@@ -76,7 +79,9 @@ class SqlToolTests(unittest.TestCase):
                 (worldline_id,),
             ).fetchone()
 
-        self.assertEqual([row["type"] for row in event_rows], ["tool_call_sql", "tool_result_sql"])
+        self.assertEqual(
+            [row["type"] for row in event_rows], ["tool_call_sql", "tool_result_sql"]
+        )
         self.assertEqual(worldline_row["head_event_id"], event_rows[-1]["id"])
         self.assertEqual(
             json.loads(event_rows[0]["payload_json"])["sql"],
@@ -129,12 +134,16 @@ class SqlToolTests(unittest.TestCase):
 
         result_1 = self._run(
             tools.run_sql(
-                tools.SqlToolRequest(worldline_id=worldline_1, sql="SELECT value FROM items", limit=10)
+                tools.SqlToolRequest(
+                    worldline_id=worldline_1, sql="SELECT value FROM items", limit=10
+                )
             )
         )
         result_2 = self._run(
             tools.run_sql(
-                tools.SqlToolRequest(worldline_id=worldline_2, sql="SELECT value FROM items", limit=10)
+                tools.SqlToolRequest(
+                    worldline_id=worldline_2, sql="SELECT value FROM items", limit=10
+                )
             )
         )
 
@@ -143,6 +152,92 @@ class SqlToolTests(unittest.TestCase):
         self.assertTrue(str(path_1).startswith(str(meta.DB_DIR)))
         self.assertTrue(str(path_2).startswith(str(meta.DB_DIR)))
         self.assertNotEqual(path_1, path_2)
+
+    def test_sql_tool_queries_attached_duckdb_across_requests(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        external_db_path = Path(self.temp_dir.name) / "external_finance.duckdb"
+
+        conn = duckdb.connect(str(external_db_path))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE finance_daily (
+                    trading_date DATE,
+                    revenue DOUBLE
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO finance_daily VALUES
+                    ('2026-01-01', 1000.0),
+                    ('2026-01-02', 1200.5)
+                """
+            )
+        finally:
+            conn.close()
+
+        attached = seed_data.attach_external_duckdb(
+            worldline_id,
+            db_path=str(external_db_path),
+            alias="warehouse",
+        )
+        self.assertEqual(attached.alias, "warehouse")
+
+        with self.assertRaises(HTTPException) as blocked_ctx:
+            self._run(
+                tools.run_sql(
+                    tools.SqlToolRequest(
+                        worldline_id=worldline_id,
+                        sql="SELECT revenue FROM warehouse.finance_daily ORDER BY trading_date",
+                        limit=10,
+                        allowed_external_aliases=[],
+                    )
+                )
+            )
+        self.assertEqual(blocked_ctx.exception.status_code, 400)
+        self.assertIn("warehouse", str(blocked_ctx.exception.detail))
+
+        first_result = self._run(
+            tools.run_sql(
+                tools.SqlToolRequest(
+                    worldline_id=worldline_id,
+                    sql="SELECT revenue FROM warehouse.finance_daily ORDER BY trading_date",
+                    limit=10,
+                    allowed_external_aliases=["warehouse"],
+                )
+            )
+        )
+        second_result = self._run(
+            tools.run_sql(
+                tools.SqlToolRequest(
+                    worldline_id=worldline_id,
+                    sql="SELECT SUM(revenue) AS total_revenue FROM warehouse.finance_daily",
+                    limit=10,
+                )
+            )
+        )
+
+        self.assertEqual(first_result["rows"], [[1000.0], [1200.5]])
+        self.assertEqual(second_result["rows"], [[2200.5]])
+
+        detached = seed_data.detach_external_duckdb(worldline_id, "warehouse")
+        self.assertEqual(detached["status"], "detached")
+
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(
+                tools.run_sql(
+                    tools.SqlToolRequest(
+                        worldline_id=worldline_id,
+                        sql="SELECT COUNT(*) FROM warehouse.finance_daily",
+                        limit=10,
+                    )
+                )
+            )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("warehouse", str(ctx.exception.detail))
 
 
 if __name__ == "__main__":

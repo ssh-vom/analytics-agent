@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from fastapi import HTTPException
@@ -40,6 +41,33 @@ from worldline_service import BranchOptions, WorldlineService
 logger = logging.getLogger(__name__)
 
 
+def _extract_selected_external_aliases(message: str) -> list[str] | None:
+    match = re.search(r"<context>(.*?)</context>", message, re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return None
+
+    context_block = match.group(1)
+    for raw_line in context_block.splitlines():
+        line = raw_line.strip()
+        if line.startswith("-"):
+            line = line[1:].strip()
+        if not line.lower().startswith("connectors="):
+            continue
+
+        raw_value = line.split("=", 1)[1].strip()
+        if not raw_value or raw_value.lower() == "none":
+            return []
+
+        selected: list[str] = []
+        for token in raw_value.split(","):
+            alias = token.strip()
+            if alias and alias not in selected:
+                selected.append(alias)
+        return selected
+
+    return None
+
+
 @dataclass
 class ChatEngine:
     llm_client: LlmClient
@@ -56,6 +84,8 @@ class ChatEngine:
     ) -> tuple[str, list[dict[str, Any]]]:
         if not message or not message.strip():
             raise HTTPException(status_code=400, detail="message must not be empty")
+
+        allowed_external_aliases = _extract_selected_external_aliases(message)
 
         # #region agent log
         _debug_log(
@@ -217,6 +247,7 @@ class ChatEngine:
                         worldline_id=active_worldline_id,
                         tool_call=tool_call,
                         carried_user_message=message,
+                        allowed_external_aliases=allowed_external_aliases,
                         on_event=on_event,
                     )
                     if (
@@ -339,6 +370,7 @@ class ChatEngine:
         worldline_id: str,
         tool_call: ToolCall,
         carried_user_message: str,
+        allowed_external_aliases: list[str] | None,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         name = (tool_call.name or "").strip()
@@ -376,6 +408,7 @@ class ChatEngine:
                         worldline_id=worldline_id,
                         sql=sql,
                         limit=limit,
+                        allowed_external_aliases=allowed_external_aliases,
                         call_id=tool_call.id or None,
                     ),
                     on_event=(

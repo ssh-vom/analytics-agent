@@ -38,3 +38,13 @@ Optional OpenRouter config:
 - `OPENROUTER_MODEL` (default: `openrouter/auto`)
 - `OPENROUTER_APP_NAME` (default: `TextQL`)
 - `OPENROUTER_HTTP_REFERER`
+
+## Demo DuckDB generator
+
+Generate a deterministic finance DuckDB file for connector testing:
+
+```bash
+uv run python backend/scripts/generate_finance_demo_db.py --overwrite
+```
+
+Default output is `backend/data/demo/finance_demo.duckdb`.

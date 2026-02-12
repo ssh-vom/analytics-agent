@@ -17,10 +17,18 @@ from pydantic import BaseModel
 
 if (__package__ or "").startswith("backend"):
     from backend import meta
-    from backend.duckdb_manager import ensure_worldline_db, worldline_db_path
+    from backend.duckdb_manager import (
+        attach_read_only_database,
+        open_worldline_connection,
+        worldline_db_path,
+    )
 else:
     import meta
-    from duckdb_manager import ensure_worldline_db, worldline_db_path
+    from duckdb_manager import (
+        attach_read_only_database,
+        open_worldline_connection,
+        worldline_db_path,
+    )
 
 # Constants
 MAX_CSV_FILE_SIZE = 100 * 1024 * 1024  # 100MB limit
@@ -147,11 +155,8 @@ def import_csv_to_worldline(
     else:
         table_name = _sanitize_table_name(table_name)
 
-    # Ensure worldline DB exists
-    db_path = ensure_worldline_db(worldline_id)
-
     started = time.perf_counter()
-    conn = duckdb.connect(str(db_path))
+    conn = open_worldline_connection(worldline_id)
 
     try:
         # Ensure metadata tables exist
@@ -267,10 +272,7 @@ def attach_external_duckdb(
     else:
         alias = _sanitize_table_name(alias)
 
-    # Ensure worldline DB exists
-    worldline_db = ensure_worldline_db(worldline_id)
-
-    conn = duckdb.connect(str(worldline_db))
+    conn = open_worldline_connection(worldline_id)
 
     try:
         # Ensure metadata table exists
@@ -290,10 +292,7 @@ def attach_external_duckdb(
             conn.execute("DELETE FROM _external_sources WHERE alias = ?", (alias,))
 
         # Attach the external database (read-only for safety)
-        attach_query = f"""
-            ATTACH '{str(external_path)}' AS "{alias}" (READ_ONLY)
-        """
-        conn.execute(attach_query)
+        attach_read_only_database(conn, alias=alias, db_path=str(external_path))
 
         # Record in metadata
         attached_at = datetime.now().isoformat()
@@ -335,23 +334,41 @@ def detach_external_duckdb(worldline_id: str, alias: str) -> dict[str, Any]:
     Returns:
         Status of the detach operation
     """
+    sanitized_alias = _sanitize_table_name(alias)
     db_path = worldline_db_path(worldline_id)
 
     if not db_path.exists():
         raise HTTPException(status_code=404, detail="Worldline database not found")
 
-    conn = duckdb.connect(str(db_path))
+    conn = open_worldline_connection(worldline_id)
 
     try:
-        # Detach the database
-        conn.execute(f'DETACH "{alias}"')
+        _ensure_external_sources_table(conn)
+        existing = conn.execute(
+            "SELECT alias FROM _external_sources WHERE alias = ?",
+            (sanitized_alias,),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Attached database alias not found: {sanitized_alias}",
+            )
+
+        try:
+            conn.execute(f'DETACH "{sanitized_alias}"')
+        except Exception:
+            pass
 
         # Remove from metadata
-        conn.execute("DELETE FROM _external_sources WHERE alias = ?", (alias,))
+        conn.execute(
+            "DELETE FROM _external_sources WHERE alias = ?", (sanitized_alias,)
+        )
         conn.commit()
 
-        return {"alias": alias, "status": "detached"}
+        return {"alias": sanitized_alias, "status": "detached"}
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=400, detail=f"Failed to detach database: {str(e)}"
@@ -375,7 +392,7 @@ def list_imported_tables(worldline_id: str) -> list[dict[str, Any]]:
     if not db_path.exists():
         return []
 
-    conn = duckdb.connect(str(db_path))
+    conn = open_worldline_connection(worldline_id)
 
     try:
         # Check if history table exists
@@ -424,7 +441,7 @@ def list_attached_databases(worldline_id: str) -> list[dict[str, Any]]:
     if not db_path.exists():
         return []
 
-    conn = duckdb.connect(str(db_path))
+    conn = open_worldline_connection(worldline_id)
 
     try:
         # Check if sources table exists
@@ -487,7 +504,7 @@ def get_worldline_schema(worldline_id: str) -> dict[str, Any]:
     if not db_path.exists():
         return {"native_tables": [], "imported_tables": [], "attached_databases": []}
 
-    conn = duckdb.connect(str(db_path))
+    conn = open_worldline_connection(worldline_id)
 
     try:
         # Get native tables from main schema only and dedupe by table name.

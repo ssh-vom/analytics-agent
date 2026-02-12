@@ -58,8 +58,12 @@ export function buildContextualMessage(
   if (options.selectedContextTables.length > 0) {
     contextLines.push(`tables=${options.selectedContextTables.join(",")}`);
   }
-  if (selectedConnectors.length > 0) {
-    contextLines.push(`connectors=${selectedConnectors.join(",")}`);
+  if (options.availableConnectors.length > 0) {
+    if (selectedConnectors.length > 0) {
+      contextLines.push(`connectors=${selectedConnectors.join(",")}`);
+    } else {
+      contextLines.push("connectors=none");
+    }
   }
 
   const enabledSettings = Object.entries(options.contextSettings)

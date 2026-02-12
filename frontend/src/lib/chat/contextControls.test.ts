@@ -43,6 +43,28 @@ describe("contextControls", () => {
     expect(message).toContain("settings=webSearch,textToSql");
   });
 
+  it("marks connectors as none when deselected", () => {
+    const connectors: StoredConnector[] = [
+      { id: "c1", name: "warehouse", isActive: true },
+    ];
+    const settings: ContextSettings = {
+      webSearch: true,
+      dashboards: false,
+      textToSql: true,
+      ontology: false,
+    };
+
+    const message = buildContextualMessage("check totals", {
+      outputType: "report",
+      availableConnectors: connectors,
+      selectedConnectorIds: [],
+      selectedContextTables: ["finance_daily"],
+      contextSettings: settings,
+    });
+
+    expect(message).toContain("connectors=none");
+  });
+
   it("validates stored connectors", () => {
     expect(
       isStoredConnectorList([{ id: "c1", name: "warehouse", isActive: true }]),

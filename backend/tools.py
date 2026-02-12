@@ -44,6 +44,7 @@ class SqlToolRequest(BaseModel):
     worldline_id: str
     sql: str
     limit: int = Field(default=1000, ge=1, le=100_000)
+    allowed_external_aliases: list[str] | None = None
     call_id: str | None = None
 
 
@@ -134,6 +135,15 @@ async def execute_sql_tool(
 
         parent_event_id = worldline["head_event_id"]
         call_payload: dict[str, Any] = {"sql": body.sql, "limit": body.limit}
+        if body.allowed_external_aliases is not None:
+            normalized_aliases = [
+                alias.strip()
+                for alias in body.allowed_external_aliases
+                if isinstance(alias, str) and alias.strip()
+            ]
+            call_payload["allowed_external_aliases"] = normalized_aliases
+        else:
+            normalized_aliases = None
         if body.call_id:
             call_payload["call_id"] = body.call_id
         call_event_id = await _append_worldline_event(
@@ -149,7 +159,12 @@ async def execute_sql_tool(
 
         query_error: Exception | None = None
         try:
-            result = execute_read_query(body.worldline_id, body.sql, body.limit)
+            result = execute_read_query(
+                body.worldline_id,
+                body.sql,
+                body.limit,
+                allowed_external_aliases=normalized_aliases,
+            )
             result["execution_ms"] = int((time.perf_counter() - started) * 1000)
         except Exception as exc:
             query_error = exc

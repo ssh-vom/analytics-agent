@@ -23,6 +23,7 @@
     createWorldline,
     fetchThreadWorldlines,
     fetchWorldlineEvents,
+    fetchWorldlineSchema,
     streamChatTurn,
     importCSV,
     fetchWorldlineTables,
@@ -33,9 +34,7 @@
     replaceOptimisticWithReal,
   } from "$lib/chat/optimisticState";
   import {
-    activeConnectorIds,
     buildContextualMessage as buildContextualChatMessage,
-    isStoredConnectorList,
     providerLabel,
     toggleSelectedId,
     type ContextSettings,
@@ -59,7 +58,6 @@
     extractCsvFiles,
     removeUploadedFileByName,
   } from "$lib/chat/csvImportPanel";
-  import { getStoredJson } from "$lib/storage";
   import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
@@ -110,6 +108,7 @@
   let showDataContextMenu = false;
   let availableConnectors: StoredConnector[] = [];
   let selectedConnectorIds: string[] = [];
+  let connectorSelectionByWorldline: Record<string, string[]> = {};
   let selectedContextTables: string[] = [];
   let contextSettings: ContextSettings = {
     webSearch: true,
@@ -185,7 +184,6 @@
     window.addEventListener("textql:open-worldline", handleOpenWorldlineEvent as EventListener);
     document.addEventListener("visibilitychange", handleVisibilityChange);
     await threads.loadThreads();
-    loadConnectorsFromStorage();
 
     // Load from localStorage if available
     activeThread.loadFromStorage();
@@ -327,24 +325,6 @@
     }
   }
 
-  function loadConnectorsFromStorage(): void {
-    const parsed = getStoredJson<StoredConnector[]>(
-      "textql_connectors",
-      isStoredConnectorList,
-    );
-
-    if (parsed) {
-      availableConnectors = parsed;
-      selectedConnectorIds = activeConnectorIds(parsed);
-      return;
-    }
-
-    if (typeof localStorage !== "undefined" && localStorage.getItem("textql_connectors") !== null) {
-      availableConnectors = [];
-      selectedConnectorIds = [];
-    }
-  }
-
   function rollbackOptimisticMessage(worldlineId: string, optimisticId: string | null): void {
     eventsByWorldline = rollbackOptimisticWorldlineEvent(
       eventsByWorldline,
@@ -362,6 +342,12 @@
 
   function toggleConnector(id: string): void {
     selectedConnectorIds = toggleSelectedId(selectedConnectorIds, id);
+    if (activeWorldlineId) {
+      connectorSelectionByWorldline = {
+        ...connectorSelectionByWorldline,
+        [activeWorldlineId]: selectedConnectorIds,
+      };
+    }
   }
 
   function toggleContextTable(name: string): void {
@@ -382,12 +368,38 @@
   async function refreshWorldlineContextTables(): Promise<void> {
     if (!activeWorldlineId) {
       worldlineTables = null;
+      availableConnectors = [];
+      selectedConnectorIds = [];
       selectedContextTables = [];
       return;
     }
     try {
-      const tables = await fetchWorldlineTables(activeWorldlineId);
+      const [tables, schema] = await Promise.all([
+        fetchWorldlineTables(activeWorldlineId),
+        fetchWorldlineSchema(activeWorldlineId),
+      ]);
       worldlineTables = tables;
+
+      const connectors = schema.attached_databases.map((database) => ({
+        id: database.alias,
+        name: database.alias,
+        isActive: true,
+      }));
+      availableConnectors = connectors;
+
+      const previousSelection = connectorSelectionByWorldline[activeWorldlineId];
+      if (previousSelection) {
+        selectedConnectorIds = previousSelection.filter((alias) =>
+          connectors.some((connector) => connector.id === alias),
+        );
+      } else {
+        selectedConnectorIds = connectors.map((connector) => connector.id);
+      }
+      connectorSelectionByWorldline = {
+        ...connectorSelectionByWorldline,
+        [activeWorldlineId]: selectedConnectorIds,
+      };
+
       selectedContextTables = selectedContextTables.filter((selected) =>
         tables.tables.some((table) => table.name === selected),
       );
@@ -396,6 +408,8 @@
       }
     } catch {
       worldlineTables = null;
+      availableConnectors = [];
+      selectedConnectorIds = [];
       selectedContextTables = [];
     }
   }
@@ -569,6 +583,7 @@
       persistPreferredWorldline(activeWorldlineId);
       await refreshWorldlines();
       await loadWorldline(activeWorldlineId);
+      await refreshWorldlineContextTables();
       statusText = "Branch created";
     } catch (error) {
       statusText = error instanceof Error ? error.message : "Branch failed";
