@@ -6,10 +6,10 @@ from pathlib import Path
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
-import artifacts
+import api.artifacts as artifacts
 import meta
-import threads
-import worldlines
+import api.threads as threads
+import api.worldlines as worldlines
 
 
 class ArtifactsApiTests(unittest.TestCase):

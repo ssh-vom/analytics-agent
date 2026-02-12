@@ -10,9 +10,9 @@ from fastapi import HTTPException
 import duckdb_manager
 import meta
 import seed_data
-import threads
-import tools
-import worldlines
+import api.threads as threads
+import api.tools as tools
+import api.worldlines as worldlines
 
 
 class SqlToolTests(unittest.TestCase):

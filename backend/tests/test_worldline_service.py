@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 
 import meta
-import threads
-import worldlines
+import api.threads as threads
+import api.worldlines as worldlines
 import duckdb
 import duckdb_manager
 from worldline_service import BranchOptions, WorldlineService

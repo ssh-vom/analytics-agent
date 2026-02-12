@@ -6,10 +6,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 import time
 
-import chat_api
+import api.chat as chat_api
 import meta
-import threads
-import worldlines
+import api.threads as threads
+import api.worldlines as worldlines
+import services.chat_runtime as chat_runtime
 from chat.llm_client import LlmResponse, StreamChunk, ToolCall
 from fastapi.responses import StreamingResponse
 
@@ -1602,7 +1603,9 @@ class ChatApiTests(unittest.TestCase):
         )
 
         async def scenario() -> tuple[dict, dict]:
-            with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            with patch.object(
+                chat_runtime, "build_llm_client", return_value=fake_client
+            ):
                 created = await chat_api.create_chat_job(
                     chat_api.ChatJobRequest(
                         worldline_id=worldline_id,
@@ -1635,7 +1638,9 @@ class ChatApiTests(unittest.TestCase):
         )
 
         async def scenario() -> tuple[dict, dict, dict]:
-            with patch.object(chat_api, "build_llm_client", return_value=fake_client):
+            with patch.object(
+                chat_runtime, "build_llm_client", return_value=fake_client
+            ):
                 created = await chat_api.create_chat_job(
                     chat_api.ChatJobRequest(
                         worldline_id=worldline_id,

@@ -3,32 +3,21 @@ from fastapi import FastAPI
 import os
 import asyncio
 
-if (__package__ or "").startswith("backend"):
-    from backend.env_loader import load_env_once
-    from backend.meta import init_meta_db
-    from backend.threads import router as threads_router
-    from backend.worldlines import router as wordlines_router
-    from backend.tools import router as tools_router, get_sandbox_manager
-    from backend.artifacts import router as artifacts_router
-    from backend.chat_api import (
-        router as chat_router,
-        start_chat_runtime,
-        shutdown_chat_runtime,
-    )
-    from backend.seed_data_api import router as seed_data_router
-else:
-    from env_loader import load_env_once
-    from meta import init_meta_db
-    from threads import router as threads_router
-    from worldlines import router as wordlines_router
-    from tools import router as tools_router, get_sandbox_manager
-    from artifacts import router as artifacts_router
-    from chat_api import (
-        router as chat_router,
-        start_chat_runtime,
-        shutdown_chat_runtime,
-    )
-    from seed_data_api import router as seed_data_router
+from env_loader import load_env_once
+from meta import init_meta_db
+from api import (
+    artifacts_router,
+    chat_router,
+    seed_data_router,
+    threads_router,
+    tools_router,
+    worldlines_router,
+)
+from services.tool_executor import get_sandbox_manager
+from services.chat_runtime import (
+    shutdown_chat_runtime,
+    start_chat_runtime,
+)
 
 REAPER_INTERVAL_SECONDS = int(os.getenv("SANDBOX_REAPER_INTERVAL_SECONDS", "60"))
 IDLE_TTL_SECONDS = int(os.getenv("SANDBOX_IDLE_TTL_SECONDS", "900"))
@@ -81,7 +70,7 @@ async def shutdown() -> None:
 app.include_router(tools_router)
 app.include_router(artifacts_router)
 app.include_router(threads_router)
-app.include_router(wordlines_router)
+app.include_router(worldlines_router)
 app.include_router(chat_router)
 app.include_router(seed_data_router)
 

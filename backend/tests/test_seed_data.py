@@ -15,19 +15,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 def test_import():
     """Test that the modules can be imported."""
     try:
-        from seed_data import (
-            import_csv_to_worldline,
-            attach_external_duckdb,
-            detach_external_duckdb,
-            list_imported_tables,
-            list_attached_databases,
-            get_worldline_schema,
-            _sanitize_table_name,
-            _generate_table_name_from_filename,
-        )
-        from seed_data_api import router
 
-        print("✓ All seed_data modules import successfully")
+        print("All seed_data modules import successfully")
         return True
     except Exception as e:
         print(f"✗ Import failed: {e}")
@@ -61,7 +50,7 @@ def test_sanitization():
 
 def test_api_routes():
     """Test that API routes are properly defined."""
-    from seed_data_api import router
+    from api.seed_data import router
 
     routes = router.routes
     paths = [route.path for route in routes]

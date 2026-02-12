@@ -9,9 +9,9 @@ import duckdb
 from fastapi import HTTPException, UploadFile
 
 import meta
-import seed_data_api
-import threads
-import worldlines
+import api.seed_data as seed_data_api
+import api.threads as threads
+import api.worldlines as worldlines
 
 
 class SeedDataApiTests(unittest.TestCase):

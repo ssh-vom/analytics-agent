@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 
 import meta
-import threads
-import worldlines
+import api.threads as threads
+import api.worldlines as worldlines
 from chat.jobs import JOB_STATUS_RUNNING, ChatJobScheduler, WorldlineTurnCoordinator
 from chat.jobs import enqueue_chat_turn_job
 

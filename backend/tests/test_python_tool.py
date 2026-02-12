@@ -8,9 +8,10 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 import meta
-import threads
-import tools
-import worldlines
+import api.threads as threads
+import api.tools as tools
+import api.worldlines as worldlines
+import services.tool_executor as tool_executor
 
 
 class FakeSandboxManager:
@@ -90,7 +91,7 @@ class PythonToolTests(unittest.TestCase):
             }
         )
 
-        with patch.object(tools, "_sandbox_manager", fake_manager):
+        with patch.object(tool_executor, "_sandbox_manager", fake_manager):
             result = self._run(
                 tools.run_python(
                     tools.PythonToolRequest(
@@ -154,7 +155,7 @@ class PythonToolTests(unittest.TestCase):
 
     def test_python_tool_worldline_not_found(self) -> None:
         fake_manager = FakeSandboxManager()
-        with patch.object(tools, "_sandbox_manager", fake_manager):
+        with patch.object(tool_executor, "_sandbox_manager", fake_manager):
             with self.assertRaises(HTTPException) as ctx:
                 self._run(
                     tools.run_python(
@@ -174,7 +175,7 @@ class PythonToolTests(unittest.TestCase):
         worldline_id = self._create_worldline(thread_id)
         fake_manager = FakeSandboxManager(error="sandbox crashed")
 
-        with patch.object(tools, "_sandbox_manager", fake_manager):
+        with patch.object(tool_executor, "_sandbox_manager", fake_manager):
             with self.assertRaises(HTTPException) as ctx:
                 self._run(
                     tools.run_python(
@@ -221,7 +222,7 @@ class PythonToolTests(unittest.TestCase):
         worldline_id = self._create_worldline(thread_id)
         fake_manager = FakeSandboxManager()
 
-        with patch.object(tools, "_sandbox_manager", fake_manager):
+        with patch.object(tool_executor, "_sandbox_manager", fake_manager):
             with self.assertRaises(HTTPException) as ctx:
                 self._run(
                     tools.run_python(
@@ -330,7 +331,7 @@ class PythonToolTests(unittest.TestCase):
             }
         )
 
-        with patch.object(tools, "_sandbox_manager", fake_manager):
+        with patch.object(tool_executor, "_sandbox_manager", fake_manager):
             result = self._run(
                 tools.run_python(
                     tools.PythonToolRequest(
@@ -432,7 +433,7 @@ class PythonToolTests(unittest.TestCase):
             }
         )
 
-        with patch.object(tools, "_sandbox_manager", fake_manager):
+        with patch.object(tool_executor, "_sandbox_manager", fake_manager):
             result = self._run(
                 tools.run_python(
                     tools.PythonToolRequest(

@@ -7,8 +7,8 @@ from pathlib import Path
 from fastapi import HTTPException
 
 import meta
-import threads
-import worldlines
+import api.threads as threads
+import api.worldlines as worldlines
 
 
 class Stage1ApiDbTests(unittest.TestCase):
