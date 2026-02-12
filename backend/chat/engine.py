@@ -24,10 +24,21 @@ from chat.llm_client import (
 )
 from chat.message_builder import build_llm_messages_from_events
 from chat.context_parser import extract_output_type, extract_selected_external_aliases
+from chat.data_intent import (
+    build_data_intent_summary,
+    data_intent_from_events,
+    upsert_data_intent_message,
+)
 from chat.policy import (
+    build_python_preflight_retry_message,
+    build_required_tool_enforcement_message,
+    build_tool_payload_correction_message,
+    is_empty_python_payload_error,
+    is_retryable_python_preflight_error,
     missing_required_terminal_tools as find_missing_required_terminal_tools,
     required_terminal_tools as determine_required_terminal_tools,
     user_requested_rerun as user_requested_rerun_hint,
+    validate_tool_payload,
 )
 from chat.report_fallback import (
     AUTO_REPORT_CODE,
@@ -55,7 +66,6 @@ from worldline_service import BranchOptions, WorldlineService
 logger = logging.getLogger(__name__)
 
 _ARTIFACT_INVENTORY_HEADER = "Artifact inventory for this worldline"
-_DATA_INTENT_HEADER = "SQL-to-Python data checkpoint"
 _ARTIFACT_INVENTORY_MAX_ITEMS = 40
 _RECENT_SIGNATURE_WINDOW = 24
 _MAX_INVALID_TOOL_PAYLOAD_RETRIES: dict[str, int] = {
@@ -117,7 +127,7 @@ class ChatEngine:
         history_events = await self._load_worldline_events(active_worldline_id)
         messages = build_llm_messages_from_events(list(history_events))
         artifact_inventory = self._artifact_inventory_from_events(history_events)
-        data_intent_summary = self._data_intent_from_events(history_events)
+        data_intent_summary = data_intent_from_events(history_events)
         recent_successful_tool_signatures = self._recent_successful_tool_signatures(
             worldline_id=active_worldline_id,
             events=history_events,
@@ -174,7 +184,7 @@ class ChatEngine:
 
         for _ in range(self.max_iterations):
             self._upsert_artifact_inventory_message(messages, artifact_inventory)
-            self._upsert_data_intent_message(messages, data_intent_summary)
+            upsert_data_intent_message(messages, data_intent_summary)
             # ----- LLM call: stream when on_delta is available, else batch -----
             if on_delta is not None:
                 response = await self._stream_llm_response(
@@ -256,7 +266,7 @@ class ChatEngine:
                             on_delta=on_delta,
                         )
 
-                    payload_error = self._validate_tool_payload(
+                    payload_error = validate_tool_payload(
                         tool_name=tool_name,
                         arguments=tool_call.arguments or {},
                     )
@@ -301,7 +311,7 @@ class ChatEngine:
                             messages.append(
                                 ChatMessage(
                                     role="system",
-                                    content=self._build_tool_payload_correction_message(
+                                    content=build_tool_payload_correction_message(
                                         tool_name=tool_name,
                                         payload_error=payload_error,
                                         data_intent_summary=data_intent_summary,
@@ -434,9 +444,7 @@ class ChatEngine:
                         artifact_inventory = self._artifact_inventory_from_events(
                             history_events
                         )
-                        data_intent_summary = self._data_intent_from_events(
-                            history_events
-                        )
+                        data_intent_summary = data_intent_from_events(history_events)
                         recent_successful_tool_signatures = (
                             self._recent_successful_tool_signatures(
                                 worldline_id=active_worldline_id,
@@ -476,9 +484,8 @@ class ChatEngine:
                         )
                     )
 
-                    if (
-                        tool_name == "run_python"
-                        and self._is_empty_python_payload_error(tool_result)
+                    if tool_name == "run_python" and is_empty_python_payload_error(
+                        tool_result
                     ):
                         invalid_tool_payload_failures["run_python"] += 1
                         if (
@@ -488,7 +495,7 @@ class ChatEngine:
                             messages.append(
                                 ChatMessage(
                                     role="system",
-                                    content=self._build_tool_payload_correction_message(
+                                    content=build_tool_payload_correction_message(
                                         tool_name="run_python",
                                         payload_error=(
                                             "run_python requires a non-empty `code` "
@@ -523,7 +530,7 @@ class ChatEngine:
                                 worldline_id=active_worldline_id,
                                 on_delta=on_delta,
                             )
-                            data_intent_summary = self._build_data_intent_summary(
+                            data_intent_summary = build_data_intent_summary(
                                 sql=(tool_call.arguments or {}).get("sql"),
                                 sql_result=tool_result,
                             )
@@ -586,7 +593,7 @@ class ChatEngine:
                             on_delta=on_delta,
                         )
 
-                        if self._is_retryable_python_preflight_error(tool_result):
+                        if is_retryable_python_preflight_error(tool_result):
                             invalid_tool_payload_failures["run_python"] += 1
                             if (
                                 invalid_tool_payload_failures["run_python"]
@@ -595,7 +602,7 @@ class ChatEngine:
                                 messages.append(
                                     ChatMessage(
                                         role="system",
-                                        content=self._build_python_preflight_retry_message(
+                                        content=build_python_preflight_retry_message(
                                             tool_result=tool_result,
                                             data_intent_summary=data_intent_summary,
                                         ),
@@ -653,7 +660,7 @@ class ChatEngine:
                         messages.append(
                             ChatMessage(
                                 role="system",
-                                content=self._build_required_tool_enforcement_message(
+                                content=build_required_tool_enforcement_message(
                                     missing_required_tools=missing_required_tools,
                                     data_intent_summary=data_intent_summary,
                                 ),
@@ -1161,248 +1168,6 @@ class ChatEngine:
         insert_index = 1 if messages else 0
         messages.insert(insert_index, memory_message)
 
-    def _data_intent_from_events(
-        self,
-        events: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        by_id = {event.get("id"): event for event in events}
-
-        for event in reversed(events):
-            if event.get("type") != "tool_result_sql":
-                continue
-
-            payload = event.get("payload")
-            if not isinstance(payload, dict) or payload.get("error"):
-                continue
-
-            parent = by_id.get(event.get("parent_event_id"))
-            parent_payload = parent.get("payload") if isinstance(parent, dict) else None
-            sql = None
-            if isinstance(parent_payload, dict):
-                raw_sql = parent_payload.get("sql")
-                if isinstance(raw_sql, str) and raw_sql.strip():
-                    sql = raw_sql.strip()
-
-            return self._build_data_intent_summary(sql=sql, sql_result=payload)
-
-        return None
-
-    def _build_data_intent_summary(
-        self,
-        *,
-        sql: Any,
-        sql_result: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        if not isinstance(sql_result, dict) or sql_result.get("error"):
-            return None
-
-        columns_meta = sql_result.get("columns")
-        if not isinstance(columns_meta, list):
-            columns_meta = []
-
-        columns: list[str] = []
-        dimensions: list[str] = []
-        measures: list[str] = []
-
-        for column in columns_meta:
-            if not isinstance(column, dict):
-                continue
-
-            name = str(column.get("name") or "").strip()
-            if not name:
-                continue
-            columns.append(name)
-
-            col_type = str(column.get("type") or "")
-            if self._is_numeric_sql_type(col_type):
-                measures.append(name)
-            else:
-                dimensions.append(name)
-
-        rows = sql_result.get("rows")
-        row_count = sql_result.get("row_count")
-        if not isinstance(row_count, int) or row_count < 0:
-            row_count = len(rows) if isinstance(rows, list) else 0
-
-        preview_count = sql_result.get("preview_count")
-        if not isinstance(preview_count, int) or preview_count < 0:
-            preview_count = len(rows) if isinstance(rows, list) else 0
-
-        time_columns = [
-            name
-            for name in columns
-            if re.search(
-                r"(date|time|month|year|day|week|quarter)", name, re.IGNORECASE
-            )
-        ]
-
-        sql_preview = ""
-        if isinstance(sql, str) and sql.strip():
-            sql_preview = " ".join(sql.strip().split())
-            if len(sql_preview) > 220:
-                sql_preview = sql_preview[:220] + "..."
-
-        return {
-            "source": "latest_successful_sql",
-            "row_count": row_count,
-            "preview_count": preview_count,
-            "columns": columns[:24],
-            "dimensions": dimensions[:16],
-            "measures": measures[:16],
-            "time_columns": time_columns[:8],
-            "sql_preview": sql_preview,
-        }
-
-    def _is_numeric_sql_type(self, type_name: str) -> bool:
-        if not isinstance(type_name, str):
-            return False
-        lowered = type_name.strip().lower()
-        return any(
-            token in lowered
-            for token in (
-                "int",
-                "decimal",
-                "double",
-                "float",
-                "real",
-                "numeric",
-                "hugeint",
-            )
-        )
-
-    def _render_data_intent_message(
-        self,
-        data_intent_summary: dict[str, Any],
-    ) -> str:
-        payload = {
-            "data_intent": data_intent_summary,
-            "instructions": (
-                "Use this checkpoint when planning follow-up SQL/Python steps. "
-                "If Python is needed, reference LATEST_SQL_RESULT/LATEST_SQL_DF "
-                "instead of refetching identical data."
-            ),
-        }
-        return f"{_DATA_INTENT_HEADER} (always-on memory):\n" + json.dumps(
-            payload,
-            ensure_ascii=True,
-            default=str,
-        )
-
-    def _upsert_data_intent_message(
-        self,
-        messages: list[ChatMessage],
-        data_intent_summary: dict[str, Any] | None,
-    ) -> None:
-        existing_index = None
-        for index, message in enumerate(messages):
-            if message.role == "system" and message.content.startswith(
-                _DATA_INTENT_HEADER
-            ):
-                existing_index = index
-                break
-
-        if data_intent_summary is None:
-            if existing_index is not None:
-                del messages[existing_index]
-            return
-
-        memory_message = ChatMessage(
-            role="system",
-            content=self._render_data_intent_message(data_intent_summary),
-        )
-        if existing_index is not None:
-            messages[existing_index] = memory_message
-            return
-
-        insert_index = 2 if len(messages) >= 2 else len(messages)
-        messages.insert(insert_index, memory_message)
-
-    def _python_code_has_executable_content(self, code: str) -> bool:
-        if not isinstance(code, str):
-            return False
-        for raw_line in code.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            if line.startswith("#"):
-                continue
-            return True
-        return False
-
-    def _validate_tool_payload(
-        self,
-        *,
-        tool_name: str,
-        arguments: dict[str, Any],
-    ) -> str | None:
-        if tool_name == "run_sql":
-            sql = arguments.get("sql")
-            if not isinstance(sql, str) or not sql.strip():
-                return "run_sql requires a non-empty `sql` string"
-            return None
-
-        if tool_name == "run_python":
-            code = arguments.get("code")
-            if not isinstance(code, str) or not code.strip():
-                return "run_python requires a non-empty `code` string"
-            if not self._python_code_has_executable_content(code):
-                return (
-                    "run_python `code` must include executable Python and cannot be "
-                    "comments/whitespace only"
-                )
-            return None
-
-        return None
-
-    def _build_tool_payload_correction_message(
-        self,
-        *,
-        tool_name: str,
-        payload_error: str,
-        data_intent_summary: dict[str, Any] | None,
-    ) -> str:
-        if tool_name == "run_python":
-            example_args = json.dumps(
-                {
-                    "code": "import pandas as pd\nprint(LATEST_SQL_DF.head())",
-                    "timeout": 30,
-                },
-                ensure_ascii=True,
-            )
-            checkpoint = (
-                json.dumps(data_intent_summary, ensure_ascii=True, default=str)
-                if data_intent_summary
-                else "none"
-            )
-            if len(checkpoint) > 900:
-                checkpoint = checkpoint[:900] + "...(truncated)"
-            return (
-                "Correction: your last run_python payload was invalid ("
-                + payload_error
-                + "). Emit a fresh run_python tool call now with a non-empty executable `code` "
-                "string and optional integer `timeout`. "
-                "Do not emit empty args, nested JSON-in-code, or comments-only code. "
-                "Example args: " + example_args + ". SQL checkpoint: " + checkpoint
-            )
-
-        if tool_name == "run_sql":
-            example_args = json.dumps(
-                {"sql": "SELECT * FROM your_table LIMIT 50", "limit": 50},
-                ensure_ascii=True,
-            )
-            return (
-                "Correction: your last run_sql payload was invalid ("
-                + payload_error
-                + "). Emit a fresh run_sql tool call with a non-empty `sql` string. "
-                "Example args: " + example_args
-            )
-
-        return (
-            "Correction: your previous tool payload was invalid ("
-            + payload_error
-            + "). Emit a valid tool call payload next."
-        )
-
     async def _emit_state_transition_delta(
         self,
         *,
@@ -1519,82 +1284,6 @@ class ChatEngine:
                 continue
             names.add(candidate.lower())
         return names
-
-    def _build_required_tool_enforcement_message(
-        self,
-        *,
-        missing_required_tools: set[str],
-        data_intent_summary: dict[str, Any] | None,
-    ) -> str:
-        missing_sorted = sorted(missing_required_tools)
-        if missing_sorted == ["run_python"]:
-            checkpoint = (
-                json.dumps(data_intent_summary, ensure_ascii=True, default=str)
-                if data_intent_summary
-                else "none"
-            )
-            if len(checkpoint) > 900:
-                checkpoint = checkpoint[:900] + "...(truncated)"
-            return (
-                "Your previous reply skipped required Python execution. "
-                "Emit a run_python tool call now with non-empty executable `code` (not a plan). "
-                "Use LATEST_SQL_RESULT/LATEST_SQL_DF and the SQL checkpoint when relevant. "
-                "SQL checkpoint: " + checkpoint
-            )
-
-        return (
-            "Your previous reply skipped required tool execution ("
-            + ", ".join(missing_sorted)
-            + "). Emit the required tool call(s) now before finalizing."
-        )
-
-    def _is_retryable_python_preflight_error(
-        self,
-        tool_result: dict[str, Any],
-    ) -> bool:
-        if not isinstance(tool_result, dict):
-            return False
-
-        if tool_result.get("retryable") is not True:
-            return False
-
-        error_code = str(tool_result.get("error_code") or "").strip().lower()
-        return error_code in {
-            "python_compile_error",
-            "python_execution_payload_compile_error",
-            "python_tool_invocation_forbidden",
-        }
-
-    def _build_python_preflight_retry_message(
-        self,
-        *,
-        tool_result: dict[str, Any],
-        data_intent_summary: dict[str, Any] | None,
-    ) -> str:
-        error_code = str(tool_result.get("error_code") or "python_preflight_error")
-        error_text = str(tool_result.get("error") or "Python preflight failed")
-        checkpoint = (
-            json.dumps(data_intent_summary, ensure_ascii=True, default=str)
-            if data_intent_summary
-            else "none"
-        )
-        if len(checkpoint) > 900:
-            checkpoint = checkpoint[:900] + "...(truncated)"
-
-        return (
-            "Correction: the previous run_python execution failed preflight "
-            f"({error_code}: {error_text}). Emit a fresh run_python tool call with "
-            "valid executable Python in `code` (not nested JSON, not comments-only, and "
-            "no backend tool function calls). Use LATEST_SQL_RESULT/LATEST_SQL_DF as input. "
-            "SQL checkpoint: " + checkpoint
-        )
-
-    def _is_empty_python_payload_error(self, tool_result: dict[str, Any]) -> bool:
-        error = tool_result.get("error") if isinstance(tool_result, dict) else None
-        if not isinstance(error, str):
-            return False
-        lowered = error.lower()
-        return "non-empty 'code'" in lowered or "empty `code`" in lowered
 
     def _transition_state(
         self,

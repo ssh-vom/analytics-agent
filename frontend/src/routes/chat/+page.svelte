@@ -23,7 +23,6 @@
     createWorldline,
     fetchThreadWorldlines,
     fetchWorldlineEvents,
-    fetchWorldlineSchema,
     streamChatTurn,
     importCSV,
     fetchWorldlineTables,
@@ -69,6 +68,7 @@
     extractCsvFiles,
     removeUploadedFileByName,
   } from "$lib/chat/csvImportPanel";
+  import { refreshWorldlineContextSnapshot } from "$lib/chat/worldlineContext";
   import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
@@ -362,52 +362,17 @@
   }
 
   async function refreshWorldlineContextTables(): Promise<void> {
-    if (!activeWorldlineId) {
-      worldlineTables = null;
-      availableConnectors = [];
-      selectedConnectorIds = [];
-      selectedContextTables = [];
-      return;
-    }
-    try {
-      const [tables, schema] = await Promise.all([
-        fetchWorldlineTables(activeWorldlineId),
-        fetchWorldlineSchema(activeWorldlineId),
-      ]);
-      worldlineTables = tables;
+    const snapshot = await refreshWorldlineContextSnapshot({
+      worldlineId: activeWorldlineId,
+      selectedContextTables,
+      connectorSelectionByWorldline,
+    });
 
-      const connectors = schema.attached_databases.map((database) => ({
-        id: database.alias,
-        name: database.alias,
-        isActive: true,
-      }));
-      availableConnectors = connectors;
-
-      const previousSelection = connectorSelectionByWorldline[activeWorldlineId];
-      if (previousSelection) {
-        selectedConnectorIds = previousSelection.filter((alias) =>
-          connectors.some((connector) => connector.id === alias),
-        );
-      } else {
-        selectedConnectorIds = connectors.map((connector) => connector.id);
-      }
-      connectorSelectionByWorldline = {
-        ...connectorSelectionByWorldline,
-        [activeWorldlineId]: selectedConnectorIds,
-      };
-
-      selectedContextTables = selectedContextTables.filter((selected) =>
-        tables.tables.some((table) => table.name === selected),
-      );
-      if (selectedContextTables.length === 0 && tables.tables.length > 0) {
-        selectedContextTables = [tables.tables[0].name];
-      }
-    } catch {
-      worldlineTables = null;
-      availableConnectors = [];
-      selectedConnectorIds = [];
-      selectedContextTables = [];
-    }
+    worldlineTables = snapshot.worldlineTables;
+    availableConnectors = snapshot.availableConnectors;
+    selectedConnectorIds = snapshot.selectedConnectorIds;
+    connectorSelectionByWorldline = snapshot.connectorSelectionByWorldline;
+    selectedContextTables = snapshot.selectedContextTables;
   }
 
   function buildContextualMessage(message: string): string {

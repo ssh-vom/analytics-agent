@@ -1,9 +1,12 @@
 import unittest
 
 from chat.engine import ChatEngine
+from chat.data_intent import build_data_intent_summary
 from chat.policy import (
+    is_retryable_python_preflight_error,
     missing_required_terminal_tools,
     required_terminal_tools,
+    validate_tool_payload,
 )
 from chat.report_fallback import AUTO_REPORT_CODE
 
@@ -62,7 +65,7 @@ class StateMachineTests(unittest.TestCase):
         )
 
     def test_validate_python_payload_rejects_comments_only_code(self) -> None:
-        payload_error = self.engine._validate_tool_payload(
+        payload_error = validate_tool_payload(
             tool_name="run_python",
             arguments={"code": "# only comment\n   \n# still comment", "timeout": 30},
         )
@@ -71,7 +74,7 @@ class StateMachineTests(unittest.TestCase):
         self.assertIn("comments/whitespace", str(payload_error))
 
     def test_build_data_intent_summary_from_sql_result(self) -> None:
-        summary = self.engine._build_data_intent_summary(
+        summary = build_data_intent_summary(
             sql="SELECT month, revenue FROM sales LIMIT 5",
             sql_result={
                 "columns": [
@@ -111,7 +114,7 @@ class StateMachineTests(unittest.TestCase):
 
     def test_retryable_python_preflight_error_classification(self) -> None:
         self.assertTrue(
-            self.engine._is_retryable_python_preflight_error(
+            is_retryable_python_preflight_error(
                 {
                     "error": "syntax",
                     "error_code": "python_compile_error",
@@ -120,7 +123,7 @@ class StateMachineTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            self.engine._is_retryable_python_preflight_error(
+            is_retryable_python_preflight_error(
                 {
                     "error": "runtime",
                     "error_code": "python_runtime_error",
