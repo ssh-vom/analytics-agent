@@ -1,6 +1,6 @@
 <script lang="ts">
   import ArtifactPreviewContent from "$lib/components/ArtifactPreviewContent.svelte";
-  import { Download, FileText, Image, Table, X } from "lucide-svelte";
+  import { Download, FileText, FileType, Image, Table, X } from "lucide-svelte";
   import type { ArtifactTablePreview as ArtifactTablePreviewData } from "$lib/types";
 
   type ArtifactEntry = {
@@ -19,6 +19,10 @@
     return type === "image";
   }
 
+  function isPdfArtifact(value: ArtifactEntry): boolean {
+    return value.type === "pdf" || value.name.toLowerCase().endsWith(".pdf");
+  }
+
   function isTableArtifact(value: ArtifactEntry): boolean {
     return value.type === "csv" || value.name.toLowerCase().endsWith(".csv");
   }
@@ -35,6 +39,8 @@
       <div class="floating-title">
         {#if isImageArtifact(artifact.type)}
           <Image size={16} />
+        {:else if isPdfArtifact(artifact)}
+          <FileType size={16} />
         {:else if isTableArtifact(artifact)}
           <Table size={16} />
         {:else}

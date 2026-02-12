@@ -1,8 +1,9 @@
 import csv
+import mimetypes
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 import meta
 
@@ -113,15 +114,57 @@ def _read_csv_preview(
     return columns, preview_rows, row_count
 
 
+_INLINE_SAFE_MEDIA_TYPES = frozenset(
+    {
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/svg+xml",
+        "text/plain",
+        "text/html",
+        "text/csv",
+    }
+)
+
+
+def _guess_media_type(file_path: Path, artifact_type: str) -> str:
+    guessed, _ = mimetypes.guess_type(str(file_path))
+    if guessed:
+        return guessed
+    type_map = {
+        "pdf": "application/pdf",
+        "image": "image/png",
+        "csv": "text/csv",
+    }
+    return type_map.get(artifact_type.lower(), "application/octet-stream")
+
+
 @router.get("/artifacts/{artifact_id}")
-async def get_artifact(artifact_id: str):
+async def get_artifact(
+    artifact_id: str,
+    inline: bool = Query(default=False),
+):
     row = _load_artifact_row(artifact_id)
     file_path = _resolve_artifact_file_path(
         worldline_id=row["worldline_id"],
         raw_path=row["path"],
     )
 
-    return FileResponse(path=str(file_path), filename=row["name"])
+    media_type = _guess_media_type(file_path, str(row["type"]))
+
+    if inline and media_type in _INLINE_SAFE_MEDIA_TYPES:
+        content = file_path.read_bytes()
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'inline; filename="{row["name"]}"'},
+        )
+
+    return FileResponse(
+        path=str(file_path), filename=row["name"], media_type=media_type
+    )
 
 
 @router.get("/artifacts/{artifact_id}/preview")

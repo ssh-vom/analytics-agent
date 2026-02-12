@@ -9,6 +9,7 @@
   import { Loader2 } from "lucide-svelte";
   import { Image } from "lucide-svelte";
   import { FileText } from "lucide-svelte";
+  import { FileType } from "lucide-svelte";
   import { ExternalLink } from "lucide-svelte";
 
   export let callEvent: TimelineEvent | null = null;
@@ -34,7 +35,8 @@
   $: result = readPythonResult(resultEvent);
   $: artifacts = result?.artifacts ?? [];
   $: imageArtifacts = artifacts.filter((artifact) => artifact.type === "image");
-  $: fileArtifacts = artifacts.filter((artifact) => artifact.type !== "image");
+  $: pdfArtifacts = artifacts.filter((artifact) => artifact.type === "pdf" || artifact.name.toLowerCase().endsWith(".pdf"));
+  $: fileArtifacts = artifacts.filter((artifact) => artifact.type !== "image" && artifact.type !== "pdf" && !artifact.name.toLowerCase().endsWith(".pdf"));
   $: isRunning = Boolean(callEvent) && !resultEvent;
   $: isDraft = Boolean(callEvent) && !resultEvent;
   $: isSkipped = Boolean(callEvent?.payload?.skipped);
@@ -187,6 +189,30 @@
                               <ExternalLink size={12} />
                             </a>
                           </div>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
+
+                  {#if pdfArtifacts.length > 0}
+                    <div class="artifact-group">
+                      <div class="artifact-header">
+                        <FileType size={14} />
+                        <span>PDFs ({pdfArtifacts.length})</span>
+                      </div>
+                      <div class="file-list">
+                        {#each pdfArtifacts as artifact}
+                          <a 
+                            href={`/api/artifacts/${artifact.artifact_id}`} 
+                            target={getArtifactTarget()}
+                            rel={getArtifactRel()}
+                            class="file-card pdf-card"
+                            on:click={(event) => handleArtifactClick(event, artifact)}
+                          >
+                            <FileType size={16} />
+                            <span>{artifact.name}</span>
+                            <ExternalLink size={12} />
+                          </a>
                         {/each}
                       </div>
                     </div>
@@ -495,6 +521,17 @@
   .file-card:hover {
     border-color: var(--border-medium);
     color: var(--text-primary);
+  }
+
+  .file-card.pdf-card {
+    border-color: rgba(243, 139, 168, 0.2);
+    background: rgba(243, 139, 168, 0.05);
+    color: #f38ba8;
+  }
+
+  .file-card.pdf-card:hover {
+    border-color: rgba(243, 139, 168, 0.4);
+    color: #f38ba8;
   }
 
   .loading-state {

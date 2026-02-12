@@ -4,6 +4,7 @@
   import { createArtifactPreviewStore } from "$lib/chat/artifactPreview";
   import {
     FileText,
+    FileType,
     Image,
     Table,
     Sparkles,
@@ -132,6 +133,10 @@
     return type === "image";
   }
 
+  function isPdfArtifact(artifact: ArtifactEntry): boolean {
+    return artifact.type === "pdf" || artifact.name.toLowerCase().endsWith(".pdf");
+  }
+
   function isTableArtifact(artifact: ArtifactEntry): boolean {
     return artifact.type === "csv" || artifact.name.toLowerCase().endsWith(".csv");
   }
@@ -232,6 +237,11 @@
             {#if isImageArtifact(artifact.type)}
               <div class="image-preview">
                 <img src={`/api/artifacts/${artifact.artifactId}`} alt={artifact.name} loading="lazy" />
+              </div>
+            {:else if isPdfArtifact(artifact)}
+              <div class="pdf-preview">
+                <FileType size={22} />
+                <span>PDF Report</span>
               </div>
             {:else if isTableArtifact(artifact)}
               <div class="file-preview">
@@ -502,6 +512,24 @@
     padding: var(--space-2);
     color: var(--text-dim);
     font-size: 11px;
+  }
+
+  .pdf-preview {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    border: 1px solid rgba(243, 139, 168, 0.2);
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-2);
+    background: rgba(243, 139, 168, 0.05);
+    color: #f38ba8;
+    font-size: 11px;
+    font-weight: 500;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 
   .artifact-link {
