@@ -26,6 +26,32 @@ describe("streamStatus", () => {
         timed_out_count: 0,
       }),
     ).toBe("Running subagents (1/3)...");
+    expect(
+      statusFromDelta({
+        type: "subagent_progress",
+        phase: "retrying",
+        task_count: 3,
+        completed_count: 1,
+        failed_count: 0,
+        timed_out_count: 0,
+        retry_count: 1,
+      }),
+    ).toBe("Retrying subagents (1/3)...");
+    expect(
+      statusFromDelta({
+        type: "subagent_progress",
+        phase: "queued",
+        task_status: "queued",
+      }),
+    ).toBe("Queued subagents...");
+    expect(
+      statusFromDelta({
+        type: "subagent_progress",
+        phase: "finished",
+        task_status: "failed",
+        failure_code: "subagent_loop_limit",
+      }),
+    ).toBe("Subagent failed (loop limit reached)...");
     expect(statusFromDelta({ type: "state_transition", to_state: "planning" })).toBeNull();
   });
 });

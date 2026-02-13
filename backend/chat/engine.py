@@ -144,6 +144,7 @@ class ChatEngine:
         skip_semantic_lane: bool = False,
         allow_subagents: bool = True,
         subagent_depth: int = 0,
+        allow_tools: bool = True,
     ) -> tuple[str, list[dict[str, Any]]]:
         MAX_SUBAGENT_DEPTH = 2
 
@@ -166,6 +167,7 @@ class ChatEngine:
             data={
                 "worldline_id": worldline_id,
                 "message_preview": message[:200],
+                "allow_tools": allow_tools,
                 "allow_subagents": effective_allow_subagents,
                 "subagent_depth": subagent_depth,
             },
@@ -213,9 +215,13 @@ class ChatEngine:
         )
         recent_artifact_names = artifact_name_set(artifact_inventory)
         user_requested_rerun_flag = user_requested_rerun_hint(message)
-        required_tools = determine_required_terminal_tools(
-            message=message,
-            requested_output_type=requested_output_type,
+        required_tools: set[str] = (
+            determine_required_terminal_tools(
+                message=message,
+                requested_output_type=requested_output_type,
+            )
+            if allow_tools
+            else set()
         )
         # #region agent log
         _debug_log(
@@ -269,10 +275,12 @@ class ChatEngine:
             upsert_artifact_inventory_message(messages, artifact_inventory)
             upsert_data_intent_message(messages, data_intent_summary)
 
-            turn_tools = self._tool_definitions(
-                include_python=True,
-                include_spawn_subagents=_include_spawn,
-            )
+            turn_tools: list[ToolDefinition] = []
+            if allow_tools:
+                turn_tools = self._tool_definitions(
+                    include_python=True,
+                    include_spawn_subagents=_include_spawn,
+                )
             if on_delta is not None:
                 response = await self._stream_llm_response(
                     worldline_id=active_worldline_id,
@@ -286,9 +294,10 @@ class ChatEngine:
                     tools=turn_tools,
                     max_output_tokens=self.max_output_tokens,
                 )
+            response_tool_calls = response.tool_calls if allow_tools else []
 
             # ----- Emit assistant_plan if text accompanies tool calls ----------
-            if response.text and response.tool_calls:
+            if response.text and response_tool_calls:
                 plan_event = self._append_worldline_event(
                     worldline_id=active_worldline_id,
                     event_type="assistant_plan",
@@ -300,11 +309,11 @@ class ChatEngine:
             if response.text:
                 messages.append(ChatMessage(role="assistant", content=response.text))
 
-            if response.tool_calls:
+            if response_tool_calls:
                 repeated_call_detected = False
                 invalid_payload_retry_requested = False
                 python_execution_retry_requested = False
-                for raw_tool_call in response.tool_calls:
+                for raw_tool_call in response_tool_calls:
                     tool_name = (raw_tool_call.name or "").strip()
                     normalized_arguments = normalize_tool_arguments(
                         tool_name,
@@ -586,6 +595,17 @@ class ChatEngine:
                             tool_call_id=tool_call.id or None,
                         )
                     )
+                    if tool_name == "spawn_subagents":
+                        partial_failure_nudge = (
+                            self._build_subagent_partial_failure_nudge(tool_result)
+                        )
+                        if partial_failure_nudge:
+                            messages.append(
+                                ChatMessage(
+                                    role="system",
+                                    content=partial_failure_nudge,
+                                )
+                            )
 
                     if tool_name == "run_python" and is_empty_python_payload_error(
                         tool_result
@@ -772,61 +792,64 @@ class ChatEngine:
                 continue
 
             if response.text:
-                missing_required_tools = find_missing_required_terminal_tools(
-                    required_tools=required_tools,
-                    sql_success_count=sql_success_count,
-                    python_success_count=python_success_count,
-                )
-                if missing_required_tools:
-                    required_tool_enforcement_failures += 1
-                    turn_state = await self._transition_state_and_emit(
-                        current_state=turn_state,
-                        to_state="error",
-                        reason=(
-                            "required_tool_missing:"
-                            + ",".join(sorted(missing_required_tools))
-                        ),
-                        transitions=state_transitions,
-                        worldline_id=active_worldline_id,
-                        on_delta=on_delta,
+                if allow_tools:
+                    missing_required_tools = find_missing_required_terminal_tools(
+                        required_tools=required_tools,
+                        sql_success_count=sql_success_count,
+                        python_success_count=python_success_count,
                     )
-
-                    if (
-                        required_tool_enforcement_failures
-                        <= _MAX_REQUIRED_TOOL_ENFORCEMENT_RETRIES
-                    ):
-                        messages.append(
-                            ChatMessage(
-                                role="system",
-                                content=build_required_tool_enforcement_message(
-                                    missing_required_tools=missing_required_tools,
-                                    data_intent_summary=data_intent_summary,
-                                ),
-                            )
-                        )
+                    if missing_required_tools:
+                        required_tool_enforcement_failures += 1
                         turn_state = await self._transition_state_and_emit(
                             current_state=turn_state,
-                            to_state="planning",
-                            reason="retry_after_missing_required_tool",
+                            to_state="error",
+                            reason=(
+                                "required_tool_missing:"
+                                + ",".join(sorted(missing_required_tools))
+                            ),
                             transitions=state_transitions,
                             worldline_id=active_worldline_id,
                             on_delta=on_delta,
                         )
-                        continue
 
-                    final_text = (
-                        "I stopped because the model kept replying without required tool "
-                        "execution (" + ", ".join(sorted(missing_required_tools)) + ")."
-                    )
-                    turn_state = await self._transition_state_and_emit(
-                        current_state=turn_state,
-                        to_state="presenting",
-                        reason="required_tool_missing_stop",
-                        transitions=state_transitions,
-                        worldline_id=active_worldline_id,
-                        on_delta=on_delta,
-                    )
-                    break
+                        if (
+                            required_tool_enforcement_failures
+                            <= _MAX_REQUIRED_TOOL_ENFORCEMENT_RETRIES
+                        ):
+                            messages.append(
+                                ChatMessage(
+                                    role="system",
+                                    content=build_required_tool_enforcement_message(
+                                        missing_required_tools=missing_required_tools,
+                                        data_intent_summary=data_intent_summary,
+                                    ),
+                                )
+                            )
+                            turn_state = await self._transition_state_and_emit(
+                                current_state=turn_state,
+                                to_state="planning",
+                                reason="retry_after_missing_required_tool",
+                                transitions=state_transitions,
+                                worldline_id=active_worldline_id,
+                                on_delta=on_delta,
+                            )
+                            continue
+
+                        final_text = (
+                            "I stopped because the model kept replying without required tool "
+                            "execution ("
+                            + ", ".join(sorted(missing_required_tools))
+                            + ")."
+                        )
+                        turn_state = await self._transition_state_and_emit(
+                            current_state=turn_state,
+                            to_state="presenting",
+                            reason="required_tool_missing_stop",
+                            transitions=state_transitions,
+                            worldline_id=active_worldline_id,
+                            on_delta=on_delta,
+                        )
+                        break
 
                 turn_state = await self._transition_state_and_emit(
                     current_state=turn_state,
@@ -1078,6 +1101,7 @@ class ChatEngine:
         child_message: str,
         child_max_iterations: int,
         subagent_depth: int,
+        allow_tools: bool = True,
     ) -> tuple[str, list[dict[str, Any]]]:
         child_engine = ChatEngine(
             llm_client=self.llm_client,
@@ -1091,6 +1115,7 @@ class ChatEngine:
             skip_semantic_lane=True,
             allow_subagents=False,
             subagent_depth=subagent_depth,
+            allow_tools=allow_tools,
         )
 
     # ---- tool execution -----------------------------------------------------
@@ -1363,6 +1388,96 @@ class ChatEngine:
 
         compact["tasks"] = compact_tasks
         return compact
+
+    def _build_subagent_partial_failure_nudge(
+        self,
+        payload: dict[str, Any],
+    ) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        if not bool(payload.get("partial_failure")):
+            return None
+
+        def _as_int(value: Any) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+
+        completed_count = _as_int(payload.get("completed_count"))
+        failed_count = _as_int(payload.get("failed_count"))
+        timed_out_count = _as_int(payload.get("timed_out_count"))
+        task_count = _as_int(payload.get("task_count"))
+
+        raw_tasks = payload.get("tasks")
+        task_rows = raw_tasks if isinstance(raw_tasks, list) else []
+
+        completed_slices: list[str] = []
+        failed_or_missing_slices: list[str] = []
+        for index, task in enumerate(task_rows):
+            if not isinstance(task, dict):
+                continue
+            label = str(task.get("task_label") or f"task-{index + 1}").strip()
+            if not label:
+                label = f"task-{index + 1}"
+
+            status = str(task.get("status") or "").strip().lower()
+            preview = str(task.get("assistant_preview") or "").strip()
+            failure_code = str(task.get("failure_code") or "").strip()
+            error = str(task.get("error") or "").strip()
+
+            if status == "completed":
+                snippet = preview[:160] if preview else "completed without preview"
+                completed_slices.append(f"{label}: {snippet}")
+                continue
+
+            failure_parts: list[str] = []
+            if status:
+                failure_parts.append(f"status={status}")
+            if failure_code:
+                failure_parts.append(f"failure_code={failure_code}")
+            if error:
+                failure_parts.append(f"error={error[:220]}")
+            if not failure_parts:
+                failure_parts.append("no explicit failure details")
+            failed_or_missing_slices.append(f"{label}: {'; '.join(failure_parts)}")
+
+        missing_slice_count = max(0, task_count - len(task_rows))
+        if missing_slice_count > 0:
+            failed_or_missing_slices.append(
+                f"{missing_slice_count} task result slice(s) missing from payload"
+            )
+
+        if not failed_or_missing_slices and (failed_count > 0 or timed_out_count > 0):
+            failed_or_missing_slices.append(
+                (
+                    "Some slices failed or timed out but did not include per-task details: "
+                    f"failed={failed_count}, timed_out={timed_out_count}"
+                )
+            )
+
+        successful_summary = (
+            " | ".join(completed_slices[:8])
+            if completed_slices
+            else "none"
+        )
+        failed_summary = (
+            " | ".join(failed_or_missing_slices[:8])
+            if failed_or_missing_slices
+            else "none"
+        )
+
+        return (
+            "Subagent fan-out completed with partial failures.\n"
+            "For your next response:\n"
+            "1) Synthesize conclusions from successful task outputs only.\n"
+            "2) Explicitly list missing or failed slices and what remains unknown.\n"
+            "3) Do not imply failed/missing slices completed successfully.\n"
+            f"Aggregate counts: completed={completed_count}, failed={failed_count}, "
+            f"timed_out={timed_out_count}, task_count={task_count}.\n"
+            f"Successful slices: {successful_summary}\n"
+            f"Missing/failed slices: {failed_summary}"
+        )
 
     def _append_worldline_event(
         self,

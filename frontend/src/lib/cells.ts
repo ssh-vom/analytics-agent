@@ -68,11 +68,11 @@ function readParentToolCallId(event: TimelineEvent): string | null {
   return parentToolCallId;
 }
 
-function isStreamingSubagentResult(event: TimelineEvent | null): boolean {
+function isTerminalSubagentResult(event: TimelineEvent | null): boolean {
   if (!event || event.type !== "tool_result_subagents") {
     return false;
   }
-  return event.payload?._streaming === true;
+  return event.payload?._streaming !== true;
 }
 
 function payloadText(payload: Record<string, unknown>): string {
@@ -406,8 +406,7 @@ export function groupDisplayItemsIntoCells(items: DisplayItem[]): RenderCell[] {
         if (existingSubagentCell) {
           if (
             streamingProgressResult &&
-            (!existingSubagentCell.result ||
-              isStreamingSubagentResult(existingSubagentCell.result))
+            !isTerminalSubagentResult(existingSubagentCell.result)
           ) {
             existingSubagentCell.result = streamingProgressResult;
           }

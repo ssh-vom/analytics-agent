@@ -1167,11 +1167,29 @@ class ChatApiTests(unittest.TestCase):
             "completed_count": 2,
             "failed_count": 0,
             "timed_out_count": 0,
+            "loop_limit_failure_count": 0,
+            "retried_task_count": 0,
+            "recovered_task_count": 0,
+            "failure_summary": {},
             "all_completed": True,
             "partial_failure": False,
             "tasks": [
-                {"task_label": "one", "status": "completed"},
-                {"task_label": "two", "status": "completed"},
+                {
+                    "task_label": "one",
+                    "status": "completed",
+                    "failure_code": None,
+                    "retry_count": 0,
+                    "recovered": False,
+                    "terminal_reason": "assistant_text_ready",
+                },
+                {
+                    "task_label": "two",
+                    "status": "completed",
+                    "failure_code": None,
+                    "retry_count": 0,
+                    "recovered": False,
+                    "terminal_reason": "assistant_text_ready",
+                },
             ],
         }
 
@@ -1218,6 +1236,10 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(result_event["payload"]["requested_task_count"], 2)
         self.assertEqual(result_event["payload"]["accepted_task_count"], 2)
         self.assertEqual(result_event["payload"]["truncated_task_count"], 0)
+        self.assertEqual(result_event["payload"]["loop_limit_failure_count"], 0)
+        self.assertEqual(result_event["payload"]["retried_task_count"], 0)
+        self.assertEqual(result_event["payload"]["recovered_task_count"], 0)
+        self.assertEqual(result_event["payload"]["failure_summary"], {})
         self.assertFalse(result_event["payload"]["partial_failure"])
         spawn_kwargs = mocked_spawn.await_args.kwargs
         self.assertEqual(spawn_kwargs["max_subagents"], 2)
@@ -1308,6 +1330,149 @@ class ChatApiTests(unittest.TestCase):
         )
         self.assertIn("error", tool_result["payload"])
 
+    def test_chat_spawn_subagents_partial_failure_adds_parent_synthesis_nudge(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_seed_spawn_partial",
+                    worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "seed"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_spawn_partial", worldline_id),
+            )
+            conn.commit()
+
+        class CaptureClient(FakeLlmClient):
+            def __init__(self, responses: list[LlmResponse]) -> None:
+                super().__init__(responses)
+                self.generate_call_history: list[dict[str, object]] = []
+
+            async def generate(self, **kwargs) -> LlmResponse:
+                self.generate_call_history.append(kwargs)
+                return await super().generate(**kwargs)
+
+        fake_client = CaptureClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_spawn_partial",
+                            name="spawn_subagents",
+                            arguments={
+                                "from_event_id": "event_seed_spawn_partial",
+                                "tasks": [
+                                    {"message": "task one", "label": "one"},
+                                    {"message": "task two", "label": "two"},
+                                ],
+                                "timeout_s": 1,
+                                "max_iterations": 4,
+                            },
+                        )
+                    ],
+                ),
+                LlmResponse(text="Parent synthesis with explicit gaps.", tool_calls=[]),
+            ]
+        )
+        fake_spawn_result = {
+            "fanout_group_id": "fanout_partial",
+            "task_count": 2,
+            "requested_task_count": 2,
+            "accepted_task_count": 2,
+            "truncated_task_count": 0,
+            "completed_count": 1,
+            "failed_count": 1,
+            "timed_out_count": 0,
+            "loop_limit_failure_count": 0,
+            "retried_task_count": 0,
+            "recovered_task_count": 0,
+            "failure_summary": {"subagent_error": 1},
+            "all_completed": False,
+            "partial_failure": True,
+            "tasks": [
+                {
+                    "task_label": "one",
+                    "status": "completed",
+                    "failure_code": None,
+                    "retry_count": 0,
+                    "recovered": False,
+                    "terminal_reason": "assistant_text_ready",
+                    "assistant_preview": "segment one findings",
+                },
+                {
+                    "task_label": "two",
+                    "status": "failed",
+                    "failure_code": "subagent_error",
+                    "retry_count": 0,
+                    "recovered": False,
+                    "terminal_reason": "error",
+                    "error": "timeout in downstream dependency",
+                },
+            ],
+        }
+
+        class _DummyScheduler:
+            async def start(self) -> None:
+                return None
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch(
+                "chat.engine.spawn_subagents_blocking",
+                AsyncMock(return_value=fake_spawn_result),
+            ),
+            patch(
+                "services.chat_runtime.get_chat_job_scheduler",
+                return_value=_DummyScheduler(),
+            ),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="fan out and synthesize despite failures",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 2)
+        self.assertGreaterEqual(len(fake_client.generate_call_history), 2)
+        second_call = fake_client.generate_call_history[1]
+        second_messages = second_call["messages"]
+        system_messages = [
+            str(message.content)
+            for message in second_messages
+            if message.role == "system" and isinstance(message.content, str)
+        ]
+        system_text = "\n".join(system_messages)
+        self.assertIn("Subagent fan-out completed with partial failures.", system_text)
+        self.assertIn(
+            "Synthesize conclusions from successful task outputs only.",
+            system_text,
+        )
+        self.assertIn(
+            "Explicitly list missing or failed slices and what remains unknown.",
+            system_text,
+        )
+        self.assertIn("Successful slices:", system_text)
+        self.assertIn("Missing/failed slices:", system_text)
+        self.assertEqual(
+            result["events"][-1]["payload"]["text"],
+            "Parent synthesis with explicit gaps.",
+        )
+
     def test_chat_spawn_subagents_invalid_from_event_falls_back_to_head(self) -> None:
         thread_id = self._create_thread()
         worldline_id = self._create_worldline(thread_id)
@@ -1357,8 +1522,21 @@ class ChatApiTests(unittest.TestCase):
             "completed_count": 1,
             "failed_count": 0,
             "timed_out_count": 0,
+            "loop_limit_failure_count": 0,
+            "retried_task_count": 0,
+            "recovered_task_count": 0,
+            "failure_summary": {},
             "all_completed": True,
-            "tasks": [{"task_label": "one", "status": "completed"}],
+            "tasks": [
+                {
+                    "task_label": "one",
+                    "status": "completed",
+                    "failure_code": None,
+                    "retry_count": 0,
+                    "recovered": False,
+                    "terminal_reason": "assistant_text_ready",
+                }
+            ],
         }
 
         class _DummyCoordinator:
@@ -1547,11 +1725,29 @@ class ChatApiTests(unittest.TestCase):
                 "completed_count": 2,
                 "failed_count": 0,
                 "timed_out_count": 0,
+                "loop_limit_failure_count": 0,
+                "retried_task_count": 0,
+                "recovered_task_count": 0,
+                "failure_summary": {},
                 "all_completed": True,
                 "partial_failure": False,
                 "tasks": [
-                    {"task_label": "one", "status": "completed"},
-                    {"task_label": "two", "status": "completed"},
+                    {
+                        "task_label": "one",
+                        "status": "completed",
+                        "failure_code": None,
+                        "retry_count": 0,
+                        "recovered": False,
+                        "terminal_reason": "assistant_text_ready",
+                    },
+                    {
+                        "task_label": "two",
+                        "status": "completed",
+                        "failure_code": None,
+                        "retry_count": 0,
+                        "recovered": False,
+                        "terminal_reason": "assistant_text_ready",
+                    },
                 ],
             }
 
@@ -2111,6 +2307,55 @@ class ChatApiTests(unittest.TestCase):
         self.assertIn("required_tool_missing:run_python", transition_reasons)
         self.assertIn("retry_after_missing_required_tool", transition_reasons)
 
+    def test_engine_run_turn_allow_tools_false_disables_tools_and_still_persists_assistant(
+        self,
+    ) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+
+        class CaptureClient(FakeLlmClient):
+            def __init__(self, responses: list[LlmResponse]) -> None:
+                super().__init__(responses)
+                self.generate_kwargs: list[dict[str, object]] = []
+
+            async def generate(self, **kwargs) -> LlmResponse:
+                self.generate_kwargs.append(kwargs)
+                return await super().generate(**kwargs)
+
+        fake_client = CaptureClient(
+            responses=[LlmResponse(text="Synthesis complete without tools.", tool_calls=[])]
+        )
+        engine = chat_engine.ChatEngine(llm_client=fake_client, max_iterations=4)
+
+        active_worldline_id, events = self._run(
+            engine.run_turn(
+                worldline_id=worldline_id,
+                message="Please continue with python analysis and make a chart",
+                allow_tools=False,
+            )
+        )
+
+        self.assertEqual(active_worldline_id, worldline_id)
+        self.assertEqual(fake_client.calls, 1)
+        self.assertEqual(len(fake_client.generate_kwargs), 1)
+        self.assertEqual(fake_client.generate_kwargs[0]["tools"], [])
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["user_message", "assistant_message"],
+        )
+
+        assistant_payload = events[-1]["payload"]
+        self.assertEqual(assistant_payload["text"], "Synthesis complete without tools.")
+        self.assertEqual(assistant_payload["turn_stats"]["required_tools"], [])
+
+        transition_reasons = [
+            str(transition.get("reason"))
+            for transition in assistant_payload.get("state_trace", [])
+            if isinstance(transition, dict)
+        ]
+        self.assertNotIn("required_tool_missing:run_python", transition_reasons)
+        self.assertNotIn("retry_after_missing_required_tool", transition_reasons)
+
     # ---- new test: assistant_plan when text accompanies tool calls -----------
 
     def test_chat_stream_emits_assistant_plan_when_text_with_tool_calls(self) -> None:
@@ -2273,8 +2518,21 @@ class ChatApiTests(unittest.TestCase):
                 "completed_count": 1,
                 "failed_count": 0,
                 "timed_out_count": 0,
+                "loop_limit_failure_count": 0,
+                "retried_task_count": 0,
+                "recovered_task_count": 0,
+                "failure_summary": {},
                 "all_completed": True,
-                "tasks": [{"task_label": "one", "status": "completed"}],
+                "tasks": [
+                    {
+                        "task_label": "one",
+                        "status": "completed",
+                        "failure_code": None,
+                        "retry_count": 0,
+                        "recovered": False,
+                        "terminal_reason": "assistant_text_ready",
+                    }
+                ],
             }
 
         async def scenario() -> str:

@@ -21,7 +21,7 @@ class ToolDispatcher:
         worldline_service: WorldlineService,
         load_event_by_id: Callable[[str], dict[str, Any]],
         run_child_turn: Callable[
-            [str, str, int, int], Awaitable[tuple[str, list[dict[str, Any]]]]
+            [str, str, int, int, bool], Awaitable[tuple[str, list[dict[str, Any]]]]
         ],
         execute_sql_tool: Callable[..., Awaitable[dict[str, Any]]],
         execute_python_tool: Callable[..., Awaitable[dict[str, Any]]],
@@ -213,11 +213,12 @@ class ToolDispatcher:
                 worldline_service=self._worldline_service,
                 spawn_subagents_blocking=self._spawn_subagents_blocking,
                 get_turn_coordinator=self._get_turn_coordinator,
-                run_child_turn=lambda child_worldline_id, child_message, child_max_iterations: self._run_child_turn(
+                run_child_turn=lambda child_worldline_id, child_message, child_max_iterations, allow_tools=True: self._run_child_turn(
                     child_worldline_id,
                     child_message,
                     child_max_iterations,
                     subagent_depth + 1,
+                    allow_tools,
                 ),
             )
             result = await runner.run(

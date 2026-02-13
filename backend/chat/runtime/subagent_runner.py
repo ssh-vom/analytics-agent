@@ -24,7 +24,9 @@ class SubagentRunner:
         worldline_service: WorldlineService,
         spawn_subagents_blocking: Callable[..., Awaitable[dict[str, Any]]],
         get_turn_coordinator: Callable[[], Any],
-        run_child_turn: Callable[[str, str, int], Awaitable[tuple[str, list[dict[str, Any]]]]],
+        run_child_turn: Callable[
+            [str, str, int, bool], Awaitable[tuple[str, list[dict[str, Any]]]]
+        ],
     ) -> None:
         self._llm_client = llm_client
         self._worldline_service = worldline_service
@@ -50,6 +52,30 @@ class SubagentRunner:
         on_delta: Callable[[str, dict[str, Any]], Awaitable[None]] | None,
     ) -> dict[str, Any]:
         call_event: dict[str, Any] | None = None
+
+        def _with_aggregate_defaults(payload: dict[str, Any]) -> dict[str, Any]:
+            normalized: dict[str, Any] = dict(payload)
+            normalized.setdefault("loop_limit_failure_count", 0)
+            normalized.setdefault("retried_task_count", 0)
+            normalized.setdefault("recovered_task_count", 0)
+            normalized.setdefault("failure_summary", {})
+            tasks = normalized.get("tasks")
+            if not isinstance(tasks, list):
+                return normalized
+
+            normalized_tasks: list[Any] = []
+            for task in tasks:
+                if not isinstance(task, dict):
+                    normalized_tasks.append(task)
+                    continue
+                normalized_task = dict(task)
+                normalized_task.setdefault("failure_code", None)
+                normalized_task.setdefault("retry_count", 0)
+                normalized_task.setdefault("recovered", False)
+                normalized_task.setdefault("terminal_reason", None)
+                normalized_tasks.append(normalized_task)
+            normalized["tasks"] = normalized_tasks
+            return normalized
 
         async def _emit_progress(progress: dict[str, Any]) -> None:
             if on_delta is None:
@@ -124,17 +150,22 @@ class SubagentRunner:
                 max_subagents=max_subagents,
                 max_parallel_subagents=max_parallel_subagents,
             )
+            result = _with_aggregate_defaults(result)
             await _persist_result(result)
             return result
         except HTTPException as exc:
-            payload = {"error": str(exc.detail), "status_code": exc.status_code}
+            payload = _with_aggregate_defaults(
+                {"error": str(exc.detail), "status_code": exc.status_code}
+            )
             await _persist_result(payload)
             return payload
         except asyncio.CancelledError as exc:  # pragma: no cover
-            payload = {"error": str(exc), "error_type": type(exc).__name__}
+            payload = _with_aggregate_defaults(
+                {"error": str(exc), "error_type": type(exc).__name__}
+            )
             await _persist_result(payload)
             return payload
         except Exception as exc:  # pragma: no cover
-            payload = {"error": str(exc)}
+            payload = _with_aggregate_defaults({"error": str(exc)})
             await _persist_result(payload)
             return payload

@@ -34,8 +34,24 @@ function makeSubagentResultEvent(
       timed_out_count: 0,
       partial_failure: false,
       tasks: [
-        { task_index: 0, task_label: "a", status: "completed" },
-        { task_index: 1, task_label: "b", status: "completed" },
+        {
+          task_index: 0,
+          task_label: "a",
+          status: "completed",
+          failure_code: null,
+          retry_count: 0,
+          recovered: false,
+          terminal_reason: "assistant_text_ready",
+        },
+        {
+          task_index: 1,
+          task_label: "b",
+          status: "completed",
+          failure_code: null,
+          retry_count: 0,
+          recovered: false,
+          terminal_reason: "assistant_text_ready",
+        },
       ],
     },
     created_at: "2026-01-01T00:00:01Z",
@@ -73,6 +89,9 @@ describe("cells", () => {
         rawArgs: '{"goal":"fan out"}',
         createdAt: "2026-01-01T00:00:02Z",
         subagentProgress: {
+          phase: "retrying",
+          retry_count: 1,
+          failure_code: "subagent_loop_limit",
           task_count: 3,
           completed_count: 1,
           failed_count: 0,
@@ -87,6 +106,10 @@ describe("cells", () => {
               result_worldline_id: "w1",
               assistant_preview: "ok",
               error: "",
+              failure_code: "subagent_loop_limit",
+              retry_count: 1,
+              recovered: false,
+              terminal_reason: "max_iterations_reached",
             },
           ],
         },
@@ -104,6 +127,12 @@ describe("cells", () => {
     expect(subagentCell.call?.id).toBe("event_call");
     expect(subagentCell.result?.type).toBe("tool_result_subagents");
     expect(subagentCell.result?.payload._streaming).toBe(true);
+    expect(subagentCell.result?.payload.phase).toBe("retrying");
+    expect(subagentCell.result?.payload.retry_count).toBe(1);
+    expect(subagentCell.result?.payload.failure_code).toBe("subagent_loop_limit");
+    expect(
+      (subagentCell.result?.payload.tasks as Array<Record<string, unknown>>)[0]?.retry_count,
+    ).toBe(1);
   });
 
   it("keeps persisted subagent result authoritative over streaming progress", () => {
@@ -120,6 +149,9 @@ describe("cells", () => {
         rawArgs: '{"goal":"fan out"}',
         createdAt: "2026-01-01T00:00:02Z",
         subagentProgress: {
+          phase: "retrying",
+          retry_count: 1,
+          failure_code: "subagent_loop_limit",
           task_count: 3,
           completed_count: 1,
           failed_count: 0,
@@ -137,5 +169,6 @@ describe("cells", () => {
     }
     expect(subagentCell.result?.id).toBe("event_result");
     expect(subagentCell.result?.payload._streaming).not.toBe(true);
+    expect(subagentCell.result?.payload.task_count).toBe(2);
   });
 });

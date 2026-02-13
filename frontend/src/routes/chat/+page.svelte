@@ -2,11 +2,7 @@
   import { onDestroy, onMount, tick } from "svelte";
 
   import { groupDisplayItemsIntoCells } from "$lib/cells";
-  import {
-    buildDisplayItems,
-    createStreamingState,
-    type StreamingState,
-  } from "$lib/streaming";
+  import { buildDisplayItems, createStreamingState, type StreamingState } from "$lib/streaming";
   import MessageCell from "$lib/components/MessageCell.svelte";
   import PythonCell from "$lib/components/PythonCell.svelte";
   import SqlCell from "$lib/components/SqlCell.svelte";
@@ -15,16 +11,7 @@
   import WorldlinePicker from "$lib/components/WorldlinePicker.svelte";
   import { activeThread, threads } from "$lib/stores/threads";
   import { chatJobs } from "$lib/stores/chatJobs";
-  import {
-    createChatJob,
-    createThread,
-    fetchChatSession,
-    fetchWorldlineTables,
-  } from "$lib/api/client";
-  import {
-    createOptimisticUserMessage,
-    insertOptimisticEvent,
-  } from "$lib/chat/optimisticState";
+  import { createThread, fetchWorldlineTables } from "$lib/api/client";
   import {
     buildContextualMessage as buildContextualChatMessage,
     providerLabel,
@@ -34,31 +21,11 @@
     type Provider,
     type StoredConnector,
   } from "$lib/chat/contextControls";
-  import {
-    rollbackOptimisticWorldlineEvent,
-    withStreamingState,
-    withWorldlineSending,
-    withoutStreamingState,
-  } from "$lib/chat/streamState";
-  import {
-    appendRuntimeStateTransition,
-    extractPersistedStateTrace,
-    runtimeStatePath,
-    runtimeStateReasons,
-    withRuntimeStateTrace,
-    type RuntimeStateTransition,
-  } from "$lib/chat/stateTrace";
+  import { runtimeStatePath, runtimeStateReasons, type RuntimeStateTransition } from "$lib/chat/stateTrace";
   import { computeWorldlineQueueStats } from "$lib/chat/queueStats";
-  import { sendPromptWithStreaming } from "$lib/chat/streamingController";
-  import {
-    withAppendedWorldlineEvent,
-    withVisibleWorldline,
-    type VisibleWorldlineHint,
-    withWorldlineEvents,
-  } from "$lib/chat/worldlineState";
   import { removeUploadedFileByName } from "$lib/chat/csvImportPanel";
   import { refreshWorldlineContextSnapshot } from "$lib/chat/worldlineContext";
-  import { createWorldlineManager } from "$lib/chat/worldlineManager";
+  import { createSessionStore } from "$lib/chat/sessionStore";
   import { createCSVImportController } from "$lib/chat/csvImportController";
   import { createScrollToBottom } from "$lib/chat/scrollToBottom";
   import { createMenuController, type MenuId } from "$lib/chat/menuController";
@@ -77,28 +44,32 @@
     X,
   } from "lucide-svelte";
 
+  const sessionStore = createSessionStore();
+
   let threadId = "";
   let activeWorldlineId = "";
   let worldlines: WorldlineItem[] = [];
   let eventsByWorldline: Record<string, TimelineEvent[]> = {};
+  let streamingByWorldline: Record<string, StreamingState> = {};
+  let sendingByWorldline: Record<string, boolean> = {};
+  let stateTraceByWorldline: Record<string, RuntimeStateTransition[]> = {};
+  let statusText = "Initializing...";
+  let selectedArtifactId: string | null = null;
+  let isReady = false;
+  let isHydratingThread = false;
+
   let prompt = "";
   let provider: Provider = "openrouter";
   let model = "";
-  let statusText = "Initializing...";
-  let sendingByWorldline: Record<string, boolean> = {};
-  let isReady = false;
   let activeMenu: MenuId | null = null;
   let composerExpanded = false;
-  let isHydratingThread = false;
   let artifactsPanelCollapsed = false;
-  let selectedArtifactId: string | null = null;
-  let streamingStateByWorldline: Record<string, StreamingState> = {};
   let activeStreamingState: StreamingState = createStreamingState();
   let feedElement: HTMLDivElement | null = null;
   let activeWorldlineQueueDepth = 0;
   let activeWorldlineRunningJobs = 0;
   let activeWorldlineQueuedJobs = 0;
-  let stateTraceByWorldline: Record<string, RuntimeStateTransition[]> = {};
+  let currentThread: Thread | null = null;
 
   // CSV Import state
   let uploadedFiles: File[] = [];
@@ -115,8 +86,22 @@
     ontology: false,
   };
 
+  $: ({
+    threadId,
+    activeWorldlineId,
+    worldlines,
+    eventsByWorldline,
+    streamingByWorldline,
+    sendingByWorldline,
+    stateTraceByWorldline,
+    statusText,
+    selectedArtifactId,
+    isReady,
+    isHydratingThread,
+  } = $sessionStore);
+
   $: activeEvents = eventsByWorldline[activeWorldlineId] ?? [];
-  $: activeStreamingState = streamingStateByWorldline[activeWorldlineId] ?? createStreamingState();
+  $: activeStreamingState = streamingByWorldline[activeWorldlineId] ?? createStreamingState();
   $: displayItems = buildDisplayItems(activeEvents, activeStreamingState);
   $: cells = groupDisplayItemsIntoCells(displayItems);
   $: currentThread = $activeThread;
@@ -134,32 +119,12 @@
     activeWorldlineQueuedJobs = queueStats.queued;
   }
 
-  // Controllers
-  const worldlineManager = createWorldlineManager({
-    get threadId() { return threadId; },
-    getActiveWorldlineId: () => activeWorldlineId,
-    getWorldlines: () => worldlines,
-    getEventsByWorldline: () => eventsByWorldline,
-    setWorldlines: (w) => { worldlines = w; },
-    setActiveWorldlineId: (id) => { activeWorldlineId = id; },
-    persistPreferredWorldline,
-    setWorldlineEvents,
-    onStatusChange: (s) => { statusText = s; },
-    onScroll: () => scrollFeedToBottom(true),
-    refreshContextTables: refreshWorldlineContextTables,
-  });
-  const {
-    refreshWorldlines,
-    loadWorldline,
-    selectWorldline,
-    branchFromEvent: branchWorldlineFromEvent,
-    ensureWorldline: ensureWorldlineExists,
-  } = worldlineManager;
-
   const csvController = createCSVImportController({
     get uploadedFiles() { return uploadedFiles; },
     setUploadedFiles: (f) => { uploadedFiles = f; },
-    setStatusText: (s) => { statusText = s; },
+    setStatusText: (s) => {
+      sessionStore.setStatusText(s);
+    },
     setSelectedContextTables: (t) => { selectedContextTables = Array.isArray(t) ? t : t(selectedContextTables); },
     setWorldlineTables: (t) => { worldlineTables = t; },
     get activeWorldlineId() { return activeWorldlineId; },
@@ -170,6 +135,19 @@
   const scrollController = createScrollToBottom(() => feedElement);
   const menuController = createMenuController();
 
+  sessionStore.configureRuntime({
+    refreshContextTables: () => refreshWorldlineContextTables(),
+    scrollToBottom: (force = false) => scrollFeedToBottom(force),
+    onTurnCompleted: () => {
+      if (currentThread) {
+        threads.updateThread(currentThread.id, {
+          messageCount: (currentThread.messageCount || 0) + 1,
+          lastActivity: new Date().toISOString(),
+        });
+      }
+    },
+  });
+
   function handleOpenWorldlineEvent(event: Event): void {
     const detail = (event as CustomEvent<{ threadId?: string; worldlineId?: string }>).detail;
     if (!detail?.worldlineId) {
@@ -178,7 +156,7 @@
     if (detail.threadId && detail.threadId !== threadId) {
       return;
     }
-    void selectWorldline(detail.worldlineId).catch(() => undefined);
+    void sessionStore.selectWorldline(detail.worldlineId).catch(() => undefined);
   }
 
   function handleSubagentOpenWorldline(
@@ -188,7 +166,7 @@
     if (!worldlineId) {
       return;
     }
-    void selectWorldline(worldlineId).catch(() => undefined);
+    void sessionStore.selectWorldline(worldlineId).catch(() => undefined);
   }
 
   function handleVisibilityChange(): void {
@@ -196,13 +174,6 @@
     if (document.visibilityState === "visible") {
       void chatJobs.poll();
     }
-  }
-
-  function persistPreferredWorldline(worldlineId: string): void {
-    if (!worldlineId || typeof localStorage === "undefined") {
-      return;
-    }
-    localStorage.setItem("textql_active_worldline", worldlineId);
   }
 
   onMount(async () => {
@@ -234,7 +205,7 @@
     const storedWorldlineId = localStorage.getItem("textql_active_worldline");
     
     if ($activeThread) {
-      await hydrateThread($activeThread.id, storedWorldlineId ?? undefined);
+      await sessionStore.hydrateThread($activeThread.id, storedWorldlineId ?? undefined);
     } else {
       await initializeSession();
     }
@@ -259,7 +230,7 @@
   });
 
   $: if ($activeThread?.id && isReady && $activeThread.id !== threadId && !isHydratingThread) {
-    void hydrateThread($activeThread.id);
+    void sessionStore.hydrateThread($activeThread.id);
   }
 
   function handleFeedScroll(): void {
@@ -268,60 +239,6 @@
 
   function scrollFeedToBottom(force = false): void {
     scrollController.scrollToBottom(force);
-  }
-
-  function setStreamingState(worldlineId: string, state: StreamingState): void {
-    streamingStateByWorldline = withStreamingState(
-      streamingStateByWorldline,
-      worldlineId,
-      state,
-    );
-  }
-
-  function setWorldlineSending(worldlineId: string, isSending: boolean): void {
-    sendingByWorldline = withWorldlineSending(
-      sendingByWorldline,
-      worldlineId,
-      isSending,
-    );
-  }
-
-  function resetStreamingDrafts(worldlineId?: string): void {
-    streamingStateByWorldline = withoutStreamingState(
-      streamingStateByWorldline,
-      worldlineId,
-    );
-  }
-
-  async function queuePromptAsJob(message: string, worldlineId: string): Promise<void> {
-    try {
-      const contextualMessage = buildContextualMessage(message);
-      const job = await createChatJob({
-        worldlineId,
-        message: contextualMessage,
-        provider,
-        model: model.trim() || undefined,
-        maxIterations: 20,
-      });
-      statusText =
-        job.queue_position && job.queue_position > 1
-          ? `Queued request (${job.queue_position} in line)`
-          : "Queued request";
-      chatJobs.registerQueuedJob(job);
-      prompt = "";
-      closeContextMenus();
-      void chatJobs.poll();
-    } catch (error) {
-      statusText = error instanceof Error ? error.message : "Failed to queue request";
-    }
-  }
-
-  function rollbackOptimisticMessage(worldlineId: string, optimisticId: string | null): void {
-    eventsByWorldline = rollbackOptimisticWorldlineEvent(
-      eventsByWorldline,
-      worldlineId,
-      optimisticId,
-    );
   }
 
   function closeContextMenus(): void {
@@ -377,116 +294,12 @@
     });
   }
 
-  async function hydrateThread(targetThreadId: string, preferredWorldlineId?: string): Promise<void> {
-    isHydratingThread = true;
-    statusText = "Loading thread...";
-
-    try {
-      threadId = targetThreadId;
-      worldlines = [];
-      eventsByWorldline = {};
-      activeWorldlineId = "";
-      selectedArtifactId = null;
-      resetStreamingDrafts();
-      stateTraceByWorldline = {};
-      const session = await fetchChatSession(targetThreadId);
-      worldlines = session.worldlines.map((line) => ({
-        id: line.id,
-        parent_worldline_id: line.parent_worldline_id,
-        forked_from_event_id: line.forked_from_event_id,
-        head_event_id: line.head_event_id,
-        name: line.name,
-        created_at: line.created_at,
-      }));
-      chatJobs.hydrateSnapshot(session.jobs);
-
-      const candidateWorldlineIds = new Set(worldlines.map((line) => line.id));
-      const preferredFromSession =
-        typeof session.preferred_worldline_id === "string"
-          ? session.preferred_worldline_id
-          : null;
-      if (
-        preferredFromSession &&
-        candidateWorldlineIds.has(preferredFromSession)
-      ) {
-        activeWorldlineId = preferredFromSession;
-      } else if (
-        preferredWorldlineId &&
-        candidateWorldlineIds.has(preferredWorldlineId)
-      ) {
-        activeWorldlineId = preferredWorldlineId;
-      } else if (worldlines.length > 0) {
-        activeWorldlineId = worldlines[0].id;
-      }
-
-      if (activeWorldlineId) {
-        persistPreferredWorldline(activeWorldlineId);
-        await loadWorldline(activeWorldlineId);
-        if (activeWorldlineRunningJobs > 0) {
-          statusText = `Background job running (${activeWorldlineRunningJobs})`;
-        } else if (activeWorldlineQueuedJobs > 0) {
-          statusText = `Background jobs queued (${activeWorldlineQueuedJobs})`;
-        } else {
-          statusText = "Ready";
-        }
-        scrollFeedToBottom(true);
-      } else {
-        // No worldline yet - this is expected for new threads
-        // Worldline will be created lazily on first message
-        statusText = "Ready";
-      }
-
-      isReady = true;
-    } catch (error) {
-      statusText = error instanceof Error ? error.message : "Failed to load thread";
-      isReady = false;
-    } finally {
-      isHydratingThread = false;
-    }
-  }
-
-  function setWorldlineEvents(worldlineId: string, events: TimelineEvent[]): void {
-    eventsByWorldline = withWorldlineEvents(eventsByWorldline, worldlineId, events);
-    const persistedTrace = extractPersistedStateTrace(events);
-    if (persistedTrace.length > 0 || !stateTraceByWorldline[worldlineId]) {
-      stateTraceByWorldline = withRuntimeStateTrace(
-        stateTraceByWorldline,
-        worldlineId,
-        persistedTrace,
-      );
-    }
-  }
-
-  function appendEvent(worldlineId: string, event: TimelineEvent): void {
-    eventsByWorldline = withAppendedWorldlineEvent(eventsByWorldline, worldlineId, event);
-    if (event.type === "assistant_message") {
-      const trace = extractPersistedStateTrace([event]);
-      if (trace.length > 0) {
-        stateTraceByWorldline = withRuntimeStateTrace(
-          stateTraceByWorldline,
-          worldlineId,
-          trace,
-        );
-      }
-    }
-  }
-
-  function ensureWorldlineVisible(
-    worldlineId: string,
-    hint?: VisibleWorldlineHint,
-  ): void {
-    worldlines = withVisibleWorldline(worldlines, worldlineId, hint);
-  }
-
   async function initializeSession(): Promise<void> {
     try {
-      statusText = "Creating thread...";
-      resetStreamingDrafts();
-      selectedArtifactId = null;
+      sessionStore.setStatusText("Creating thread...");
       
       // Create thread via API
       const thread = await createThread("AnalyticZ Session");
-      threadId = thread.thread_id;
       
       // Create local thread object
       const newThread = {
@@ -505,36 +318,26 @@
       activeThread.set(newThread);
       activeThread.saveToStorage(newThread);
       
-      // Don't create worldline here - it will be created lazily on first message
-      // Just set up empty state
-      worldlines = [];
-      eventsByWorldline = {};
-      activeWorldlineId = "";
-      stateTraceByWorldline = {};
-      
-      statusText = "Ready";
-      isReady = true;
-      console.log("Session initialized successfully:", { threadId, activeWorldlineId: null });
+      sessionStore.initializeThreadSession(thread.thread_id);
     } catch (error) {
-      statusText = error instanceof Error ? error.message : "Initialization failed";
+      sessionStore.setStatusText(error instanceof Error ? error.message : "Initialization failed");
       console.error("Initialization error:", error);
-      isReady = false;
     }
   }
 
   async function handleWorldlineSelect(
     event: CustomEvent<{ id: string }>,
   ): Promise<void> {
-    await selectWorldline(event.detail.id);
+    await sessionStore.selectWorldline(event.detail.id);
   }
 
   async function branchFromEvent(eventId: string): Promise<void> {
-    await branchWorldlineFromEvent(eventId);
+    await sessionStore.branchFromEvent(eventId);
   }
 
   function handleArtifactSelect(event: CustomEvent<{ artifactId: string }>): void {
     artifactsPanelCollapsed = false;
-    selectedArtifactId = event.detail.artifactId;
+    sessionStore.selectArtifact(event.detail.artifactId);
   }
 
   async function sendPrompt(): Promise<void> {
@@ -543,99 +346,29 @@
       return;
     }
 
-    // Ensure we have a worldline (create lazily if needed)
-    const requestWorldlineId = await ensureWorldlineExists();
-    if (!requestWorldlineId) {
-      statusText = "Error: No active worldline. Please refresh the page.";
-      return;
-    }
-
-    if (uploadedFiles.length > 0) {
-      try {
-        await importUploadedFilesBeforeSend(requestWorldlineId);
-      } catch {
-        return;
-      }
-    }
-
-    const isCurrentWorldlineSending = Boolean(sendingByWorldline[requestWorldlineId]);
-    const hasPendingWorldlineJobs = activeWorldlineQueueDepth > 0;
-
-    if (isCurrentWorldlineSending || hasPendingWorldlineJobs) {
-      await queuePromptAsJob(message, requestWorldlineId);
-      return;
-    }
-
-    prompt = "";
-    closeContextMenus();
-    statusText = "Agent is thinking...";
-    scrollController.setAutoScroll(true);
-    resetStreamingDrafts(requestWorldlineId);
-    selectedArtifactId = null;
-    stateTraceByWorldline = withRuntimeStateTrace(
-      stateTraceByWorldline,
-      requestWorldlineId,
-      [],
-    );
-
-    // Optimistic user message — show immediately in the feed
-    const { id: optimisticId, event: optimisticEvent } = createOptimisticUserMessage(message);
-    const currentEvents = eventsByWorldline[requestWorldlineId] ?? [];
-    setWorldlineEvents(
-      requestWorldlineId,
-      insertOptimisticEvent(currentEvents, optimisticEvent)
-    );
-    scrollFeedToBottom(true);
-
-    const contextualMessage = buildContextualMessage(message);
-    await sendPromptWithStreaming(
-      {
-        worldlineId: requestWorldlineId,
-        message: contextualMessage,
+    try {
+      await sessionStore.sendPrompt({
+        message,
         provider,
         model: model.trim() || undefined,
         maxIterations: 20,
-      },
-      {
-        optimisticId,
-        getActiveWorldlineId: () => activeWorldlineId,
-        getEvents: (worldlineId) => eventsByWorldline[worldlineId] ?? [],
-        setWorldlineEvents,
-        appendEvent,
-        rollbackOptimisticMessage,
-        setWorldlineSending,
-        resetStreamingDrafts,
-        refreshWorldlines,
-        ensureWorldlineVisible,
-        onStatusChange: (status) => {
-          if (activeWorldlineId === requestWorldlineId) {
-            statusText = status;
+        buildContextualMessage,
+        beforeSend: async (worldlineId) => {
+          if (uploadedFiles.length > 0) {
+            await importUploadedFilesBeforeSend(worldlineId);
           }
         },
-        onScroll: () => {
-          if (activeWorldlineId === requestWorldlineId) {
-            scrollFeedToBottom();
-          }
+        onAccepted: () => {
+          prompt = "";
+          closeContextMenus();
         },
-        onTurnCompleted: () => {
-          if ($activeThread) {
-            threads.updateThread($activeThread.id, {
-              messageCount: ($activeThread.messageCount || 0) + 1,
-              lastActivity: new Date().toISOString(),
-            });
-          }
+        onStreamingStart: () => {
+          scrollController.setAutoScroll(true);
         },
-        setStreamingState,
-        getStreamingState: (worldlineId) => streamingStateByWorldline[worldlineId],
-        appendRuntimeStateTransition: (worldlineId, transition) => {
-          stateTraceByWorldline = appendRuntimeStateTransition(
-            stateTraceByWorldline,
-            worldlineId,
-            transition,
-          );
-        },
-      },
-    );
+      });
+    } catch {
+      return;
+    }
   }
 
   function getProviderIcon(provider: Provider) {
@@ -649,13 +382,6 @@
 
   function removeUploadedFile(filename: string) {
     uploadedFiles = removeUploadedFileByName(uploadedFiles, filename);
-  }
-
-  async function runCSVImport(
-    worldlineId: string,
-    file: File,
-  ): Promise<{ table_name: string; row_count: number }> {
-    return csvController.runCSVImport(worldlineId, file);
   }
 
   async function importUploadedFilesBeforeSend(worldlineId: string): Promise<void> {

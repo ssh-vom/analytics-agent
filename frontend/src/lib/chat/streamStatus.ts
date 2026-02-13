@@ -54,8 +54,34 @@ export function statusFromDelta(delta: StreamDeltaPayload): string | null {
     const completed = typeof delta.completed_count === "number" ? delta.completed_count : 0;
     const failed = typeof delta.failed_count === "number" ? delta.failed_count : 0;
     const timedOut = typeof delta.timed_out_count === "number" ? delta.timed_out_count : 0;
+    const doneCount = completed + failed + timedOut;
+
+    if (delta.phase === "finished" && delta.task_status === "failed") {
+      if (delta.failure_code === "subagent_loop_limit") {
+        return "Subagent failed (loop limit reached)...";
+      }
+      return "Subagent failed...";
+    }
+    if (delta.phase === "finished" && delta.task_status === "completed") {
+      if (total > 0) {
+        return `Subagents completed (${doneCount}/${total})...`;
+      }
+      return "Subagents completed...";
+    }
+
+    if (delta.phase === "retrying") {
+      if (total > 0) {
+        return `Retrying subagents (${doneCount}/${total})...`;
+      }
+      return "Retrying subagents...";
+    }
+
+    if (delta.phase === "queued" || delta.task_status === "queued") {
+      return "Queued subagents...";
+    }
+
     if (total > 0) {
-      return `Running subagents (${completed + failed + timedOut}/${total})...`;
+      return `Running subagents (${doneCount}/${total})...`;
     }
     return "Running subagents...";
   }

@@ -72,9 +72,13 @@ class ChatSubagentTests(unittest.TestCase):
         coordinator = WorldlineTurnCoordinator()
 
         async def _run_child_turn(
-            child_worldline_id: str, child_message: str, child_max_iterations: int
+            child_worldline_id: str,
+            child_message: str,
+            child_max_iterations: int,
+            allow_tools: bool = True,
         ):
             _ = child_max_iterations
+            _ = allow_tools
             await asyncio.sleep(0.03)
             return child_worldline_id, [
                 {
@@ -111,11 +115,19 @@ class ChatSubagentTests(unittest.TestCase):
         self.assertEqual(result["completed_count"], 2)
         self.assertEqual(result["failed_count"], 0)
         self.assertEqual(result["timed_out_count"], 0)
+        self.assertEqual(result["loop_limit_failure_count"], 0)
+        self.assertEqual(result["retried_task_count"], 0)
+        self.assertEqual(result["recovered_task_count"], 0)
+        self.assertEqual(result["failure_summary"], {})
         self.assertTrue(result["all_completed"])
         self.assertFalse(result["partial_failure"])
         self.assertEqual(len(result["tasks"]), 2)
         for task in result["tasks"]:
             self.assertEqual(task["status"], "completed")
+            self.assertIsNone(task["failure_code"])
+            self.assertEqual(task["retry_count"], 0)
+            self.assertFalse(task["recovered"])
+            self.assertIn("terminal_reason", task)
             self.assertTrue(str(task["assistant_preview"]).startswith("child complete:"))
             self.assertTrue(str(task["assistant_text"]).startswith("child complete:"))
 
@@ -141,10 +153,14 @@ class ChatSubagentTests(unittest.TestCase):
         coordinator = WorldlineTurnCoordinator()
 
         async def _run_child_turn(
-            child_worldline_id: str, child_message: str, child_max_iterations: int
+            child_worldline_id: str,
+            child_message: str,
+            child_max_iterations: int,
+            allow_tools: bool = True,
         ):
             _ = child_worldline_id
             _ = child_max_iterations
+            _ = allow_tools
             if "broken" in child_message:
                 raise RuntimeError("simulated failure")
             if "slow" in child_message:
@@ -198,10 +214,14 @@ class ChatSubagentTests(unittest.TestCase):
         coordinator = WorldlineTurnCoordinator()
 
         async def _run_child_turn(
-            child_worldline_id: str, child_message: str, child_max_iterations: int
+            child_worldline_id: str,
+            child_message: str,
+            child_max_iterations: int,
+            allow_tools: bool = True,
         ):
             _ = child_worldline_id
             _ = child_max_iterations
+            _ = allow_tools
             return "worldline_ok", [
                 {
                     "type": "assistant_message",
@@ -239,10 +259,14 @@ class ChatSubagentTests(unittest.TestCase):
         coordinator = WorldlineTurnCoordinator()
 
         async def _run_child_turn(
-            child_worldline_id: str, child_message: str, child_max_iterations: int
+            child_worldline_id: str,
+            child_message: str,
+            child_max_iterations: int,
+            allow_tools: bool = True,
         ):
             _ = child_worldline_id
             _ = child_max_iterations
+            _ = allow_tools
             if "cancel" in child_message:
                 raise asyncio.CancelledError()
             return "worldline_ok", [
@@ -287,10 +311,14 @@ class ChatSubagentTests(unittest.TestCase):
         coordinator = WorldlineTurnCoordinator()
 
         async def _run_child_turn(
-            child_worldline_id: str, child_message: str, child_max_iterations: int
+            child_worldline_id: str,
+            child_message: str,
+            child_max_iterations: int,
+            allow_tools: bool = True,
         ):
             _ = child_worldline_id
             _ = child_max_iterations
+            _ = allow_tools
             return "worldline_ok", [
                 {
                     "type": "assistant_message",
@@ -325,6 +353,184 @@ class ChatSubagentTests(unittest.TestCase):
         self.assertEqual(result["max_parallel_subagents"], 4)
         self.assertEqual(len(result["tasks"]), 10)
 
+    def test_spawn_subagents_blocking_retries_loop_limit_and_recovers(self) -> None:
+        thread_id = self._create_thread()
+        source_worldline_id = self._create_worldline(thread_id)
+        anchor_event_id = self._append_anchor_event(source_worldline_id)
+        coordinator = WorldlineTurnCoordinator()
+        attempts: list[tuple[str, bool]] = []
+        progress_updates: list[dict[str, object]] = []
+
+        async def _run_child_turn(
+            child_worldline_id: str,
+            child_message: str,
+            child_max_iterations: int,
+            allow_tools: bool = True,
+        ):
+            _ = child_message
+            _ = child_max_iterations
+            attempts.append((child_worldline_id, allow_tools))
+            if allow_tools:
+                return child_worldline_id, [
+                    {
+                        "type": "assistant_message",
+                        "payload": {
+                            "text": "I reached the tool-loop limit before producing a final answer.",
+                            "state_trace": [
+                                {
+                                    "from_state": "planning",
+                                    "to_state": "presenting",
+                                    "reason": "max_iterations_reached",
+                                }
+                            ],
+                        },
+                    }
+                ]
+            return child_worldline_id, [
+                {
+                    "type": "assistant_message",
+                    "payload": {
+                        "text": "Recovered with synthesis-only pass.",
+                        "state_trace": [
+                            {
+                                "from_state": "planning",
+                                "to_state": "presenting",
+                                "reason": "assistant_text_ready",
+                            }
+                        ],
+                    },
+                }
+            ]
+
+        async def _on_progress(payload: dict[str, object]) -> None:
+            progress_updates.append(payload)
+
+        result = self._run(
+            spawn_subagents_blocking(
+                source_worldline_id=source_worldline_id,
+                from_event_id=anchor_event_id,
+                tasks=[{"message": "loop then recover", "label": "recover"}],
+                goal=None,
+                tool_call_id="call_spawn_loop_recover",
+                worldline_service=WorldlineService(),
+                llm_client=_FakeLlmClient(text=""),
+                turn_coordinator=coordinator,
+                run_child_turn=_run_child_turn,
+                on_progress=_on_progress,
+                timeout_s=3,
+                max_iterations=4,
+            )
+        )
+
+        self.assertEqual(attempts[0][0], attempts[1][0])
+        self.assertEqual([allow_tools for _, allow_tools in attempts], [True, False])
+        self.assertEqual(result["completed_count"], 1)
+        self.assertEqual(result["failed_count"], 0)
+        self.assertEqual(result["timed_out_count"], 0)
+        self.assertEqual(result["loop_limit_failure_count"], 0)
+        self.assertEqual(result["retried_task_count"], 1)
+        self.assertEqual(result["recovered_task_count"], 1)
+        self.assertEqual(result["failure_summary"], {})
+
+        task = result["tasks"][0]
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["retry_count"], 1)
+        self.assertTrue(task["recovered"])
+        self.assertIsNone(task["failure_code"])
+        self.assertEqual(task["terminal_reason"], "assistant_text_ready")
+
+        retrying_updates = [
+            update for update in progress_updates if update.get("phase") == "retrying"
+        ]
+        self.assertEqual(len(retrying_updates), 1)
+        self.assertEqual(retrying_updates[0]["retry_count"], 1)
+
+    def test_spawn_subagents_blocking_marks_unrecovered_loop_limit_as_failed(self) -> None:
+        thread_id = self._create_thread()
+        source_worldline_id = self._create_worldline(thread_id)
+        anchor_event_id = self._append_anchor_event(source_worldline_id)
+        coordinator = WorldlineTurnCoordinator()
+        attempts: list[tuple[str, bool]] = []
+        progress_updates: list[dict[str, object]] = []
+
+        async def _run_child_turn(
+            child_worldline_id: str,
+            child_message: str,
+            child_max_iterations: int,
+            allow_tools: bool = True,
+        ):
+            _ = child_message
+            _ = child_max_iterations
+            attempts.append((child_worldline_id, allow_tools))
+            if allow_tools:
+                return child_worldline_id, [
+                    {
+                        "type": "assistant_message",
+                        "payload": {
+                            "text": "No final answer generated.",
+                            "state_trace": [
+                                {
+                                    "from_state": "planning",
+                                    "to_state": "presenting",
+                                    "reason": "max_iterations_reached",
+                                }
+                            ],
+                        },
+                    }
+                ]
+            return child_worldline_id, [
+                {
+                    "type": "assistant_message",
+                    "payload": {
+                        "text": "I reached the tool-loop limit before producing a final answer.",
+                    },
+                }
+            ]
+
+        async def _on_progress(payload: dict[str, object]) -> None:
+            progress_updates.append(payload)
+
+        result = self._run(
+            spawn_subagents_blocking(
+                source_worldline_id=source_worldline_id,
+                from_event_id=anchor_event_id,
+                tasks=[{"message": "loop forever", "label": "loop"}],
+                goal=None,
+                tool_call_id="call_spawn_loop_fail",
+                worldline_service=WorldlineService(),
+                llm_client=_FakeLlmClient(text=""),
+                turn_coordinator=coordinator,
+                run_child_turn=_run_child_turn,
+                on_progress=_on_progress,
+                timeout_s=3,
+                max_iterations=4,
+            )
+        )
+
+        self.assertEqual(attempts[0][0], attempts[1][0])
+        self.assertEqual([allow_tools for _, allow_tools in attempts], [True, False])
+        self.assertEqual(result["completed_count"], 0)
+        self.assertEqual(result["failed_count"], 1)
+        self.assertEqual(result["timed_out_count"], 0)
+        self.assertTrue(result["partial_failure"])
+        self.assertEqual(result["loop_limit_failure_count"], 1)
+        self.assertEqual(result["retried_task_count"], 1)
+        self.assertEqual(result["recovered_task_count"], 0)
+        self.assertEqual(result["failure_summary"], {"subagent_loop_limit": 1})
+
+        task = result["tasks"][0]
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(task["failure_code"], "subagent_loop_limit")
+        self.assertEqual(task["retry_count"], 1)
+        self.assertFalse(task["recovered"])
+        self.assertEqual(task["terminal_reason"], "max_iterations_reached")
+
+        retrying_updates = [
+            update for update in progress_updates if update.get("phase") == "retrying"
+        ]
+        self.assertEqual(len(retrying_updates), 1)
+        self.assertEqual(retrying_updates[0]["retry_count"], 1)
+
     def test_spawn_subagents_blocking_emits_progress_updates(self) -> None:
         thread_id = self._create_thread()
         source_worldline_id = self._create_worldline(thread_id)
@@ -333,11 +539,15 @@ class ChatSubagentTests(unittest.TestCase):
         progress_updates: list[dict] = []
 
         async def _run_child_turn(
-            child_worldline_id: str, child_message: str, child_max_iterations: int
+            child_worldline_id: str,
+            child_message: str,
+            child_max_iterations: int,
+            allow_tools: bool = True,
         ):
             _ = child_worldline_id
             _ = child_message
             _ = child_max_iterations
+            _ = allow_tools
             await asyncio.sleep(0.02)
             return "worldline_ok", [
                 {

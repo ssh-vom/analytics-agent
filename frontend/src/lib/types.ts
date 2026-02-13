@@ -120,7 +120,11 @@ export interface StreamDeltaPayload {
   task_index?: number;
   task_label?: string;
   task_status?: "queued" | "running" | "completed" | "failed" | "timeout";
-  phase?: "queued" | "started" | "finished";
+  phase?: "queued" | "started" | "retrying" | "finished";
+  retry_count?: number;
+  failure_code?: string | null;
+  recovered?: boolean;
+  terminal_reason?: string | null;
   group_seq?: number;
   ordering_key?: string;
   task_count?: number;

@@ -26,6 +26,9 @@ _MAX_PARALLEL_SUBAGENTS = 10
 _MAX_RETRIES_PER_SUBAGENT = 3
 _RETRY_DELAY_BASE_SECONDS = 1.0
 _RETRY_DELAY_MAX_SECONDS = 8.0
+_LOOP_LIMIT_TEXT_MARKER = "i reached the tool-loop limit"
+_LOOP_LIMIT_REASON = "max_iterations_reached"
+_LOOP_LIMIT_FAILURE_CODE = "subagent_loop_limit"
 _RETRYABLE_ERROR_SUBSTRINGS = (
     "429",  # Rate limit
     "503",  # Service unavailable
@@ -124,6 +127,59 @@ def _assistant_text_from_events(events: list[dict[str, Any]]) -> str | None:
         if isinstance(text, str) and text.strip():
             return text
     return None
+
+
+def _assistant_payload_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for event in reversed(events):
+        if event.get("type") != "assistant_message":
+            continue
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _state_trace_reasons(payload: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    trace = payload.get("state_trace")
+    if not isinstance(trace, list):
+        return reasons
+    for step in trace:
+        if not isinstance(step, dict):
+            continue
+        reason = step.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            reasons.append(reason.strip())
+    return reasons
+
+
+def _terminal_reason_from_events(events: list[dict[str, Any]]) -> str | None:
+    payload = _assistant_payload_from_events(events)
+    if payload is None:
+        return None
+    reasons = _state_trace_reasons(payload)
+    if _LOOP_LIMIT_REASON in reasons:
+        return _LOOP_LIMIT_REASON
+    if reasons:
+        return reasons[-1]
+    text = payload.get("text")
+    if isinstance(text, str) and _LOOP_LIMIT_TEXT_MARKER in text.lower():
+        return _LOOP_LIMIT_REASON
+    return None
+
+
+def _is_loop_limit_outcome(
+    events: list[dict[str, Any]],
+    *,
+    assistant_text: str | None = None,
+) -> bool:
+    text = assistant_text if assistant_text is not None else _assistant_text_from_events(events)
+    if isinstance(text, str) and _LOOP_LIMIT_TEXT_MARKER in text.lower():
+        return True
+    payload = _assistant_payload_from_events(events)
+    if payload is None:
+        return False
+    return _LOOP_LIMIT_REASON in _state_trace_reasons(payload)
 
 
 def _fallback_task_split(goal: str, *, max_tasks: int) -> list[dict[str, str]]:
@@ -273,7 +329,7 @@ async def spawn_subagents_blocking(
     llm_client: LlmClient,
     turn_coordinator: WorldlineTurnCoordinator,
     run_child_turn: Callable[
-        [str, str, int], Awaitable[tuple[str, list[dict[str, Any]]]]
+        [str, str, int, bool], Awaitable[tuple[str, list[dict[str, Any]]]]
     ],
     on_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     on_prepared: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
@@ -430,6 +486,7 @@ async def spawn_subagents_blocking(
         assistant_preview: str | None = None,
         error: str | None = None,
         queue_reason: str | None = None,
+        retry_count: int = 0,
         force: bool = False,
     ) -> None:
         nonlocal progress_sequence
@@ -464,15 +521,20 @@ async def spawn_subagents_blocking(
                 "assistant_preview": assistant_preview or "",
                 "error": error,
                 "queue_reason": queue_reason,
+                "retry_count": retry_count,
                 **counters,
             }
         )
 
-    def _timeout_result(run: dict[str, Any]) -> dict[str, Any]:
+    def _timeout_result(run: dict[str, Any], *, retry_count: int = 0) -> dict[str, Any]:
         return {
             **run,
             "status": "timeout",
             "error": (f"timed out after waiting {normalized_timeout_s}s for child run"),
+            "failure_code": "subagent_timeout",
+            "retry_count": retry_count,
+            "recovered": False,
+            "terminal_reason": "timeout",
             "result_worldline_id": run["child_worldline_id"],
             "assistant_preview": "",
             "assistant_text": None,
@@ -483,6 +545,34 @@ async def spawn_subagents_blocking(
         nonlocal capacity_wait_total_ms
         child_wid = str(run["child_worldline_id"])
         task_label = str(run.get("task_label", ""))
+        retry_count = 0
+
+        async def _run_attempt(
+            *,
+            allow_tools: bool,
+        ) -> dict[str, Any]:
+            async def _factory() -> tuple[str, list[dict[str, Any]]]:
+                return await run_child_turn(
+                    child_wid,
+                    str(run["task_message"]),
+                    normalized_max_iterations,
+                    allow_tools,
+                )
+
+            active_worldline_id, child_events = await _run_with_retry(
+                lambda: turn_coordinator.run(child_wid, _factory),
+            )
+            assistant_text = _assistant_text_from_events(child_events)
+            return {
+                "result_worldline_id": active_worldline_id,
+                "assistant_text": assistant_text,
+                "assistant_preview": (assistant_text or "")[:220],
+                "terminal_reason": _terminal_reason_from_events(child_events),
+                "is_loop_limit": _is_loop_limit_outcome(
+                    child_events, assistant_text=assistant_text
+                ),
+                "events_count": len(child_events),
+            }
 
         try:
             async with semaphore:
@@ -494,6 +584,7 @@ async def spawn_subagents_blocking(
                             status="running",
                             phase="started",
                             queue_reason=lease.queue_reason,
+                            retry_count=retry_count,
                         )
                         logger.info(
                             "subagent _run_one starting: label=%s worldline=%s (parallel limit: %d)",
@@ -502,40 +593,99 @@ async def spawn_subagents_blocking(
                             normalized_max_parallel,
                         )
 
-                        async def _factory() -> tuple[str, list[dict[str, Any]]]:
-                            return await run_child_turn(
-                                child_wid,
-                                str(run["task_message"]),
-                                normalized_max_iterations,
-                            )
-
                         try:
-                            # Use retry logic for transient errors
-                            active_worldline_id, child_events = await _run_with_retry(
-                                lambda: turn_coordinator.run(child_wid, _factory),
-                            )
-                            assistant_text = _assistant_text_from_events(child_events)
-                            assistant_preview = (assistant_text or "")[:220]
+                            initial_attempt = await _run_attempt(allow_tools=True)
+                            final_attempt = initial_attempt
+                            recovered = False
+
+                            if initial_attempt["is_loop_limit"]:
+                                retry_count = 1
+                                await _emit_progress(
+                                    run=run,
+                                    status="running",
+                                    phase="retrying",
+                                    result_worldline_id=initial_attempt[
+                                        "result_worldline_id"
+                                    ],
+                                    assistant_preview=initial_attempt[
+                                        "assistant_preview"
+                                    ],
+                                    retry_count=retry_count,
+                                    force=True,
+                                )
+                                final_attempt = await _run_attempt(allow_tools=False)
+                                recovered = not bool(final_attempt["is_loop_limit"])
+
+                            if not recovered and retry_count == 1:
+                                error_str = (
+                                    "subagent reached tool-loop limit after synthesis-only retry"
+                                )
+                                await _emit_progress(
+                                    run=run,
+                                    status="failed",
+                                    phase="finished",
+                                    result_worldline_id=final_attempt[
+                                        "result_worldline_id"
+                                    ],
+                                    assistant_preview=final_attempt[
+                                        "assistant_preview"
+                                    ],
+                                    error=error_str,
+                                    retry_count=retry_count,
+                                )
+                                logger.warning(
+                                    "subagent _run_one loop-limit terminal: label=%s worldline=%s",
+                                    task_label,
+                                    final_attempt["result_worldline_id"],
+                                )
+                                return {
+                                    **run,
+                                    "status": "failed",
+                                    "error": error_str,
+                                    "failure_code": _LOOP_LIMIT_FAILURE_CODE,
+                                    "retry_count": retry_count,
+                                    "recovered": False,
+                                    "terminal_reason": _LOOP_LIMIT_REASON,
+                                    "result_worldline_id": final_attempt[
+                                        "result_worldline_id"
+                                    ],
+                                    "assistant_preview": final_attempt[
+                                        "assistant_preview"
+                                    ],
+                                    "assistant_text": final_attempt["assistant_text"],
+                                }
+
                             await _emit_progress(
                                 run=run,
                                 status="completed",
                                 phase="finished",
-                                result_worldline_id=active_worldline_id,
-                                assistant_preview=assistant_preview,
+                                result_worldline_id=final_attempt["result_worldline_id"],
+                                assistant_preview=final_attempt["assistant_preview"],
+                                retry_count=retry_count,
                             )
                             logger.info(
-                                "subagent _run_one completed: label=%s worldline=%s events=%d",
+                                "subagent _run_one completed: label=%s worldline=%s events=%d retry_count=%d recovered=%s",
                                 task_label,
-                                active_worldline_id,
-                                len(child_events),
+                                final_attempt["result_worldline_id"],
+                                int(final_attempt["events_count"]),
+                                retry_count,
+                                recovered,
                             )
                             return {
                                 **run,
                                 "status": "completed",
                                 "error": None,
-                                "result_worldline_id": active_worldline_id,
-                                "assistant_preview": assistant_preview,
-                                "assistant_text": assistant_text,
+                                "failure_code": None,
+                                "retry_count": retry_count,
+                                "recovered": recovered,
+                                "terminal_reason": final_attempt["terminal_reason"],
+                                "result_worldline_id": final_attempt[
+                                    "result_worldline_id"
+                                ],
+                                "assistant_preview": final_attempt[
+                                    "assistant_preview"
+                                ],
+                                "assistant_text": final_attempt["assistant_text"],
                             }
                         except asyncio.CancelledError:
                             logger.warning(
@@ -543,7 +693,9 @@ async def spawn_subagents_blocking(
                                 task_label,
                                 child_wid,
                             )
-                            timeout_result = _timeout_result(run)
+                            timeout_result = _timeout_result(
+                                run, retry_count=retry_count
+                            )
                             await _emit_progress(
                                 run=run,
                                 status="timeout",
@@ -552,6 +704,7 @@ async def spawn_subagents_blocking(
                                     timeout_result.get("result_worldline_id") or child_wid
                                 ),
                                 error=str(timeout_result.get("error") or ""),
+                                retry_count=retry_count,
                             )
                             return timeout_result
                         except Exception as exc:
@@ -569,11 +722,16 @@ async def spawn_subagents_blocking(
                                 phase="finished",
                                 result_worldline_id=run["child_worldline_id"],
                                 error=error_str[:4000],
+                                retry_count=retry_count,
                             )
                             return {
                                 **run,
                                 "status": "failed",
                                 "error": error_str[:4000],
+                                "failure_code": "subagent_error",
+                                "retry_count": retry_count,
+                                "recovered": False,
+                                "terminal_reason": "error",
                                 "result_worldline_id": run["child_worldline_id"],
                                 "assistant_preview": "",
                                 "assistant_text": None,
@@ -586,24 +744,30 @@ async def spawn_subagents_blocking(
                         result_worldline_id=run["child_worldline_id"],
                         error=str(exc),
                         queue_reason="capacity_limit_reached",
+                        retry_count=retry_count,
                     )
                     return {
                         **run,
                         "status": "failed",
                         "error": str(exc),
                         "error_code": "subagent_capacity_limit_reached",
+                        "failure_code": "subagent_capacity_limit_reached",
+                        "retry_count": retry_count,
+                        "recovered": False,
+                        "terminal_reason": "capacity_limit_reached",
                         "result_worldline_id": run["child_worldline_id"],
                         "assistant_preview": "",
                         "assistant_text": None,
                     }
         except asyncio.CancelledError:
-            timeout_result = _timeout_result(run)
+            timeout_result = _timeout_result(run, retry_count=retry_count)
             await _emit_progress(
                 run=run,
                 status="timeout",
                 phase="finished",
                 result_worldline_id=str(timeout_result.get("result_worldline_id") or child_wid),
                 error=str(timeout_result.get("error") or ""),
+                retry_count=retry_count,
             )
             return timeout_result
 
@@ -639,19 +803,24 @@ async def spawn_subagents_blocking(
         try:
             result = task.result()
         except asyncio.CancelledError:
-            result = _timeout_result(run)
+            result = _timeout_result(run, retry_count=0)
             await _emit_progress(
                 run=run,
                 status="timeout",
                 phase="finished",
                 result_worldline_id=str(result.get("result_worldline_id") or ""),
                 error=str(result.get("error") or ""),
+                retry_count=int(result.get("retry_count") or 0),
             )
         except Exception as exc:
             result = {
                 **run,
                 "status": "failed",
                 "error": str(exc)[:4000],
+                "failure_code": "subagent_error",
+                "retry_count": 0,
+                "recovered": False,
+                "terminal_reason": "error",
                 "result_worldline_id": run["child_worldline_id"],
                 "assistant_preview": "",
                 "assistant_text": None,
@@ -662,6 +831,7 @@ async def spawn_subagents_blocking(
                 phase="finished",
                 result_worldline_id=str(result.get("result_worldline_id") or ""),
                 error=str(result.get("error") or ""),
+                retry_count=int(result.get("retry_count") or 0),
             )
         if result["status"] == "completed":
             completed_count += 1
@@ -670,6 +840,23 @@ async def spawn_subagents_blocking(
         else:
             failed_count += 1
         task_results.append(result)
+
+    sorted_tasks = sorted(task_results, key=lambda item: int(item.get("task_index", 0)))
+    loop_limit_failure_count = sum(
+        1
+        for task in sorted_tasks
+        if str(task.get("failure_code") or "") == _LOOP_LIMIT_FAILURE_CODE
+    )
+    retried_task_count = sum(
+        1 for task in sorted_tasks if int(task.get("retry_count") or 0) > 0
+    )
+    recovered_task_count = sum(1 for task in sorted_tasks if bool(task.get("recovered")))
+    failure_summary: dict[str, int] = {}
+    for task in sorted_tasks:
+        failure_code = str(task.get("failure_code") or "").strip()
+        if not failure_code:
+            continue
+        failure_summary[failure_code] = failure_summary.get(failure_code, 0) + 1
 
     partial_failure = failed_count > 0 or timed_out_count > 0
     return {
@@ -688,7 +875,11 @@ async def spawn_subagents_blocking(
         "completed_count": completed_count,
         "failed_count": failed_count,
         "timed_out_count": timed_out_count,
+        "loop_limit_failure_count": loop_limit_failure_count,
+        "retried_task_count": retried_task_count,
+        "recovered_task_count": recovered_task_count,
+        "failure_summary": failure_summary,
         "all_completed": not partial_failure,
         "partial_failure": partial_failure,
-        "tasks": sorted(task_results, key=lambda item: int(item.get("task_index", 0))),
+        "tasks": sorted_tasks,
     }

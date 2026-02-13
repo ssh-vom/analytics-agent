@@ -8,6 +8,8 @@
   export let onBranch: () => void = () => {};
   const dispatch = createEventDispatcher<{ openworldline: { worldlineId: string } }>();
 
+  type LifecycleStatus = "queued" | "running" | "retrying" | "failed" | "completed";
+
   type TaskRow = {
     task_index: number;
     task_label: string;
@@ -16,6 +18,10 @@
     result_worldline_id: string;
     assistant_preview: string;
     error: string;
+    retry_count: number;
+    failure_code: string;
+    recovered: boolean;
+    terminal_reason: string;
   };
 
   function asTaskRows(payload: Record<string, unknown> | null): TaskRow[] {
@@ -35,7 +41,62 @@
         assistant_preview:
           typeof entry.assistant_preview === "string" ? entry.assistant_preview : "",
         error: typeof entry.error === "string" ? entry.error : "",
+        retry_count:
+          typeof entry.retry_count === "number" && Number.isFinite(entry.retry_count)
+            ? Math.max(0, Math.floor(entry.retry_count))
+            : 0,
+        failure_code:
+          typeof entry.failure_code === "string" ? entry.failure_code : "",
+        recovered: entry.recovered === true,
+        terminal_reason:
+          typeof entry.terminal_reason === "string" ? entry.terminal_reason : "",
       }));
+  }
+
+  function readFailureSummaryCount(
+    payload: Record<string, unknown> | null,
+    key: string,
+  ): number {
+    if (!payload) return 0;
+    const summary = payload.failure_summary;
+    if (!summary || typeof summary !== "object") {
+      return 0;
+    }
+    const value = (summary as Record<string, unknown>)[key];
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return 0;
+    }
+    return Math.max(0, Math.floor(value));
+  }
+
+  function taskLifecycleStatus(task: TaskRow): LifecycleStatus {
+    if (task.status === "completed") {
+      return "completed";
+    }
+    if (task.status === "running") {
+      return task.retry_count > 0 ? "retrying" : "running";
+    }
+    if (task.status === "queued") {
+      return "queued";
+    }
+    return "failed";
+  }
+
+  function taskOutcomeSummary(task: TaskRow): string {
+    const parts: string[] = [];
+    if (task.retry_count > 0) {
+      parts.push(`retries=${task.retry_count}`);
+    }
+    if (task.recovered) {
+      parts.push("recovered=true");
+    }
+    if (task.terminal_reason) {
+      parts.push(`terminal=${task.terminal_reason}`);
+    }
+    if (task.failure_code) {
+      parts.push(`failure=${task.failure_code}`);
+    }
+    return parts.join(" | ");
   }
 
   function plannedTasksFromCall(
@@ -147,23 +208,62 @@
   $: isStreamingResult = resultPayload?._streaming === true;
   $: hasResult = Boolean(resultEvent);
   $: hasTerminalResult = hasResult && !isStreamingResult;
+  $: phase = typeof resultPayload?.phase === "string" ? resultPayload.phase : "";
+  $: retryCount =
+    typeof resultPayload?.retry_count === "number" && Number.isFinite(resultPayload.retry_count)
+      ? Math.max(0, Math.floor(resultPayload.retry_count))
+      : 0;
+  $: failureCode = typeof resultPayload?.failure_code === "string" ? resultPayload.failure_code : "";
+  $: queuedCount =
+    typeof resultPayload?.queued_count === "number" ? resultPayload.queued_count : 0;
+  $: runningCount =
+    typeof resultPayload?.running_count === "number" ? resultPayload.running_count : 0;
+  $: loopLimitFailureCount =
+    typeof resultPayload?.loop_limit_failure_count === "number"
+      ? resultPayload.loop_limit_failure_count
+      : readFailureSummaryCount(resultPayload, "subagent_loop_limit");
+  $: retriedTaskCount =
+    typeof resultPayload?.retried_task_count === "number"
+      ? resultPayload.retried_task_count
+      : tasks.filter((task) => task.retry_count > 0).length;
+  $: recoveredTaskCount =
+    typeof resultPayload?.recovered_task_count === "number"
+      ? resultPayload.recovered_task_count
+      : tasks.filter((task) => task.recovered).length;
   $: resultError =
     typeof resultPayload?.error === "string" ? resultPayload.error.trim() : "";
   $: resultErrorType =
     typeof resultPayload?.error_type === "string" ? resultPayload.error_type.trim() : "";
-  $: terminalStatus = !hasResult
-    ? "running"
+  $: hasRetryingTask = tasks.some((task) => taskLifecycleStatus(task) === "retrying");
+  $: isRetrying = phase === "retrying" || retryCount > 0 || hasRetryingTask;
+  $: isQueued =
+    phase === "queued" ||
+    (queuedCount > 0 &&
+      runningCount === 0 &&
+      completedCount === 0 &&
+      failedCount === 0 &&
+      timedOutCount === 0);
+  $: lifecycleStatus: LifecycleStatus = !hasResult
+    ? "queued"
     : isStreamingResult
-      ? "running"
+      ? isRetrying
+        ? "retrying"
+        : isQueued
+          ? "queued"
+          : "running"
       : resultErrorType === "CancelledError"
-        ? "interrupted"
+        ? "failed"
         : resultError
           ? "failed"
-          : timedOutCount > 0
-            ? "timed_out"
+          : timedOutCount > 0 || failureCode
+            ? "failed"
             : partialFailure
               ? "failed"
               : "completed";
+  $: statusLabel =
+    lifecycleStatus === "failed" && loopLimitFailureCount > 0
+      ? "failed (loop-limit)"
+      : lifecycleStatus;
 
   function openWorldline(worldlineId: string): void {
     if (!worldlineId) {
@@ -182,14 +282,14 @@
 
   <div class="summary">
     <span class="chip">tasks {taskCount}</span>
-    <span class="chip" data-status={terminalStatus}>{terminalStatus}</span>
+    <span class="chip" data-status={lifecycleStatus}>{statusLabel}</span>
     {#if requestedTaskCount !== acceptedTaskCount}
       <span class="chip">accepted {acceptedTaskCount}/{requestedTaskCount}</span>
     {/if}
     {#if truncatedTaskCount > 0}
       <span class="chip warn">truncated {truncatedTaskCount}</span>
     {/if}
-    {#if hasResult}
+    {#if completedCount > 0}
       <span class="chip success">completed {completedCount}</span>
     {/if}
     {#if failedCount > 0}
@@ -197,6 +297,15 @@
     {/if}
     {#if timedOutCount > 0}
       <span class="chip warn">timeout {timedOutCount}</span>
+    {/if}
+    {#if retriedTaskCount > 0}
+      <span class="chip warn">retried {retriedTaskCount}</span>
+    {/if}
+    {#if recoveredTaskCount > 0}
+      <span class="chip success">recovered {recoveredTaskCount}</span>
+    {/if}
+    {#if loopLimitFailureCount > 0}
+      <span class="chip error">loop-limit {loopLimitFailureCount}</span>
     {/if}
   </div>
 
@@ -224,10 +333,12 @@
   {#if tasks.length > 0}
     <div class="task-list">
       {#each tasks as task}
+        {@const taskStatus = taskLifecycleStatus(task)}
+        {@const outcomeSummary = taskOutcomeSummary(task)}
         <div class="task-row">
           <div class="task-head">
             <span class="task-label">{task.task_label || "task"}</span>
-            <span class="task-status" data-status={task.status}>{task.status}</span>
+            <span class="task-status" data-status={taskStatus}>{taskStatus}</span>
           </div>
           {#if task.child_worldline_id}
             <div class="task-meta">
@@ -251,6 +362,11 @@
               >
                 <code>{task.result_worldline_id}</code>
               </button>
+            </div>
+          {/if}
+          {#if outcomeSummary}
+            <div class="task-meta">
+              <code>{outcomeSummary}</code>
             </div>
           {/if}
           {#if task.assistant_preview}
@@ -334,9 +450,17 @@
     border-color: var(--warning-muted);
     color: var(--warning);
   }
+  .chip[data-status="queued"] {
+    border-color: var(--warning-muted);
+    color: var(--warning);
+  }
   .chip[data-status="running"] {
     border-color: var(--border-medium);
     color: var(--text-muted);
+  }
+  .chip[data-status="retrying"] {
+    border-color: var(--warning-muted);
+    color: var(--warning);
   }
   .chip[data-status="completed"] {
     border-color: var(--accent-green-muted);
@@ -345,14 +469,6 @@
   .chip[data-status="failed"] {
     border-color: var(--danger-muted);
     color: var(--danger);
-  }
-  .chip[data-status="timed_out"] {
-    border-color: var(--warning-muted);
-    color: var(--warning);
-  }
-  .chip[data-status="interrupted"] {
-    border-color: var(--warning-muted);
-    color: var(--warning);
   }
   .meta-line {
     font-size: 11px;
@@ -389,6 +505,18 @@
     color: var(--text-dim);
     text-transform: lowercase;
   }
+  .task-status[data-status="queued"] {
+    color: var(--warning);
+    border-color: var(--warning-muted);
+  }
+  .task-status[data-status="running"] {
+    color: var(--text-secondary);
+    border-color: var(--border-medium);
+  }
+  .task-status[data-status="retrying"] {
+    color: var(--warning);
+    border-color: var(--warning-muted);
+  }
   .task-status[data-status="completed"] {
     color: var(--accent-green);
     border-color: var(--accent-green-muted);
@@ -396,10 +524,6 @@
   .task-status[data-status="failed"] {
     color: var(--danger);
     border-color: var(--danger-muted);
-  }
-  .task-status[data-status="timeout"] {
-    color: var(--warning);
-    border-color: var(--warning-muted);
   }
   .task-meta {
     margin-top: 4px;
