@@ -5,17 +5,17 @@ import type {
 } from "$lib/types";
 
 export interface StreamCallbacks {
-  onEvent: (frame: SseEventFrame) => void;
-  onDelta?: (frame: SseDeltaFrame) => void;
-  onDone?: (frame: SseDoneFrame) => void;
-  onError?: (error: string) => void;
+  onEvent: (frame: SseEventFrame) => void | Promise<void>;
+  onDelta?: (frame: SseDeltaFrame) => void | Promise<void>;
+  onDone?: (frame: SseDoneFrame) => void | Promise<void>;
+  onError?: (error: string) => void | Promise<void>;
 }
 
 export function createStreamProcessor(callbacks: StreamCallbacks) {
   let buffer = "";
   const decoder = new TextDecoder();
 
-  const processFrame = (frame: string): void => {
+  const processFrame = async (frame: string): Promise<void> => {
     if (!frame.trim()) {
       return;
     }
@@ -40,19 +40,19 @@ export function createStreamProcessor(callbacks: StreamCallbacks) {
     try {
       parsed = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
     } catch {
-      callbacks.onError?.("Failed to parse stream frame");
+      await callbacks.onError?.("Failed to parse stream frame");
       return;
     }
     if (eventName === "event") {
-      callbacks.onEvent(parsed as unknown as SseEventFrame);
+      await callbacks.onEvent(parsed as unknown as SseEventFrame);
       return;
     }
     if (eventName === "delta") {
-      callbacks.onDelta?.(parsed as unknown as SseDeltaFrame);
+      await callbacks.onDelta?.(parsed as unknown as SseDeltaFrame);
       return;
     }
     if (eventName === "done") {
-      callbacks.onDone?.(parsed as unknown as SseDoneFrame);
+      await callbacks.onDone?.(parsed as unknown as SseDoneFrame);
       return;
     }
     if (eventName === "error") {
@@ -60,23 +60,23 @@ export function createStreamProcessor(callbacks: StreamCallbacks) {
         typeof parsed.error === "string"
           ? parsed.error
           : "Unknown stream error";
-      callbacks.onError?.(error);
+      await callbacks.onError?.(error);
     }
   };
 
-  const processChunk = (chunk: Uint8Array): void => {
+  const processChunk = async (chunk: Uint8Array): Promise<void> => {
     buffer += decoder.decode(chunk, { stream: true });
     const frames = buffer.split("\n\n");
     buffer = frames.pop() ?? "";
 
     for (const frame of frames) {
-      processFrame(frame);
+      await processFrame(frame);
     }
   };
 
-  const flush = (): void => {
+  const flush = async (): Promise<void> => {
     if (buffer.trim()) {
-      processFrame(buffer);
+      await processFrame(buffer);
       buffer = "";
     }
   };

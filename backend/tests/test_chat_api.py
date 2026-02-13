@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import time
 
 import api.chat as chat_api
+import chat.engine as chat_engine
 import meta
 import api.threads as threads
 import api.worldlines as worldlines
@@ -102,6 +103,19 @@ class ChatApiTests(unittest.TestCase):
             if data_lines:
                 payloads.append(json.loads("\n".join(data_lines)))
         return payloads
+
+    async def _consume_stream_first_n(self, response: StreamingResponse, n: int) -> str:
+        chunks: list[str] = []
+        count = 0
+        async for chunk in response.body_iterator:
+            if isinstance(chunk, bytes):
+                chunks.append(chunk.decode("utf-8"))
+            else:
+                chunks.append(str(chunk))
+            count += 1
+            if count >= n:
+                break
+        return "".join(chunks)
 
     def _create_thread(self, title: str = "chat-test-thread") -> str:
         response = self._run(
@@ -1094,6 +1108,482 @@ class ChatApiTests(unittest.TestCase):
             "Now continuing in the branched worldline.",
         )
 
+    def test_chat_spawn_subagents_tool_blocks_and_returns_aggregate(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_seed_spawn",
+                    worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "seed"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_spawn", worldline_id),
+            )
+            conn.commit()
+
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_spawn_tool",
+                            name="spawn_subagents",
+                            arguments={
+                                "from_event_id": "event_seed_spawn",
+                                "tasks": [
+                                    {"message": "task one", "label": "one"},
+                                    {"message": "task two", "label": "two"},
+                                ],
+                                "timeout_s": 1,
+                                "max_iterations": 4,
+                                "max_subagents": 2,
+                                "max_parallel_subagents": 1,
+                            },
+                        )
+                    ],
+                ),
+                LlmResponse(text="Aggregated child runs.", tool_calls=[]),
+            ]
+        )
+        fake_spawn_result = {
+            "fanout_group_id": "fanout_1",
+            "task_count": 2,
+            "requested_task_count": 2,
+            "accepted_task_count": 2,
+            "truncated_task_count": 0,
+            "max_subagents": 2,
+            "max_parallel_subagents": 1,
+            "completed_count": 2,
+            "failed_count": 0,
+            "timed_out_count": 0,
+            "all_completed": True,
+            "partial_failure": False,
+            "tasks": [
+                {"task_label": "one", "status": "completed"},
+                {"task_label": "two", "status": "completed"},
+            ],
+        }
+
+        class _DummyScheduler:
+            async def start(self) -> None:
+                return None
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch(
+                "chat.engine.spawn_subagents_blocking",
+                AsyncMock(return_value=fake_spawn_result),
+            ) as mocked_spawn,
+            patch(
+                "services.chat_runtime.get_chat_job_scheduler",
+                return_value=_DummyScheduler(),
+            ),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="fan out",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(fake_client.calls, 2)
+        self.assertEqual(mocked_spawn.await_count, 1)
+        self.assertEqual(
+            [event["type"] for event in result["events"]],
+            [
+                "user_message",
+                "tool_call_subagents",
+                "tool_result_subagents",
+                "assistant_message",
+            ],
+        )
+        call_event = result["events"][1]
+        self.assertEqual(call_event["payload"]["max_subagents"], 2)
+        self.assertEqual(call_event["payload"]["max_parallel_subagents"], 1)
+        result_event = result["events"][2]
+        self.assertEqual(result_event["payload"]["requested_task_count"], 2)
+        self.assertEqual(result_event["payload"]["accepted_task_count"], 2)
+        self.assertEqual(result_event["payload"]["truncated_task_count"], 0)
+        self.assertFalse(result_event["payload"]["partial_failure"])
+        spawn_kwargs = mocked_spawn.await_args.kwargs
+        self.assertEqual(spawn_kwargs["max_subagents"], 2)
+        self.assertEqual(spawn_kwargs["max_parallel_subagents"], 1)
+        self.assertEqual(result["events"][-1]["payload"]["text"], "Aggregated child runs.")
+
+    def test_chat_spawn_subagents_persists_error_result_event(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_seed_spawn_error",
+                    worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "seed"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_spawn_error", worldline_id),
+            )
+            conn.commit()
+
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_spawn_error",
+                            name="spawn_subagents",
+                            arguments={
+                                "from_event_id": "event_seed_spawn_error",
+                                "goal": "parallelize this",
+                                "timeout_s": 1,
+                                "max_iterations": 4,
+                            },
+                        )
+                    ],
+                ),
+                LlmResponse(text="Recovered after subagent failure.", tool_calls=[]),
+            ]
+        )
+
+        class _DummyCoordinator:
+            async def run(self, worldline_id, factory):
+                _ = worldline_id
+                return await factory()
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch(
+                "chat.engine.spawn_subagents_blocking",
+                AsyncMock(side_effect=RuntimeError("simulated fanout failure")),
+            ),
+            patch(
+                "services.chat_runtime.get_turn_coordinator",
+                return_value=_DummyCoordinator(),
+            ),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="fan out and recover",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(
+            [event["type"] for event in result["events"]],
+            [
+                "user_message",
+                "tool_call_subagents",
+                "tool_result_subagents",
+                "assistant_message",
+            ],
+        )
+        tool_result = next(
+            event for event in result["events"] if event["type"] == "tool_result_subagents"
+        )
+        self.assertIn("error", tool_result["payload"])
+
+    def test_chat_spawn_subagents_invalid_from_event_falls_back_to_head(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_seed_spawn_fallback",
+                    worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "seed"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_spawn_fallback", worldline_id),
+            )
+            conn.commit()
+
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_spawn_fallback",
+                            name="spawn_subagents",
+                            arguments={
+                                "from_event_id": "event_missing_abc",
+                                "goal": "analyze everything",
+                                "timeout_s": 1,
+                                "max_iterations": 4,
+                            },
+                        )
+                    ],
+                ),
+                LlmResponse(text="Fallback worked.", tool_calls=[]),
+            ]
+        )
+        fake_spawn_result = {
+            "fanout_group_id": "fanout_fallback",
+            "task_count": 1,
+            "completed_count": 1,
+            "failed_count": 0,
+            "timed_out_count": 0,
+            "all_completed": True,
+            "tasks": [{"task_label": "one", "status": "completed"}],
+        }
+
+        class _DummyCoordinator:
+            async def run(self, worldline_id, factory):
+                _ = worldline_id
+                return await factory()
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch(
+                "chat.engine.spawn_subagents_blocking",
+                AsyncMock(return_value=fake_spawn_result),
+            ),
+            patch(
+                "services.chat_runtime.get_turn_coordinator",
+                return_value=_DummyCoordinator(),
+            ),
+        ):
+            result = self._run(
+                chat_api.chat(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="fan out with stale event",
+                        provider="openai",
+                    )
+                )
+            )
+
+        self.assertEqual(result["events"][-1]["type"], "assistant_message")
+        self.assertEqual(result["events"][-1]["payload"]["text"], "Fallback worked.")
+
+        sub_call = next(
+            event for event in result["events"] if event["type"] == "tool_call_subagents"
+        )
+        user_event = next(
+            event for event in result["events"] if event["type"] == "user_message"
+        )
+        self.assertEqual(sub_call["payload"]["requested_from_event_id"], "event_missing_abc")
+        self.assertEqual(sub_call["payload"]["from_event_id"], user_event["id"])
+        self.assertEqual(
+            sub_call["payload"]["from_event_resolution"],
+            "requested_from_event_id_not_found_fell_back_to_head",
+        )
+
+    def test_spawn_subagents_tool_is_blocked_in_subagent_child_turn(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_seed_nested_guard",
+                    worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "seed"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_nested_guard", worldline_id),
+            )
+            conn.commit()
+
+        engine = chat_engine.ChatEngine(
+            llm_client=FakeLlmClient(
+                responses=[LlmResponse(text="unused", tool_calls=[])]
+            )
+        )
+        tool_call = ToolCall(
+            id="call_nested",
+            name="spawn_subagents",
+            arguments={
+                "goal": "child should not fan out further",
+                "from_event_id": "event_seed_nested_guard",
+            },
+        )
+
+        result, switched_worldline = self._run(
+            engine._execute_tool_call(
+                worldline_id=worldline_id,
+                tool_call=tool_call,
+                carried_user_message="nested fanout",
+                allowed_external_aliases=None,
+                on_event=None,
+                on_delta=None,
+                subagent_depth=1,
+            )
+        )
+
+        self.assertIsNone(switched_worldline)
+        self.assertEqual(
+            result.get("error_code"),
+            "spawn_subagents_nested_not_allowed",
+        )
+
+    def test_chat_stream_emits_subagent_progress_deltas(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_seed_progress",
+                    worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "seed"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_progress", worldline_id),
+            )
+            conn.commit()
+
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_spawn_progress",
+                            name="spawn_subagents",
+                            arguments={
+                                "from_event_id": "event_seed_progress",
+                                "tasks": [
+                                    {"message": "task one", "label": "one"},
+                                    {"message": "task two", "label": "two"},
+                                ],
+                            },
+                        )
+                    ],
+                ),
+                LlmResponse(text="done", tool_calls=[]),
+            ]
+        )
+
+        async def fake_spawn(**kwargs):
+            on_progress = kwargs.get("on_progress")
+            if on_progress is not None:
+                await on_progress(
+                    {
+                        "fanout_group_id": "fanout_1",
+                        "parent_tool_call_id": "call_spawn_progress",
+                        "task_index": 0,
+                        "task_label": "one",
+                        "task_status": "running",
+                        "task_count": 2,
+                        "queued_count": 1,
+                        "running_count": 1,
+                        "completed_count": 0,
+                        "failed_count": 0,
+                        "timed_out_count": 0,
+                    }
+                )
+                await on_progress(
+                    {
+                        "fanout_group_id": "fanout_1",
+                        "parent_tool_call_id": "call_spawn_progress",
+                        "task_index": 0,
+                        "task_label": "one",
+                        "task_status": "completed",
+                        "task_count": 2,
+                        "queued_count": 1,
+                        "running_count": 0,
+                        "completed_count": 1,
+                        "failed_count": 0,
+                        "timed_out_count": 0,
+                    }
+                )
+            return {
+                "fanout_group_id": "fanout_1",
+                "task_count": 2,
+                "requested_task_count": 2,
+                "accepted_task_count": 2,
+                "truncated_task_count": 0,
+                "max_subagents": 8,
+                "max_parallel_subagents": 3,
+                "completed_count": 2,
+                "failed_count": 0,
+                "timed_out_count": 0,
+                "all_completed": True,
+                "partial_failure": False,
+                "tasks": [
+                    {"task_label": "one", "status": "completed"},
+                    {"task_label": "two", "status": "completed"},
+                ],
+            }
+
+        with (
+            patch.object(chat_api, "build_llm_client", return_value=fake_client),
+            patch(
+                "chat.engine.spawn_subagents_blocking",
+                AsyncMock(side_effect=fake_spawn),
+            ),
+        ):
+            response = self._run(
+                chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="fan out with progress",
+                        provider="openai",
+                    )
+                )
+            )
+            raw_stream = self._run(self._consume_stream(response))
+            payloads = self._extract_sse_payloads(raw_stream)
+
+        progress_deltas = [
+            payload["delta"]
+            for payload in payloads
+            if "delta" in payload and payload["delta"]["type"] == "subagent_progress"
+        ]
+        self.assertGreaterEqual(len(progress_deltas), 2)
+        self.assertEqual(progress_deltas[0]["task_status"], "running")
+        self.assertEqual(progress_deltas[-1]["task_status"], "completed")
+        self.assertEqual(progress_deltas[-1]["completed_count"], 1)
+
     # ---- SSE streaming endpoint tests (updated for real streaming) ----------
 
     def test_chat_stream_returns_sse_event_frames(self) -> None:
@@ -1731,6 +2221,94 @@ class ChatApiTests(unittest.TestCase):
         # The final payload should be done
         self.assertTrue(payloads[-1]["done"])
 
+    def test_chat_stream_disconnect_does_not_cancel_subagent_terminal_result(self) -> None:
+        thread_id = self._create_thread()
+        worldline_id = self._create_worldline(thread_id)
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (id, worldline_id, parent_event_id, type, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_seed_stream_disconnect",
+                    worldline_id,
+                    None,
+                    "assistant_message",
+                    json.dumps({"text": "seed"}),
+                ),
+            )
+            conn.execute(
+                "UPDATE worldlines SET head_event_id = ? WHERE id = ?",
+                ("event_seed_stream_disconnect", worldline_id),
+            )
+            conn.commit()
+
+        fake_client = FakeLlmClient(
+            responses=[
+                LlmResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_stream_disconnect_spawn",
+                            name="spawn_subagents",
+                            arguments={
+                                "from_event_id": "event_seed_stream_disconnect",
+                                "goal": "parallelize analysis",
+                                "timeout_s": 2,
+                                "max_iterations": 4,
+                            },
+                        )
+                    ],
+                ),
+                LlmResponse(text="finalized", tool_calls=[]),
+            ]
+        )
+
+        async def delayed_spawn(**kwargs):
+            await asyncio.sleep(0.2)
+            return {
+                "fanout_group_id": "fanout_stream_disconnect",
+                "task_count": 1,
+                "completed_count": 1,
+                "failed_count": 0,
+                "timed_out_count": 0,
+                "all_completed": True,
+                "tasks": [{"task_label": "one", "status": "completed"}],
+            }
+
+        async def scenario() -> str:
+            with (
+                patch.object(chat_api, "build_llm_client", return_value=fake_client),
+                patch(
+                    "chat.engine.should_use_semantic_lane",
+                    AsyncMock(return_value=(False, None)),
+                ),
+                patch(
+                    "chat.engine.spawn_subagents_blocking",
+                    AsyncMock(side_effect=delayed_spawn),
+                ),
+            ):
+                response = await chat_api.chat_stream(
+                    chat_api.ChatRequest(
+                        worldline_id=worldline_id,
+                        message="run fanout then disconnect",
+                        provider="openai",
+                    )
+                )
+                _ = await self._consume_stream_first_n(response, 1)
+                await asyncio.sleep(1.2)
+                events_payload = await worldlines.get_worldline_events(
+                    worldline_id,
+                    limit=100,
+                )
+                event_types = [event["type"] for event in events_payload["events"]]
+                return ",".join(event_types)
+
+        event_types_serialized = self._run(scenario())
+        self.assertIn("tool_call_subagents", event_types_serialized)
+        self.assertIn("tool_result_subagents", event_types_serialized)
+
     # ---- job queue endpoint tests --------------------------------------------
 
     def test_create_chat_job_processes_in_background(self) -> None:
@@ -1855,6 +2433,43 @@ class ChatApiTests(unittest.TestCase):
 
         user_messages = self._run(scenario())
         self.assertEqual(user_messages[-2:], ["first message", "second message"])
+
+    def test_chat_session_prefers_running_worldline_and_keeps_creation_order(self) -> None:
+        thread_id = self._create_thread()
+        main_worldline_id = self._create_worldline(thread_id, "main")
+        branch_worldline_id = self._create_worldline(thread_id, "branch-a")
+
+        with meta.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_turn_jobs (
+                    id,
+                    thread_id,
+                    worldline_id,
+                    request_json,
+                    status,
+                    started_at
+                )
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    meta.new_id("job"),
+                    thread_id,
+                    branch_worldline_id,
+                    json.dumps({"message": "running"}, ensure_ascii=True),
+                    "running",
+                ),
+            )
+            conn.commit()
+
+        session = self._run(chat_api.get_chat_session(thread_id))
+        worldline_ids = [row["id"] for row in session["worldlines"]]
+
+        self.assertEqual(worldline_ids, [main_worldline_id, branch_worldline_id])
+        self.assertEqual(session["preferred_worldline_id"], branch_worldline_id)
+        self.assertTrue(
+            any(job["worldline_id"] == branch_worldline_id for job in session["jobs"])
+        )
 
 
 if __name__ == "__main__":

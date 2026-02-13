@@ -211,6 +211,25 @@ class DockerSandboxRunner:
             check=False,
         )
 
+    def _kill_python_processes_sync(self, sandbox_id: str) -> None:
+        """Kill any running Python processes inside the sandbox container."""
+        if shutil.which("docker") is None:
+            return
+        # Try to kill Python processes gracefully first, then forcefully
+        subprocess.run(
+            ["docker", "exec", sandbox_id, "pkill", "-f", "python"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        # Give it a moment, then force kill if still running
+        subprocess.run(
+            ["docker", "exec", sandbox_id, "pkill", "-9", "-f", "python"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def _execute_sync(
         self,
         sandbox_id: str,
@@ -256,6 +275,8 @@ class DockerSandboxRunner:
                     check=False,
                 )
             except subprocess.TimeoutExpired as exc:
+                # Kill any lingering Python processes in the container to prevent ghosts
+                self._kill_python_processes_sync(sandbox_id)
                 return {
                     "stdout": _to_text(exc.stdout),
                     "stderr": _to_text(exc.stderr),

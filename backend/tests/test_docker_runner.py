@@ -162,9 +162,22 @@ class DockerRunnerTests(unittest.TestCase):
             output="partial out",
             stderr="partial err",
         )
+        call_count = 0
+
+        def mock_run(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # First call is the main execution (times out)
+            # Subsequent calls are cleanup (pkill commands) - return success
+            if call_count == 1:
+                raise timeout_exc
+            return subprocess.CompletedProcess(
+                args=args[0] if args else [], returncode=0, stdout="", stderr=""
+            )
+
         with (
             patch("sandbox.docker_runner.shutil.which", return_value="/usr/bin/docker"),
-            patch("sandbox.docker_runner.subprocess.run", side_effect=timeout_exc),
+            patch("sandbox.docker_runner.subprocess.run", side_effect=mock_run),
         ):
             out = self._run(
                 runner.execute(
@@ -178,6 +191,8 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertIn("timed out", out["error"])
         self.assertEqual(out["stdout"], "partial out")
         self.assertEqual(out["stderr"], "partial err")
+        # Verify cleanup was attempted (main exec + 2 pkill calls)
+        self.assertGreaterEqual(call_count, 3)
 
     def test_execute_without_docker_cli_returns_error(self) -> None:
         runner = DockerSandboxRunner()

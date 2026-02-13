@@ -1,5 +1,6 @@
 import type {
   ArtifactPreviewResponse,
+  ChatSessionResponse,
   ChatJob,
   ChatJobsResponse,
   EventsResponse,
@@ -51,10 +52,10 @@ interface StreamOptions {
   provider?: string;
   model?: string;
   maxIterations?: number;
-  onEvent: (frame: SseEventFrame) => void;
-  onDelta?: (frame: SseDeltaFrame) => void;
-  onDone?: (frame: SseDoneFrame) => void;
-  onError?: (error: string) => void;
+  onEvent: (frame: SseEventFrame) => void | Promise<void>;
+  onDelta?: (frame: SseDeltaFrame) => void | Promise<void>;
+  onDone?: (frame: SseDoneFrame) => void | Promise<void>;
+  onError?: (error: string) => void | Promise<void>;
 }
 
 export async function createThread(title?: string): Promise<ThreadCreateResponse> {
@@ -116,6 +117,19 @@ export async function fetchThreadWorldlineSummaries(
     `/api/threads/${threadId}/worldline-summaries`,
     undefined,
     "Failed to fetch worldline summaries",
+  );
+}
+
+export async function fetchChatSession(
+  threadId: string,
+): Promise<ChatSessionResponse> {
+  const url = new URL("/api/chat/session", window.location.origin);
+  url.searchParams.set("thread_id", threadId);
+  return requestJson<ChatSessionResponse>(
+    url.toString(),
+    undefined,
+    "Failed to fetch chat session",
+    true,
   );
 }
 
@@ -486,10 +500,10 @@ export async function streamChatTurn(options: StreamOptions): Promise<void> {
     if (done) {
       break;
     }
-    processor.processChunk(value);
+    await processor.processChunk(value);
   }
 
-  processor.flush();
+  await processor.flush();
 }
 
 // Semantic overrides types

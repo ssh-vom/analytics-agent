@@ -1,6 +1,10 @@
 import unittest
 
-from chat.tooling import normalize_tool_arguments
+from chat.tooling import (
+    looks_like_complete_tool_args,
+    normalize_tool_arguments,
+    tool_definitions,
+)
 
 
 class ChatToolingNormalizationTests(unittest.TestCase):
@@ -67,6 +71,42 @@ class ChatToolingNormalizationTests(unittest.TestCase):
 
         self.assertEqual(normalized["sql"], "SELECT 2 AS y")
         self.assertEqual(normalized["limit"], 100)
+
+    def test_normalizes_spawn_subagents_limits_and_defaults(self) -> None:
+        normalized = normalize_tool_arguments(
+            "spawn_subagents",
+            {
+                "goal": "analyze",
+                "max_subagents": "75",
+                "max_parallel_subagents": "0",
+                "timeout_s": "9999",
+                "max_iterations": "-1",
+            },
+        )
+
+        self.assertEqual(normalized["goal"], "analyze")
+        self.assertEqual(normalized["max_subagents"], 50)
+        self.assertEqual(normalized["max_parallel_subagents"], 1)
+        self.assertEqual(normalized["timeout_s"], 1800)
+        self.assertEqual(normalized["max_iterations"], 1)
+
+    def test_spawn_subagents_tool_can_be_excluded_from_tool_definitions(self) -> None:
+        with_spawn = [tool.name for tool in tool_definitions(include_python=True)]
+        without_spawn = [
+            tool.name
+            for tool in tool_definitions(
+                include_python=True,
+                include_spawn_subagents=False,
+            )
+        ]
+
+        self.assertIn("spawn_subagents", with_spawn)
+        self.assertNotIn("spawn_subagents", without_spawn)
+
+    def test_goal_only_spawn_payload_is_detected_as_complete(self) -> None:
+        self.assertTrue(
+            looks_like_complete_tool_args('{"goal":"investigate churn by cohort"}')
+        )
 
 
 if __name__ == "__main__":

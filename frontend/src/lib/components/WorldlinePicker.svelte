@@ -41,14 +41,8 @@
   }
 
   function sortWorldlines(lines: WorldlineItem[]): WorldlineItem[] {
-    return [...lines].sort((a, b) => {
-      const timeA = new Date(a.created_at).getTime();
-      const timeB = new Date(b.created_at).getTime();
-      if (timeA !== timeB) {
-        return timeA - timeB;
-      }
-      return (a.name || a.id).localeCompare(b.name || b.id);
-    });
+    // Preserve backend order (row insertion order) for deterministic branch rendering.
+    return [...lines];
   }
 
   function buildTreeRows(lines: WorldlineItem[]): TreeRow[] {

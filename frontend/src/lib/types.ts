@@ -6,6 +6,8 @@ export type EventType =
   | "tool_result_sql"
   | "tool_call_python"
   | "tool_result_python"
+  | "tool_call_subagents"
+  | "tool_result_subagents"
   | "time_travel"
   | "worldline_created";
 
@@ -75,6 +77,13 @@ export interface WorldlineSummaryResponse {
   next_cursor: string | null;
 }
 
+export interface ChatSessionResponse {
+  thread: ThreadListItem;
+  worldlines: WorldlineSummaryItem[];
+  jobs: ChatJob[];
+  preferred_worldline_id: string | null;
+}
+
 export interface EventsResponse {
   events: TimelineEvent[];
   next_cursor: string | null;
@@ -90,6 +99,8 @@ export type StreamDeltaType =
   | "assistant_text"
   | "tool_call_sql"
   | "tool_call_python"
+  | "tool_call_subagents"
+  | "subagent_progress"
   | "state_transition";
 
 export interface StreamDeltaPayload {
@@ -102,6 +113,28 @@ export interface StreamDeltaPayload {
   error?: string;
   from_state?: string | null;
   to_state?: string;
+  fanout_group_id?: string;
+  parent_tool_call_id?: string;
+  source_worldline_id?: string;
+  from_event_id?: string;
+  task_index?: number;
+  task_label?: string;
+  task_status?: "queued" | "running" | "completed" | "failed" | "timeout";
+  phase?: "queued" | "started" | "finished";
+  group_seq?: number;
+  ordering_key?: string;
+  task_count?: number;
+  max_subagents?: number;
+  max_parallel_subagents?: number;
+  queued_count?: number;
+  running_count?: number;
+  completed_count?: number;
+  failed_count?: number;
+  timed_out_count?: number;
+  child_worldline_id?: string;
+  result_worldline_id?: string;
+  assistant_preview?: string;
+  queue_reason?: string | null;
 }
 
 export interface SseDeltaFrame {
@@ -127,6 +160,10 @@ export interface ChatJob {
   id: string;
   thread_id: string;
   worldline_id: string;
+  parent_job_id?: string | null;
+  fanout_group_id?: string | null;
+  task_label?: string | null;
+  parent_tool_call_id?: string | null;
   status: ChatJobStatus;
   error: string | null;
   request: {

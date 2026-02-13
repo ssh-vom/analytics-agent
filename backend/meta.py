@@ -79,6 +79,10 @@ SCHEMA_STATEMENTS = (
         thread_id TEXT NOT NULL,
         worldline_id TEXT NOT NULL,
         request_json TEXT NOT NULL,
+        parent_job_id TEXT NULL,
+        fanout_group_id TEXT NULL,
+        task_label TEXT NULL,
+        parent_tool_call_id TEXT NULL,
         status TEXT NOT NULL,
         error TEXT NULL,
         result_worldline_id TEXT NULL,
@@ -116,9 +120,11 @@ def new_id(prefix: str) -> str:
 @contextmanager
 def get_conn() -> Iterator[sqlite3.Connection]:
     DB_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
 
     try:
         yield conn
@@ -130,7 +136,28 @@ def init_meta_db() -> None:
     with get_conn() as conn:
         for statement in SCHEMA_STATEMENTS:
             conn.execute(statement)
+        _ensure_chat_turn_jobs_columns(conn)
         conn.commit()
+
+
+def _ensure_chat_turn_jobs_columns(conn: sqlite3.Connection) -> None:
+    """Best-effort additive migration for job metadata columns."""
+    existing = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(chat_turn_jobs)").fetchall()
+    }
+    column_defs = {
+        "parent_job_id": "TEXT NULL",
+        "fanout_group_id": "TEXT NULL",
+        "task_label": "TEXT NULL",
+        "parent_tool_call_id": "TEXT NULL",
+    }
+    for column_name, column_type in column_defs.items():
+        if column_name in existing:
+            continue
+        conn.execute(
+            f"ALTER TABLE chat_turn_jobs ADD COLUMN {column_name} {column_type}"
+        )
 
 
 def event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

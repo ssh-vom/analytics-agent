@@ -85,7 +85,7 @@ async def get_thread_worldlines(
             SELECT id, parent_worldline_id, forked_from_event_id, head_event_id, name, created_at
             FROM worldlines
             WHERE thread_id = ?
-            ORDER BY created_at ASC
+            ORDER BY rowid ASC
             """,
             (thread_id,),
         ).fetchall()
@@ -192,7 +192,7 @@ async def get_thread_worldline_summaries(
             LEFT JOIN event_stats es ON es.worldline_id = w.id
             LEFT JOIN job_stats js ON js.worldline_id = w.id
             WHERE w.thread_id = ?
-            ORDER BY datetime(w.created_at) ASC, w.id ASC
+            ORDER BY w.rowid ASC
             """,
             (thread_id,),
         ).fetchall()

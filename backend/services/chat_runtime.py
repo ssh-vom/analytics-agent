@@ -6,16 +6,18 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
 from chat import build_llm_client
-from chat.engine import ChatEngine
 from chat.jobs import (
     ChatJobScheduler,
     WorldlineTurnCoordinator,
 )
+
+if TYPE_CHECKING:
+    from chat.engine import ChatEngine
 
 
 def _build_chat_engine_from_params(
@@ -27,6 +29,8 @@ def _build_chat_engine_from_params(
         llm_client = build_llm_client(provider=provider, model=model)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    from chat.engine import ChatEngine
 
     return ChatEngine(
         llm_client=llm_client,

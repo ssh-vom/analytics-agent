@@ -21,6 +21,37 @@ This document captures the current worldline behavior after the phase 2-8 refact
 - Snapshot replay has a deterministic fallback path when a direct snapshot is unavailable.
 - This prevents accidental inclusion of post-fork source changes.
 
+## Subagent fan-out (blocking)
+
+- Tool: `spawn_subagents`
+- The parent chat turn can fan out many child tasks by branching worldlines from one fork event.
+- In the primary UX path, each task runs directly as a child turn on a distinct child worldline (not background jobs).
+- The parent turn blocks until children complete (or timeout), then receives one aggregated tool result with:
+  - per-task status (`completed` / `failed` / `timeout`)
+  - child/result worldline IDs
+  - assistant preview and latest assistant text (when available)
+  - aggregate counters (`completed_count`, `failed_count`, `timed_out_count`)
+
+### Tool arguments
+
+- `tasks` (required): array of task objects, each with:
+- `goal` (recommended): high-level objective; backend splits into parallel tasks automatically.
+- `tasks` (optional override): array of task objects, each with:
+  - `message` (required string)
+  - `label` (optional string)
+  - `branch_name` (optional string)
+- `from_event_id` (optional): explicit fork boundary; defaults to current worldline head
+- `timeout_s` (optional): global blocking wait timeout for fan-in
+- `max_iterations` (optional): max turn iterations per child run
+
+### Event traceability
+
+Fan-out is persisted directly in the parent worldline event chain:
+- `tool_call_subagents`
+- `tool_result_subagents`
+
+These events make fan-out/fan-in visible in timeline rendering and allow deterministic replay/audit.
+
 ## Worldline summaries for UI
 
 - Endpoint: `GET /api/threads/{thread_id}/worldline-summaries`

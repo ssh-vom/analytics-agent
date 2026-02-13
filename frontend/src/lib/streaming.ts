@@ -1,6 +1,5 @@
 import type {
   StreamDeltaPayload,
-  StreamDeltaType,
   TimelineEvent,
 } from "$lib/types";
 import { sanitizeCodeArtifacts } from "$lib/codeSanitizer";
@@ -12,13 +11,37 @@ export type DisplayItem =
   | {
       kind: "streaming_tool";
       callId: string;
-      type: "sql" | "python";
+      type: "sql" | "python" | "subagents";
       code: string;
       rawArgs: string;
       createdAt: string;
       skipped?: boolean;
       skipReason?: string;
+      subagentProgress?: SubagentProgressSnapshot;
     };
+
+export interface SubagentProgressTask {
+  task_index: number;
+  task_label: string;
+  status: "queued" | "running" | "completed" | "failed" | "timeout";
+  child_worldline_id: string;
+  result_worldline_id: string;
+  assistant_preview: string;
+  error: string;
+}
+
+export interface SubagentProgressSnapshot {
+  task_count: number;
+  max_subagents?: number;
+  max_parallel_subagents?: number;
+  queued_count?: number;
+  running_count?: number;
+  completed_count?: number;
+  failed_count?: number;
+  timed_out_count?: number;
+  partial_failure?: boolean;
+  tasks: SubagentProgressTask[];
+}
 
 export interface StreamingState {
   text: string;
@@ -26,19 +49,21 @@ export interface StreamingState {
   toolCalls: Map<
     string,
     {
-      type: "sql" | "python";
+      type: "sql" | "python" | "subagents";
       code: string;
       rawArgs: string;
       createdAt: string;
       skipped?: boolean;
       skipReason?: string;
+      subagentProgress?: SubagentProgressSnapshot;
     }
   >;
 }
 
-const FALLBACK_DRAFT_ID: Record<"sql" | "python", string> = {
+const FALLBACK_DRAFT_ID: Record<"sql" | "python" | "subagents", string> = {
   sql: "sql-draft",
   python: "python-draft",
+  subagents: "subagents-draft",
 };
 
 export function createStreamingState(): StreamingState {
@@ -51,7 +76,7 @@ export function createStreamingState(): StreamingState {
 
 function mostRecentDraftIdByKind(
   toolCalls: StreamingState["toolCalls"],
-  kind: "sql" | "python"
+  kind: "sql" | "python" | "subagents"
 ): string | null {
   const calls = [...toolCalls.entries()].filter(([, v]) => v.type === kind);
   if (calls.length === 0) {
@@ -66,7 +91,7 @@ function mostRecentDraftIdByKind(
 
 function resolveDeltaDraftId(
   state: StreamingState,
-  kind: "sql" | "python",
+  kind: "sql" | "python" | "subagents",
   callId: string | undefined
 ): string {
   const normalized = (callId ?? "").trim();
@@ -85,24 +110,9 @@ function resolveDeltaDraftId(
   return fallbackId;
 }
 
-function findAliasDraftIdForCall(
-  state: StreamingState,
-  kind: "sql" | "python",
-  canonicalCallId: string
-): string | null {
-  if (state.toolCalls.has(canonicalCallId)) {
-    return canonicalCallId;
-  }
-  const fallbackId = FALLBACK_DRAFT_ID[kind];
-  if (state.toolCalls.has(fallbackId)) {
-    return fallbackId;
-  }
-  return null;
-}
-
 function resolveDeleteDraftId(
   state: StreamingState,
-  kind: "sql" | "python",
+  kind: "sql" | "python" | "subagents",
   callIdFromEvent: unknown
 ): string | null {
   if (typeof callIdFromEvent === "string" && callIdFromEvent.trim()) {
@@ -115,13 +125,165 @@ function resolveDeleteDraftId(
   return mostRecentDraftIdByKind(state.toolCalls, kind);
 }
 
-function deltaTypeToKind(type: StreamDeltaType): "sql" | "python" | null {
-  if (type === "tool_call_sql") return "sql";
-  if (type === "tool_call_python") return "python";
-  return null;
+function normalizeSubagentStatus(
+  status: unknown
+): "queued" | "running" | "completed" | "failed" | "timeout" {
+  if (
+    status === "queued" ||
+    status === "running" ||
+    status === "completed" ||
+    status === "failed" ||
+    status === "timeout"
+  ) {
+    return status;
+  }
+  return "queued";
 }
 
-function extractCodeFromArgs(rawArgs: string, kind: "sql" | "python"): string {
+function mergeSubagentProgress(
+  previous: SubagentProgressSnapshot | undefined,
+  delta: StreamDeltaPayload
+): SubagentProgressSnapshot {
+  const previousTasks = previous?.tasks ?? [];
+  const tasksByIndex = new Map<number, SubagentProgressTask>();
+  for (const task of previousTasks) {
+    tasksByIndex.set(task.task_index, task);
+  }
+
+  const taskIndex =
+    typeof delta.task_index === "number" && Number.isFinite(delta.task_index)
+      ? Math.max(0, Math.floor(delta.task_index))
+      : null;
+  if (taskIndex !== null) {
+    const prior = tasksByIndex.get(taskIndex);
+    tasksByIndex.set(taskIndex, {
+      task_index: taskIndex,
+      task_label:
+        typeof delta.task_label === "string" && delta.task_label.trim()
+          ? delta.task_label
+          : prior?.task_label ?? `task-${taskIndex + 1}`,
+      status: normalizeSubagentStatus(delta.task_status ?? prior?.status),
+      child_worldline_id:
+        typeof delta.child_worldline_id === "string"
+          ? delta.child_worldline_id
+          : prior?.child_worldline_id ?? "",
+      result_worldline_id:
+        typeof delta.result_worldline_id === "string"
+          ? delta.result_worldline_id
+          : prior?.result_worldline_id ?? "",
+      assistant_preview:
+        typeof delta.assistant_preview === "string"
+          ? delta.assistant_preview
+          : prior?.assistant_preview ?? "",
+      error:
+        typeof delta.error === "string" ? delta.error : prior?.error ?? "",
+    });
+  }
+
+  const tasks = [...tasksByIndex.values()].sort(
+    (a, b) => a.task_index - b.task_index
+  );
+  const taskCountFromDelta =
+    typeof delta.task_count === "number" ? delta.task_count : undefined;
+  const task_count = Math.max(
+    taskCountFromDelta ?? previous?.task_count ?? 0,
+    tasks.length
+  );
+  const completed_count =
+    typeof delta.completed_count === "number"
+      ? delta.completed_count
+      : previous?.completed_count;
+  const failed_count =
+    typeof delta.failed_count === "number"
+      ? delta.failed_count
+      : previous?.failed_count;
+  const timed_out_count =
+    typeof delta.timed_out_count === "number"
+      ? delta.timed_out_count
+      : previous?.timed_out_count;
+  const partial_failure =
+    (failed_count ?? 0) > 0 || (timed_out_count ?? 0) > 0;
+
+  return {
+    task_count,
+    max_subagents:
+      typeof delta.max_subagents === "number"
+        ? delta.max_subagents
+        : previous?.max_subagents,
+    max_parallel_subagents:
+      typeof delta.max_parallel_subagents === "number"
+        ? delta.max_parallel_subagents
+        : previous?.max_parallel_subagents,
+    queued_count:
+      typeof delta.queued_count === "number"
+        ? delta.queued_count
+        : previous?.queued_count,
+    running_count:
+      typeof delta.running_count === "number"
+        ? delta.running_count
+        : previous?.running_count,
+    completed_count,
+    failed_count,
+    timed_out_count,
+    partial_failure,
+    tasks,
+  };
+}
+
+function summarizeSubagentProgressCode(
+  rawArgs: string,
+  progress: SubagentProgressSnapshot
+): string {
+  const done =
+    (progress.completed_count ?? 0) +
+    (progress.failed_count ?? 0) +
+    (progress.timed_out_count ?? 0);
+  if (progress.task_count > 0) {
+    return `tasks: ${done}/${progress.task_count} complete`;
+  }
+  return extractCodeFromArgs(rawArgs, "subagents");
+}
+
+function resolveSubagentProgressCallId(
+  state: StreamingState,
+  delta: StreamDeltaPayload
+): string {
+  const parentCallId =
+    typeof delta.parent_tool_call_id === "string"
+      ? delta.parent_tool_call_id
+      : undefined;
+  const deltaCallId =
+    typeof delta.call_id === "string" ? delta.call_id : undefined;
+  return resolveDeltaDraftId(
+    state,
+    "subagents",
+    deltaCallId ?? parentCallId
+  );
+}
+
+function extractCodeFromArgs(
+  rawArgs: string,
+  kind: "sql" | "python" | "subagents"
+): string {
+  if (kind === "subagents") {
+    try {
+      const parsed = JSON.parse(rawArgs);
+      if (typeof parsed === "object" && parsed !== null) {
+        const maybeTasks = (parsed as { tasks?: unknown }).tasks;
+        const taskCount = Array.isArray(maybeTasks) ? maybeTasks.length : 0;
+        if (taskCount > 0) {
+          return `tasks: ${taskCount}`;
+        }
+        const goal = (parsed as { goal?: unknown }).goal;
+        if (typeof goal === "string" && goal.trim()) {
+          return `goal: ${goal.trim()}`;
+        }
+      }
+    } catch {
+      // Keep a stable placeholder while args stream in.
+    }
+    return "preparing subagent fan-out";
+  }
   const codeField = kind === "sql" ? "sql" : "code";
   try {
     const parsed = JSON.parse(rawArgs);
@@ -178,77 +340,24 @@ export function applyDelta(
     return state;
   }
 
-  const kind = deltaTypeToKind(delta.type);
-  if (!kind) return state;
-
-  if (delta.skipped) {
-    const draftId = resolveDeleteDraftId(state, kind, delta.call_id);
-    if (!draftId) {
-      return state;
-    }
-    const existing = state.toolCalls.get(draftId);
-    if (!existing) {
-      return state;
-    }
-    // Keep the draft but mark as skipped so the cell shows a "Skipped" badge
+  if (delta.type === "subagent_progress") {
+    const callId = resolveSubagentProgressCallId(state, delta);
     const next = new Map(state.toolCalls);
-    next.set(draftId, {
-      ...existing,
-      skipped: true,
-      skipReason: typeof delta.reason === "string" ? delta.reason : undefined,
+    const existing = next.get(callId);
+    const progress = mergeSubagentProgress(existing?.subagentProgress, delta);
+    const rawArgs = existing?.rawArgs ?? "";
+    next.set(callId, {
+      type: "subagents",
+      rawArgs,
+      code: summarizeSubagentProgressCode(rawArgs, progress),
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
+      skipped: existing?.skipped,
+      skipReason: existing?.skipReason,
+      subagentProgress: progress,
     });
     return { ...state, toolCalls: next };
   }
-
-  if (delta.done) {
-    const callId = resolveDeltaDraftId(state, kind, delta.call_id);
-    const aliasId = findAliasDraftIdForCall(state, kind, callId);
-    const existing = aliasId ? state.toolCalls.get(aliasId) : undefined;
-    if (existing) {
-      const finalCode = extractCodeFromArgs(existing.rawArgs, kind);
-      const next = new Map(state.toolCalls);
-      if (aliasId && aliasId !== callId) {
-        next.delete(aliasId);
-      }
-      next.set(callId, { ...existing, code: finalCode });
-      return { ...state, toolCalls: next };
-    }
-    return state;
-  }
-
-  const callId = resolveDeltaDraftId(state, kind, delta.call_id);
-  const argsDelta = delta.delta ?? "";
-
-  let nextText = state.text;
-  let nextTextCreatedAt = state.textCreatedAt;
-  if (kind === "sql" && state.text && !state.toolCalls.has(callId)) {
-    nextText = "";
-    nextTextCreatedAt = "";
-  }
-
-  const next = new Map(state.toolCalls);
-  const aliasId = findAliasDraftIdForCall(state, kind, callId);
-  const existingEntry = aliasId ? state.toolCalls.get(aliasId) : undefined;
-  if (existingEntry) {
-    const rawArgs = existingEntry.rawArgs + argsDelta;
-    if (aliasId && aliasId !== callId) {
-      next.delete(aliasId);
-    }
-    next.set(callId, {
-      type: kind,
-      rawArgs,
-      code: extractCodeFromArgs(rawArgs, kind),
-      createdAt: existingEntry.createdAt,
-    });
-  } else {
-    next.set(callId, {
-      type: kind,
-      rawArgs: argsDelta,
-      code: extractCodeFromArgs(argsDelta, kind),
-      createdAt: new Date().toISOString(),
-    });
-  }
-  return { ...state, text: nextText, textCreatedAt: nextTextCreatedAt, toolCalls: next };
+  return state;
 }
 
 /**
@@ -285,6 +394,45 @@ export function clearFromEvent(
     }
     return state;
   }
+  if (event.type === "tool_call_subagents") {
+    const callIdFromEvent =
+      typeof event.payload?.call_id === "string" ? event.payload.call_id : null;
+    if (!callIdFromEvent) {
+      return state;
+    }
+    const existing = state.toolCalls.get(callIdFromEvent);
+    if (existing) {
+      return state;
+    }
+    const fallbackId = FALLBACK_DRAFT_ID.subagents;
+    const fallback = state.toolCalls.get(fallbackId);
+    if (!fallback || fallback.type !== "subagents") {
+      return state;
+    }
+    const next = new Map(state.toolCalls);
+    next.delete(fallbackId);
+    next.set(callIdFromEvent, {
+      ...fallback,
+      code:
+        fallback.subagentProgress !== undefined
+          ? summarizeSubagentProgressCode(fallback.rawArgs, fallback.subagentProgress)
+          : fallback.code,
+    });
+    return { ...state, toolCalls: next };
+  }
+  if (event.type === "tool_result_subagents") {
+    const parentToolCallId =
+      typeof event.payload?.parent_tool_call_id === "string"
+        ? event.payload.parent_tool_call_id
+        : null;
+    const toDelete = resolveDeleteDraftId(state, "subagents", parentToolCallId);
+    if (toDelete) {
+      const next = new Map(state.toolCalls);
+      next.delete(toDelete);
+      return { ...state, toolCalls: next };
+    }
+    return state;
+  }
   return state;
 }
 
@@ -313,6 +461,7 @@ export function buildDisplayItems(
       createdAt: data.createdAt,
       skipped: data.skipped,
       skipReason: data.skipReason,
+      subagentProgress: data.subagentProgress,
     });
   }
   return items;
@@ -327,7 +476,28 @@ export function streamingToolToEvent(
   const payload: Record<string, unknown> =
     item.type === "sql"
       ? { sql: item.code, limit: 100, call_id: item.callId }
-      : { code: item.code, timeout: 30, call_id: item.callId };
+      : item.type === "python"
+        ? { code: item.code, timeout: 30, call_id: item.callId }
+        : {
+            goal: item.code,
+            call_id: item.callId,
+            ...(item.subagentProgress
+              ? {
+                  _streaming: true,
+                  task_count: item.subagentProgress.task_count,
+                  max_subagents: item.subagentProgress.max_subagents,
+                  max_parallel_subagents:
+                    item.subagentProgress.max_parallel_subagents,
+                  queued_count: item.subagentProgress.queued_count,
+                  running_count: item.subagentProgress.running_count,
+                  completed_count: item.subagentProgress.completed_count,
+                  failed_count: item.subagentProgress.failed_count,
+                  timed_out_count: item.subagentProgress.timed_out_count,
+                  partial_failure: item.subagentProgress.partial_failure,
+                  tasks: item.subagentProgress.tasks,
+                }
+              : {}),
+          };
   if (item.skipped) {
     payload.skipped = true;
     payload.skip_reason = item.skipReason;
@@ -335,7 +505,12 @@ export function streamingToolToEvent(
   return {
     id: `draft-${item.type}-${item.callId}`,
     parent_event_id: null,
-    type: item.type === "sql" ? "tool_call_sql" : "tool_call_python",
+    type:
+      item.type === "sql"
+        ? "tool_call_sql"
+        : item.type === "python"
+          ? "tool_call_python"
+          : "tool_call_subagents",
     payload,
     created_at: item.createdAt,
   };

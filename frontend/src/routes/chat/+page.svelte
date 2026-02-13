@@ -10,6 +10,7 @@
   import MessageCell from "$lib/components/MessageCell.svelte";
   import PythonCell from "$lib/components/PythonCell.svelte";
   import SqlCell from "$lib/components/SqlCell.svelte";
+  import SubagentCell from "$lib/components/SubagentCell.svelte";
   import ArtifactsPanel from "$lib/components/ArtifactsPanel.svelte";
   import WorldlinePicker from "$lib/components/WorldlinePicker.svelte";
   import { activeThread, threads } from "$lib/stores/threads";
@@ -17,6 +18,7 @@
   import {
     createChatJob,
     createThread,
+    fetchChatSession,
     fetchWorldlineTables,
   } from "$lib/api/client";
   import {
@@ -49,9 +51,9 @@
   import { computeWorldlineQueueStats } from "$lib/chat/queueStats";
   import { sendPromptWithStreaming } from "$lib/chat/streamingController";
   import {
-    pickActiveJobWorldlineId,
     withAppendedWorldlineEvent,
     withVisibleWorldline,
+    type VisibleWorldlineHint,
     withWorldlineEvents,
   } from "$lib/chat/worldlineState";
   import { removeUploadedFileByName } from "$lib/chat/csvImportPanel";
@@ -63,15 +65,17 @@
   import type { Thread, TimelineEvent, WorldlineItem } from "$lib/types";
   
   // Icons
-  import { Database } from "lucide-svelte";
-  import { Send } from "lucide-svelte";
-  import { ChevronDown } from "lucide-svelte";
-  import { Sparkles } from "lucide-svelte";
-  import { Plus } from "lucide-svelte";
-  import { Wrench } from "lucide-svelte";
-  import { Upload } from "lucide-svelte";
-  import { FileText } from "lucide-svelte";
-  import { X } from "lucide-svelte";
+  import {
+    Database,
+    Send,
+    ChevronDown,
+    Sparkles,
+    Plus,
+    Wrench,
+    Upload,
+    FileText,
+    X,
+  } from "lucide-svelte";
 
   let threadId = "";
   let activeWorldlineId = "";
@@ -133,6 +137,9 @@
   // Controllers
   const worldlineManager = createWorldlineManager({
     get threadId() { return threadId; },
+    getActiveWorldlineId: () => activeWorldlineId,
+    getWorldlines: () => worldlines,
+    getEventsByWorldline: () => eventsByWorldline,
     setWorldlines: (w) => { worldlines = w; },
     setActiveWorldlineId: (id) => { activeWorldlineId = id; },
     persistPreferredWorldline,
@@ -140,8 +147,14 @@
     onStatusChange: (s) => { statusText = s; },
     onScroll: () => scrollFeedToBottom(true),
     refreshContextTables: refreshWorldlineContextTables,
-    eventsByWorldline,
   });
+  const {
+    refreshWorldlines,
+    loadWorldline,
+    selectWorldline,
+    branchFromEvent: branchWorldlineFromEvent,
+    ensureWorldline: ensureWorldlineExists,
+  } = worldlineManager;
 
   const csvController = createCSVImportController({
     get uploadedFiles() { return uploadedFiles; },
@@ -168,6 +181,16 @@
     void selectWorldline(detail.worldlineId).catch(() => undefined);
   }
 
+  function handleSubagentOpenWorldline(
+    event: CustomEvent<{ worldlineId: string }>,
+  ): void {
+    const worldlineId = event.detail?.worldlineId;
+    if (!worldlineId) {
+      return;
+    }
+    void selectWorldline(worldlineId).catch(() => undefined);
+  }
+
   function handleVisibilityChange(): void {
     if (typeof document === "undefined") return;
     if (document.visibilityState === "visible") {
@@ -192,6 +215,20 @@
 
     // Load from localStorage if available
     activeThread.loadFromStorage();
+    if (
+      $activeThread &&
+      $threads.threads.length > 0 &&
+      !$threads.threads.some((thread) => thread.id === $activeThread?.id)
+    ) {
+      const fallbackThread = $threads.threads[0];
+      activeThread.set(fallbackThread);
+      activeThread.saveToStorage(fallbackThread);
+    }
+    if (!$activeThread && $threads.threads.length > 0) {
+      const fallbackThread = $threads.threads[0];
+      activeThread.set(fallbackThread);
+      activeThread.saveToStorage(fallbackThread);
+    }
     
     // Check if we have a stored worldline from creating a new thread
     const storedWorldlineId = localStorage.getItem("textql_active_worldline");
@@ -352,22 +389,31 @@
       selectedArtifactId = null;
       resetStreamingDrafts();
       stateTraceByWorldline = {};
+      const session = await fetchChatSession(targetThreadId);
+      worldlines = session.worldlines.map((line) => ({
+        id: line.id,
+        parent_worldline_id: line.parent_worldline_id,
+        forked_from_event_id: line.forked_from_event_id,
+        head_event_id: line.head_event_id,
+        name: line.name,
+        created_at: line.created_at,
+      }));
+      chatJobs.hydrateSnapshot(session.jobs);
 
-      await refreshWorldlines();
-
-      if (threadId) {
-        await chatJobs.poll();
-      }
-
-      const activeJobWorldlineId = pickActiveJobWorldlineId(
-        worldlines,
-        targetThreadId,
-        $chatJobs.jobsById,
-      );
-
-      if (activeJobWorldlineId && worldlines.some((w) => w.id === activeJobWorldlineId)) {
-        activeWorldlineId = activeJobWorldlineId;
-      } else if (preferredWorldlineId && worldlines.some((w) => w.id === preferredWorldlineId)) {
+      const candidateWorldlineIds = new Set(worldlines.map((line) => line.id));
+      const preferredFromSession =
+        typeof session.preferred_worldline_id === "string"
+          ? session.preferred_worldline_id
+          : null;
+      if (
+        preferredFromSession &&
+        candidateWorldlineIds.has(preferredFromSession)
+      ) {
+        activeWorldlineId = preferredFromSession;
+      } else if (
+        preferredWorldlineId &&
+        candidateWorldlineIds.has(preferredWorldlineId)
+      ) {
         activeWorldlineId = preferredWorldlineId;
       } else if (worldlines.length > 0) {
         activeWorldlineId = worldlines[0].id;
@@ -425,8 +471,11 @@
     }
   }
 
-  function ensureWorldlineVisible(worldlineId: string): void {
-    worldlines = withVisibleWorldline(worldlines, worldlineId);
+  function ensureWorldlineVisible(
+    worldlineId: string,
+    hint?: VisibleWorldlineHint,
+  ): void {
+    worldlines = withVisibleWorldline(worldlines, worldlineId, hint);
   }
 
   async function initializeSession(): Promise<void> {
@@ -473,36 +522,19 @@
     }
   }
 
-  // Worldline functions delegated to controller
-  async function refreshWorldlines(): Promise<void> {
-    await worldlineManager.refreshWorldlines();
-  }
-
-  async function loadWorldline(worldlineId: string): Promise<void> {
-    await worldlineManager.loadWorldline(worldlineId);
-  }
-
-  async function selectWorldline(worldlineId: string): Promise<void> {
-    await worldlineManager.selectWorldline(worldlineId);
-  }
-
   async function handleWorldlineSelect(
     event: CustomEvent<{ id: string }>,
   ): Promise<void> {
-    await worldlineManager.selectWorldline(event.detail.id);
+    await selectWorldline(event.detail.id);
   }
 
   async function branchFromEvent(eventId: string): Promise<void> {
-    await worldlineManager.branchFromEvent(eventId, activeWorldlineId, worldlines);
+    await branchWorldlineFromEvent(eventId);
   }
 
   function handleArtifactSelect(event: CustomEvent<{ artifactId: string }>): void {
     artifactsPanelCollapsed = false;
     selectedArtifactId = event.detail.artifactId;
-  }
-
-  async function ensureWorldline(): Promise<string | null> {
-    return worldlineManager.ensureWorldline(activeWorldlineId);
   }
 
   async function sendPrompt(): Promise<void> {
@@ -512,7 +544,7 @@
     }
 
     // Ensure we have a worldline (create lazily if needed)
-    const requestWorldlineId = await ensureWorldline();
+    const requestWorldlineId = await ensureWorldlineExists();
     if (!requestWorldlineId) {
       statusText = "Error: No active worldline. Please refresh the page.";
       return;
@@ -574,7 +606,6 @@
         setWorldlineSending,
         resetStreamingDrafts,
         refreshWorldlines,
-        loadWorldline,
         ensureWorldlineVisible,
         onStatusChange: (status) => {
           if (activeWorldlineId === requestWorldlineId) {
@@ -740,6 +771,13 @@
               showArtifacts={true}
               artifactLinkMode="panel"
               on:artifactselect={handleArtifactSelect}
+              onBranch={() => branchFromEvent(cell.result?.id ?? cell.call?.id ?? "")}
+            />
+          {:else if cell.kind === "subagents"}
+            <SubagentCell
+              callEvent={cell.call}
+              resultEvent={cell.result}
+              on:openworldline={handleSubagentOpenWorldline}
               onBranch={() => branchFromEvent(cell.result?.id ?? cell.call?.id ?? "")}
             />
           {:else}

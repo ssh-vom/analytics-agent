@@ -3,7 +3,11 @@ import { get, writable } from "svelte/store";
 import { ackChatJob, fetchChatJobs } from "$lib/api/client";
 import type { ChatJob } from "$lib/types";
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 3000;
+const IDLE_POLL_INTERVAL_MS = 7000;
+const HIDDEN_POLL_INTERVAL_MS = 15000;
+const MAX_POLL_BACKOFF_MS = 30000;
+const CHAT_JOBS_RUNTIME_KEY = "__textql_chat_jobs_runtime__";
 
 type FinalJobStatus = "completed" | "failed";
 
@@ -30,6 +34,31 @@ interface ChatJobsState {
   error: string | null;
 }
 
+interface ChatJobsRuntime {
+  timer: ReturnType<typeof setTimeout> | null;
+  started: boolean;
+  pollInFlight: boolean;
+  backoffMs: number;
+}
+
+function getRuntime(): ChatJobsRuntime {
+  const globalScope = globalThis as typeof globalThis & {
+    [CHAT_JOBS_RUNTIME_KEY]?: ChatJobsRuntime;
+  };
+  const existing = globalScope[CHAT_JOBS_RUNTIME_KEY];
+  if (existing) {
+    return existing;
+  }
+  const created: ChatJobsRuntime = {
+    timer: null,
+    started: false,
+    pollInFlight: false,
+    backoffMs: POLL_INTERVAL_MS,
+  };
+  globalScope[CHAT_JOBS_RUNTIME_KEY] = created;
+  return created;
+}
+
 function createChatJobsStore() {
   const { subscribe, update, set } = writable<ChatJobsState>({
     jobsById: {},
@@ -38,17 +67,18 @@ function createChatJobsStore() {
     error: null,
   });
 
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
-  let pollInFlight = false;
+  const runtime = getRuntime();
   let hasInitialSnapshot = false;
   const notifiedJobIds = new Set<string>();
 
   function reset() {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
+    if (runtime.timer) {
+      clearTimeout(runtime.timer);
+      runtime.timer = null;
     }
-    pollInFlight = false;
+    runtime.started = false;
+    runtime.pollInFlight = false;
+    runtime.backoffMs = POLL_INTERVAL_MS;
     hasInitialSnapshot = false;
     notifiedJobIds.clear();
     set({
@@ -75,6 +105,20 @@ function createChatJobsStore() {
       },
       lastUpdatedAt: new Date().toISOString(),
     }));
+  }
+
+  function hydrateSnapshot(jobs: ChatJob[]): void {
+    const nextById: Record<string, ChatJob> = {};
+    for (const job of jobs) {
+      nextById[job.id] = job;
+    }
+    update((state) => ({
+      ...state,
+      jobsById: nextById,
+      lastUpdatedAt: new Date().toISOString(),
+      error: null,
+    }));
+    hasInitialSnapshot = true;
   }
 
   function getThreadSummary(threadId: string): ThreadJobSummary {
@@ -138,11 +182,19 @@ function createChatJobsStore() {
   }
 
   async function poll(): Promise<void> {
-    if (pollInFlight) {
+    if (runtime.pollInFlight) {
       return;
     }
 
-    pollInFlight = true;
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "hidden"
+    ) {
+      runtime.backoffMs = HIDDEN_POLL_INTERVAL_MS;
+      return;
+    }
+
+    runtime.pollInFlight = true;
     try {
       const response = await fetchChatJobs({
         statuses: ["queued", "running", "completed", "failed"],
@@ -187,33 +239,54 @@ function createChatJobsStore() {
         error: null,
       }));
 
+      const activeCount = response.jobs.filter(
+        (job) => job.status === "queued" || job.status === "running",
+      ).length;
+      runtime.backoffMs =
+        activeCount > 0 ? POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
       hasInitialSnapshot = true;
     } catch (error) {
       update((state) => ({
         ...state,
         error: error instanceof Error ? error.message : "Failed to poll chat jobs",
       }));
+      runtime.backoffMs = Math.min(runtime.backoffMs * 2, MAX_POLL_BACKOFF_MS);
     } finally {
-      pollInFlight = false;
+      runtime.pollInFlight = false;
     }
+  }
+
+  async function pollAndSchedule(): Promise<void> {
+    await poll();
+    if (!runtime.started) {
+      return;
+    }
+    if (runtime.timer) {
+      clearTimeout(runtime.timer);
+    }
+    runtime.timer = setTimeout(() => {
+      void pollAndSchedule();
+    }, runtime.backoffMs);
   }
 
   function startPolling(): void {
-    if (pollTimer) {
+    if (runtime.started) {
       return;
     }
-    void poll();
-    pollTimer = setInterval(() => {
-      void poll();
-    }, POLL_INTERVAL_MS);
+    runtime.started = true;
+    if (runtime.timer) {
+      clearTimeout(runtime.timer);
+      runtime.timer = null;
+    }
+    void pollAndSchedule();
   }
 
   function stopPolling(): void {
-    if (!pollTimer) {
-      return;
+    runtime.started = false;
+    if (runtime.timer) {
+      clearTimeout(runtime.timer);
+      runtime.timer = null;
     }
-    clearInterval(pollTimer);
-    pollTimer = null;
   }
 
   return {
@@ -224,6 +297,7 @@ function createChatJobsStore() {
     reset,
     dismissToast,
     registerQueuedJob,
+    hydrateSnapshot,
     getThreadSummary,
     getWorldlineQueueDepth,
   };

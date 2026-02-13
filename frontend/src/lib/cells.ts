@@ -10,6 +10,7 @@ export type RenderCell =
   | MessageRenderCell
   | SqlRenderCell
   | PythonRenderCell
+  | SubagentRenderCell
   | MetaRenderCell;
 
 export interface MessageRenderCell {
@@ -34,11 +35,44 @@ export interface PythonRenderCell {
   result: TimelineEvent | null;
 }
 
+export interface SubagentRenderCell {
+  kind: "subagents";
+  id: string;
+  call: TimelineEvent | null;
+  result: TimelineEvent | null;
+}
+
 export interface MetaRenderCell {
   kind: "meta";
   id: string;
   label: string;
   event: TimelineEvent;
+}
+
+function readCallId(event: TimelineEvent | null): string | null {
+  if (!event) {
+    return null;
+  }
+  const callId = event.payload?.call_id;
+  if (typeof callId !== "string" || !callId.trim()) {
+    return null;
+  }
+  return callId;
+}
+
+function readParentToolCallId(event: TimelineEvent): string | null {
+  const parentToolCallId = event.payload?.parent_tool_call_id;
+  if (typeof parentToolCallId !== "string" || !parentToolCallId.trim()) {
+    return null;
+  }
+  return parentToolCallId;
+}
+
+function isStreamingSubagentResult(event: TimelineEvent | null): boolean {
+  if (!event || event.type !== "tool_result_subagents") {
+    return false;
+  }
+  return event.payload?._streaming === true;
 }
 
 function payloadText(payload: Record<string, unknown>): string {
@@ -77,6 +111,10 @@ export function groupEventsIntoCells(events: TimelineEvent[]): RenderCell[] {
   const pythonByCallId = new Map<string, PythonRenderCell>();
   const pendingSqlResults = new Map<string, TimelineEvent>();
   const pendingPythonResults = new Map<string, TimelineEvent>();
+  const subagentsByCallId = new Map<string, SubagentRenderCell>();
+  const subagentsByToolCallId = new Map<string, SubagentRenderCell>();
+  const pendingSubagentResults = new Map<string, TimelineEvent>();
+  const pendingSubagentResultsByToolCallId = new Map<string, TimelineEvent>();
 
   for (const event of events) {
     switch (event.type) {
@@ -151,6 +189,57 @@ export function groupEventsIntoCells(events: TimelineEvent[]): RenderCell[] {
         }
         break;
       }
+      case "tool_call_subagents": {
+        const callId = readCallId(event);
+        const pendingByCallId = callId
+          ? pendingSubagentResultsByToolCallId.get(callId) ?? null
+          : null;
+        const cell: SubagentRenderCell = {
+          kind: "subagents",
+          id: `subagents-${event.id}`,
+          call: event,
+          result:
+            pendingSubagentResults.get(event.id) ??
+            pendingByCallId,
+        };
+        pendingSubagentResults.delete(event.id);
+        if (callId) {
+          if (pendingByCallId) {
+            for (const [pendingParentId, pendingEvent] of pendingSubagentResults.entries()) {
+              if (pendingEvent.id === pendingByCallId.id) {
+                pendingSubagentResults.delete(pendingParentId);
+                break;
+              }
+            }
+          }
+          pendingSubagentResultsByToolCallId.delete(callId);
+        }
+        cells.push(cell);
+        subagentsByCallId.set(event.id, cell);
+        if (callId) {
+          subagentsByToolCallId.set(callId, cell);
+        }
+        break;
+      }
+      case "tool_result_subagents": {
+        const parentId = event.parent_event_id ?? "";
+        const existing = subagentsByCallId.get(parentId);
+        const parentToolCallId = readParentToolCallId(event);
+        const byToolCallId = parentToolCallId
+          ? subagentsByToolCallId.get(parentToolCallId)
+          : undefined;
+        if (existing) {
+          existing.result = event;
+        } else if (byToolCallId) {
+          byToolCallId.result = event;
+        } else {
+          pendingSubagentResults.set(parentId, event);
+          if (parentToolCallId) {
+            pendingSubagentResultsByToolCallId.set(parentToolCallId, event);
+          }
+        }
+        break;
+      }
       case "time_travel":
         cells.push({
           kind: "meta",
@@ -193,6 +282,56 @@ export function groupEventsIntoCells(events: TimelineEvent[]): RenderCell[] {
       result: resultEvent,
     });
   }
+  for (const [parentId, resultEvent] of pendingSubagentResults.entries()) {
+    cells.push({
+      kind: "subagents",
+      id: `subagents-orphan-${parentId}-${resultEvent.id}`,
+      call: null,
+      result: resultEvent,
+    });
+  }
+  const emittedOrphanResultIds = new Set(
+    cells
+      .filter((cell): cell is SubagentRenderCell => cell.kind === "subagents")
+      .map((cell) => cell.result?.id)
+      .filter((id): id is string => Boolean(id))
+  );
+  for (const [parentToolCallId, resultEvent] of pendingSubagentResultsByToolCallId.entries()) {
+    if (emittedOrphanResultIds.has(resultEvent.id)) {
+      continue;
+    }
+    cells.push({
+      kind: "subagents",
+      id: `subagents-orphan-call-${parentToolCallId}-${resultEvent.id}`,
+      call: null,
+      result: resultEvent,
+    });
+  }
+
+  // If we see a subagent call without a matching result, but the turn continued
+  // to a later assistant message, surface it as interrupted instead of "queued".
+  for (let idx = 0; idx < cells.length; idx += 1) {
+    const cell = cells[idx];
+    if (cell.kind !== "subagents" || cell.result || !cell.call) {
+      continue;
+    }
+    const hasLaterAssistantMessage = cells
+      .slice(idx + 1)
+      .some((candidate) => candidate.kind === "message" && candidate.role === "assistant");
+    if (!hasLaterAssistantMessage) {
+      continue;
+    }
+    cell.result = {
+      id: `synthetic-subagent-result-${cell.call.id}`,
+      parent_event_id: cell.call.id,
+      type: "tool_result_subagents",
+      payload: {
+        error:
+          "Subagent fan-out call ended without a matching result event. This likely came from an interrupted or older run.",
+      },
+      created_at: cell.call.created_at,
+    } as TimelineEvent;
+  }
 
   return cells;
 }
@@ -206,6 +345,17 @@ export function groupDisplayItemsIntoCells(items: DisplayItem[]): RenderCell[] {
     .filter((i): i is DisplayItem & { kind: "event" } => i.kind === "event")
     .map((i) => i.event);
   const cells = groupEventsIntoCells(events);
+  const subagentCellsByToolCallId = new Map<string, SubagentRenderCell>();
+  for (const cell of cells) {
+    if (cell.kind !== "subagents") {
+      continue;
+    }
+    const callId = readCallId(cell.call);
+    if (!callId) {
+      continue;
+    }
+    subagentCellsByToolCallId.set(callId, cell);
+  }
 
   for (const item of items) {
     if (item.kind === "streaming_text") {
@@ -232,12 +382,42 @@ export function groupDisplayItemsIntoCells(items: DisplayItem[]): RenderCell[] {
           call: ev,
           result: null,
         });
-      } else {
+      } else if (item.type === "python") {
         cells.push({
           kind: "python",
           id: `py-draft-${item.callId}`,
           call: ev,
           result: null,
+        });
+      } else {
+        const existingSubagentCell = subagentCellsByToolCallId.get(item.callId);
+        const streamingProgressResult: TimelineEvent | null =
+          item.subagentProgress
+            ? {
+                id: `draft-subagents-progress-${item.callId}`,
+                parent_event_id: null,
+                type: "tool_result_subagents",
+                payload: {
+                  ...(ev.payload ?? {}),
+                },
+                created_at: item.createdAt,
+              }
+            : null;
+        if (existingSubagentCell) {
+          if (
+            streamingProgressResult &&
+            (!existingSubagentCell.result ||
+              isStreamingSubagentResult(existingSubagentCell.result))
+          ) {
+            existingSubagentCell.result = streamingProgressResult;
+          }
+          continue;
+        }
+        cells.push({
+          kind: "subagents",
+          id: `subagents-draft-${item.callId}`,
+          call: ev,
+          result: streamingProgressResult,
         });
       }
     }

@@ -7,6 +7,9 @@ export function statusFromStreamEvent(eventType: TimelineEvent["type"]): string 
   if (eventType === "tool_call_python") {
     return "Running Python...";
   }
+  if (eventType === "tool_call_subagents") {
+    return "Spawning subagents...";
+  }
   if (eventType === "assistant_message") {
     return "Done";
   }
@@ -42,6 +45,19 @@ export function statusFromDelta(delta: StreamDeltaPayload): string | null {
   }
   if (delta.type === "tool_call_python" && !delta.done) {
     return "Drafting Python...";
+  }
+  if (delta.type === "tool_call_subagents" && !delta.done) {
+    return "Drafting subagent fan-out...";
+  }
+  if (delta.type === "subagent_progress") {
+    const total = typeof delta.task_count === "number" ? delta.task_count : 0;
+    const completed = typeof delta.completed_count === "number" ? delta.completed_count : 0;
+    const failed = typeof delta.failed_count === "number" ? delta.failed_count : 0;
+    const timedOut = typeof delta.timed_out_count === "number" ? delta.timed_out_count : 0;
+    if (total > 0) {
+      return `Running subagents (${completed + failed + timedOut}/${total})...`;
+    }
+    return "Running subagents...";
   }
 
   return null;

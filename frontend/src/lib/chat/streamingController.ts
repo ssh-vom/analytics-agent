@@ -12,6 +12,7 @@ import {
   type StreamingState,
 } from "$lib/streaming";
 import { replaceOptimisticWithReal } from "$lib/chat/optimisticState";
+import type { VisibleWorldlineHint } from "$lib/chat/worldlineState";
 
 export type StreamCallbacks = {
   onEvent: (frame: { worldline_id: string; event: TimelineEvent }) => void;
@@ -38,8 +39,10 @@ export type SendPromptContext = {
   setWorldlineSending: (worldlineId: string, sending: boolean) => void;
   resetStreamingDrafts: (worldlineId?: string) => void;
   refreshWorldlines: () => Promise<void>;
-  loadWorldline: (worldlineId: string) => Promise<void>;
-  ensureWorldlineVisible: (worldlineId: string) => void;
+  ensureWorldlineVisible: (
+    worldlineId: string,
+    hint?: VisibleWorldlineHint,
+  ) => void;
   onStatusChange: (status: string) => void;
   onScroll: () => void;
   onTurnCompleted: () => void;
@@ -73,7 +76,6 @@ export async function sendPromptWithStreaming(
     setWorldlineSending,
     resetStreamingDrafts,
     refreshWorldlines,
-    loadWorldline,
     ensureWorldlineVisible,
     onStatusChange,
     onScroll,
@@ -82,6 +84,55 @@ export async function sendPromptWithStreaming(
     getStreamingState,
     appendRuntimeStateTransition,
   } = context;
+  const fanoutOrderBaseByGroup = new Map<string, number>();
+
+  const isActiveWorldline = (candidateWorldlineId: string): boolean =>
+    candidateWorldlineId === getActiveWorldlineId();
+
+  const ensureDeltaWorldlinesVisible = (
+    ownerWorldlineId: string,
+    delta: StreamDeltaPayload,
+  ): void => {
+    if (delta.type !== "subagent_progress") {
+      return;
+    }
+    const taskIndex =
+      typeof delta.task_index === "number" && Number.isFinite(delta.task_index)
+        ? Math.max(0, Math.floor(delta.task_index))
+        : null;
+    const suggestedName =
+      typeof delta.task_label === "string" && delta.task_label.trim()
+        ? delta.task_label.trim()
+        : taskIndex !== null
+          ? `subagent-${taskIndex + 1}`
+          : null;
+    const groupKey =
+      typeof delta.fanout_group_id === "string" && delta.fanout_group_id
+        ? delta.fanout_group_id
+        : `${ownerWorldlineId}:${delta.parent_tool_call_id ?? "subagents"}`;
+    let groupBase = fanoutOrderBaseByGroup.get(groupKey);
+    if (groupBase === undefined) {
+      groupBase = Date.now();
+      fanoutOrderBaseByGroup.set(groupKey, groupBase);
+    }
+    const createdAtHint =
+      taskIndex !== null ? new Date(groupBase + taskIndex).toISOString() : null;
+    const parentWorldlineId =
+      typeof delta.source_worldline_id === "string" && delta.source_worldline_id
+        ? delta.source_worldline_id
+        : ownerWorldlineId;
+    const visibilityHint: VisibleWorldlineHint = {
+      parentWorldlineId,
+      suggestedName,
+      createdAt: createdAtHint,
+    };
+    if (typeof delta.child_worldline_id === "string" && delta.child_worldline_id) {
+      ensureWorldlineVisible(delta.child_worldline_id, visibilityHint);
+    }
+    if (typeof delta.result_worldline_id === "string" && delta.result_worldline_id) {
+      ensureWorldlineVisible(delta.result_worldline_id, visibilityHint);
+    }
+  };
 
   setWorldlineSending(worldlineId, true);
 
@@ -114,7 +165,7 @@ export async function sendPromptWithStreaming(
           appendEvent(frameWorldlineId, frame.event);
         }
 
-        if (frameWorldlineId === getActiveWorldlineId()) {
+        if (isActiveWorldline(frameWorldlineId)) {
           onScroll();
           onStatusChange(statusFromStreamEvent(frame.event.type));
         }
@@ -122,6 +173,7 @@ export async function sendPromptWithStreaming(
       onDelta: (frame) => {
         const frameWorldlineId = frame.worldline_id;
         ensureWorldlineVisible(frameWorldlineId);
+        ensureDeltaWorldlinesVisible(frameWorldlineId, frame.delta);
 
         const frameStreamingState =
           getStreamingState(frameWorldlineId) ?? createStreamingState();
@@ -130,14 +182,14 @@ export async function sendPromptWithStreaming(
         const stateTransition = stateTransitionFromDelta(frame.delta);
         if (stateTransition) {
           appendRuntimeStateTransition(frameWorldlineId, stateTransition);
-          if (frameWorldlineId === getActiveWorldlineId()) {
+          if (isActiveWorldline(frameWorldlineId)) {
             onStatusChange(`State: ${stateTransition.to_state.replace(/_/g, " ")}`);
             onScroll();
           }
           return;
         }
 
-        if (frameWorldlineId === getActiveWorldlineId()) {
+        if (isActiveWorldline(frameWorldlineId)) {
           const status = statusFromDelta(frame.delta);
           if (status) {
             onStatusChange(status);
@@ -146,13 +198,12 @@ export async function sendPromptWithStreaming(
         }
       },
       onDone: async (frame) => {
-        resetStreamingDrafts(frame.worldline_id);
-        await refreshWorldlines();
-        if (frame.worldline_id) {
-          await loadWorldline(frame.worldline_id);
-        }
+        const completedWorldlineId = frame.worldline_id;
+        resetStreamingDrafts(completedWorldlineId);
+        // Keep done handling lightweight to avoid clobbering newer UI state.
+        void refreshWorldlines().catch(() => undefined);
 
-        if (frame.worldline_id === getActiveWorldlineId()) {
+        if (isActiveWorldline(completedWorldlineId)) {
           onStatusChange("Done");
           onScroll();
         }

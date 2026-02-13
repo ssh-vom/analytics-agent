@@ -17,7 +17,10 @@ export function getStoredJson<T>(
   key: string,
   validate?: (value: unknown) => value is T,
 ): T | null {
-  if (typeof localStorage === "undefined") {
+  if (
+    typeof localStorage === "undefined" ||
+    typeof localStorage.getItem !== "function"
+  ) {
     return null;
   }
   const raw = localStorage.getItem(key);

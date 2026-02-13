@@ -1,5 +1,11 @@
 import type { ChatJob, TimelineEvent, WorldlineItem } from "$lib/types";
 
+export type VisibleWorldlineHint = {
+  parentWorldlineId?: string | null;
+  suggestedName?: string | null;
+  createdAt?: string | null;
+};
+
 export function pickActiveJobWorldlineId(
   threadWorldlines: WorldlineItem[],
   targetThreadId: string,
@@ -79,20 +85,64 @@ export function withAppendedWorldlineEvent(
 export function withVisibleWorldline(
   worldlines: WorldlineItem[],
   worldlineId: string,
+  hint: VisibleWorldlineHint = {},
 ): WorldlineItem[] {
-  if (worldlines.some((line) => line.id === worldlineId)) {
-    return worldlines;
+  const syntheticName = worldlineId.slice(0, 12);
+  const worldlineIndex = worldlines.findIndex((line) => line.id === worldlineId);
+  if (worldlineIndex >= 0) {
+    const existing = worldlines[worldlineIndex];
+    const isSynthetic =
+      existing.name === syntheticName || existing.name === worldlineId;
+    const nextParent =
+      existing.parent_worldline_id ??
+      (typeof hint.parentWorldlineId === "string" ? hint.parentWorldlineId : null);
+    const shouldReplaceName =
+      isSynthetic &&
+      typeof hint.suggestedName === "string" &&
+      hint.suggestedName.trim().length > 0;
+    const nextName = shouldReplaceName ? hint.suggestedName.trim() : existing.name;
+    const shouldReplaceCreatedAt =
+      isSynthetic &&
+      typeof hint.createdAt === "string" &&
+      hint.createdAt.trim().length > 0;
+    const nextCreatedAt = shouldReplaceCreatedAt
+      ? hint.createdAt
+      : existing.created_at;
+    if (
+      nextParent === existing.parent_worldline_id &&
+      nextName === existing.name &&
+      nextCreatedAt === existing.created_at
+    ) {
+      return worldlines;
+    }
+    return worldlines.map((line, index) =>
+      index === worldlineIndex
+        ? {
+            ...line,
+            parent_worldline_id: nextParent,
+            name: nextName,
+            created_at: nextCreatedAt,
+          }
+        : line
+    );
   }
 
   return [
     ...worldlines,
     {
       id: worldlineId,
-      name: worldlineId.slice(0, 12),
-      parent_worldline_id: null,
+      name:
+        typeof hint.suggestedName === "string" && hint.suggestedName.trim()
+          ? hint.suggestedName.trim()
+          : syntheticName,
+      parent_worldline_id:
+        typeof hint.parentWorldlineId === "string" ? hint.parentWorldlineId : null,
       forked_from_event_id: null,
       head_event_id: null,
-      created_at: new Date().toISOString(),
+      created_at:
+        typeof hint.createdAt === "string" && hint.createdAt.trim()
+          ? hint.createdAt
+          : new Date().toISOString(),
     },
   ];
 }

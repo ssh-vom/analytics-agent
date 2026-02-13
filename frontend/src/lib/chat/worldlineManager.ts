@@ -8,6 +8,9 @@ import type { TimelineEvent } from "$lib/types";
 
 export type WorldlineManagerContext = {
   threadId: string | null;
+  getActiveWorldlineId: () => string;
+  getWorldlines: () => unknown[];
+  getEventsByWorldline: () => Record<string, TimelineEvent[]>;
   setWorldlines: (worldlines: unknown[]) => void;
   setActiveWorldlineId: (id: string) => void;
   persistPreferredWorldline: (id: string) => void;
@@ -15,11 +18,13 @@ export type WorldlineManagerContext = {
   onStatusChange: (status: string) => void;
   onScroll: () => void;
   refreshContextTables: () => Promise<void>;
-  eventsByWorldline: Record<string, TimelineEvent[]>;
 };
 
 export function createWorldlineManager(context: WorldlineManagerContext) {
   const {
+    getActiveWorldlineId,
+    getWorldlines,
+    getEventsByWorldline,
     setWorldlines,
     setActiveWorldlineId,
     persistPreferredWorldline,
@@ -27,12 +32,28 @@ export function createWorldlineManager(context: WorldlineManagerContext) {
     onStatusChange,
     onScroll,
     refreshContextTables,
-    eventsByWorldline,
   } = context;
 
-  // Access threadId via context getter to get current value
   function getThreadId(): string | null {
     return context.threadId;
+  }
+
+  function mergeFetchedWithOptimistic(
+    fetched: TimelineEvent[],
+    existing: TimelineEvent[],
+  ): TimelineEvent[] {
+    if (existing.length === 0) {
+      return fetched;
+    }
+    const fetchedIds = new Set(fetched.map((event) => event.id));
+    const optimisticTail = existing.filter(
+      (event) =>
+        event.id.startsWith("optimistic:") && !fetchedIds.has(event.id),
+    );
+    if (optimisticTail.length === 0) {
+      return fetched;
+    }
+    return [...fetched, ...optimisticTail];
   }
 
   async function refreshWorldlines(): Promise<void> {
@@ -45,8 +66,10 @@ export function createWorldlineManager(context: WorldlineManagerContext) {
   }
 
   async function loadWorldline(worldlineId: string): Promise<void> {
-    const events = await fetchWorldlineEvents(worldlineId);
-    setWorldlineEvents(worldlineId, events);
+    const fetchedEvents = await fetchWorldlineEvents(worldlineId);
+    const existingEvents = getEventsByWorldline()[worldlineId] ?? [];
+    const mergedEvents = mergeFetchedWithOptimistic(fetchedEvents, existingEvents);
+    setWorldlineEvents(worldlineId, mergedEvents);
     onScroll();
   }
 
@@ -54,18 +77,16 @@ export function createWorldlineManager(context: WorldlineManagerContext) {
     setActiveWorldlineId(worldlineId);
     persistPreferredWorldline(worldlineId);
 
-    if (!eventsByWorldline[worldlineId]) {
+    if (!getEventsByWorldline()[worldlineId]) {
       await loadWorldline(worldlineId);
     }
     await refreshContextTables();
     onScroll();
   }
 
-  async function branchFromEvent(
-    eventId: string,
-    activeWorldlineId: string,
-    worldlines: unknown[],
-  ): Promise<string | null> {
+  async function branchFromEvent(eventId: string): Promise<string | null> {
+    const activeWorldlineId = getActiveWorldlineId();
+    const worldlines = getWorldlines();
     if (!activeWorldlineId || !eventId) {
       return null;
     }
@@ -93,9 +114,8 @@ export function createWorldlineManager(context: WorldlineManagerContext) {
     }
   }
 
-  async function ensureWorldline(
-    activeWorldlineId: string | null,
-  ): Promise<string | null> {
+  async function ensureWorldline(): Promise<string | null> {
+    const activeWorldlineId = getActiveWorldlineId();
     // If we already have a worldline, use it
     if (activeWorldlineId) {
       return activeWorldlineId;

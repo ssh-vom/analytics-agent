@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from debug_log import debug_log as _debug_log
 from duckdb_manager import execute_read_query
+from chat.runtime.capacity import CapacityLimitError, get_capacity_controller
 from meta import (
     EventStoreConflictError,
     append_event_and_advance_head,
@@ -506,11 +507,26 @@ async def execute_python_tool(
                     "call_id": call_id,
                 },
             )
-            raw_result = await _sandbox_manager.execute(
-                worldline_id=worldline_id,
-                code=execution_code,
-                timeout_s=timeout,
-            )
+            capacity_wait_ms = 0
+            queue_reason: str | None = None
+            try:
+                async with get_capacity_controller().lease_python() as python_lease:
+                    capacity_wait_ms = python_lease.wait_ms
+                    queue_reason = python_lease.queue_reason
+                    raw_result = await _sandbox_manager.execute(
+                        worldline_id=worldline_id,
+                        code=execution_code,
+                        timeout_s=timeout,
+                    )
+            except CapacityLimitError as exc:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": str(exc),
+                        "error_code": "python_capacity_limit_reached",
+                        "retryable": True,
+                    },
+                ) from exc
             api_artifacts = []
             db_artifacts = []
             for artifact in raw_result.get("artifacts", []):
@@ -539,6 +555,8 @@ async def execute_python_tool(
                 "artifacts": api_artifacts,
                 "previews": raw_result.get("previews", {"dataframes": []}),
                 "execution_ms": int((time.perf_counter() - started) * 1000),
+                "capacity_wait_ms": capacity_wait_ms,
+                "queue_reason": queue_reason,
             }
 
             result_event_id = append_event_and_advance_head(

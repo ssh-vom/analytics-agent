@@ -100,6 +100,52 @@ def validate_tool_payload(
             )
         return None
 
+    if tool_name == "spawn_subagents":
+        goal = arguments.get("goal")
+        tasks = arguments.get("tasks")
+        if isinstance(goal, str) and goal.strip():
+            if len(goal.strip()) > 6000:
+                return "spawn_subagents `goal` must be <= 6000 characters"
+        elif not isinstance(tasks, list) or not tasks:
+            return "spawn_subagents requires either non-empty `goal` or `tasks`"
+
+        if isinstance(tasks, list):
+            if len(tasks) > 50:
+                return "spawn_subagents supports at most 50 tasks"
+            for idx, task in enumerate(tasks):
+                if not isinstance(task, dict):
+                    return f"spawn_subagents task #{idx + 1} must be an object"
+                message = task.get("message")
+                if not isinstance(message, str) or not message.strip():
+                    return (
+                        "spawn_subagents each task requires a non-empty `message` "
+                        "string"
+                    )
+                if len(message) > 4000:
+                    return "spawn_subagents task `message` must be <= 4000 characters"
+
+        max_subagents = arguments.get("max_subagents")
+        if max_subagents is not None:
+            try:
+                max_subagents_int = int(max_subagents)
+            except (TypeError, ValueError):
+                return "spawn_subagents `max_subagents` must be an integer between 1 and 50"
+            if not (1 <= max_subagents_int <= 50):
+                return "spawn_subagents `max_subagents` must be between 1 and 50"
+
+        max_parallel = arguments.get("max_parallel_subagents")
+        if max_parallel is not None:
+            try:
+                max_parallel_int = int(max_parallel)
+            except (TypeError, ValueError):
+                return (
+                    "spawn_subagents `max_parallel_subagents` must be an integer "
+                    "between 1 and 10"
+                )
+            if not (1 <= max_parallel_int <= 10):
+                return "spawn_subagents `max_parallel_subagents` must be between 1 and 10"
+        return None
+
     return None
 
 

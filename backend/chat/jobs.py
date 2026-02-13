@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from chat.runtime.capacity import CapacityLimitError, get_capacity_controller
 from meta import get_conn, new_id
 
 T = TypeVar("T")
@@ -231,18 +232,21 @@ class ChatJobScheduler:
                 return
 
             try:
-                active_worldline_id, events = await self._turn_runner(
-                    worldline_id,
-                    str(request_payload.get("message") or ""),
-                    request_payload.get("provider"),
-                    request_payload.get("model"),
-                    int(request_payload.get("max_iterations") or 6),
-                )
+                async with get_capacity_controller().lease_turn():
+                    active_worldline_id, events = await self._turn_runner(
+                        worldline_id,
+                        str(request_payload.get("message") or ""),
+                        request_payload.get("provider"),
+                        request_payload.get("model"),
+                        int(request_payload.get("max_iterations") or 6),
+                    )
                 self._mark_completed(
                     job_id=job_id,
                     result_worldline_id=active_worldline_id,
                     events=events,
                 )
+            except CapacityLimitError as exc:
+                self._mark_failed(job_id, str(exc))
             except Exception as exc:
                 self._mark_failed(job_id, str(exc))
 
@@ -340,6 +344,10 @@ def enqueue_chat_turn_job(
     provider: str | None,
     model: str | None,
     max_iterations: int,
+    parent_job_id: str | None = None,
+    fanout_group_id: str | None = None,
+    task_label: str | None = None,
+    parent_tool_call_id: str | None = None,
 ) -> str:
     job_id = new_id("job")
     request_json = json.dumps(
@@ -356,10 +364,30 @@ def enqueue_chat_turn_job(
         conn.execute(
             """
             INSERT INTO chat_turn_jobs
-            (id, thread_id, worldline_id, request_json, status)
-            VALUES (?, ?, ?, ?, ?)
+            (
+                id,
+                thread_id,
+                worldline_id,
+                request_json,
+                parent_job_id,
+                fanout_group_id,
+                task_label,
+                parent_tool_call_id,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, thread_id, worldline_id, request_json, JOB_STATUS_QUEUED),
+            (
+                job_id,
+                thread_id,
+                worldline_id,
+                request_json,
+                parent_job_id,
+                fanout_group_id,
+                task_label,
+                parent_tool_call_id,
+                JOB_STATUS_QUEUED,
+            ),
         )
         conn.commit()
 

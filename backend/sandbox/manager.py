@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Protocol, Any
 import time
 import asyncio
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 class SandboxRunner(Protocol):
@@ -78,7 +81,46 @@ class SandboxManager:
                 timeout_s=timeout_s,
             )
             handle.last_used_monotonic = time.monotonic()
+
+            # Invalidate sandbox on timeout or hard errors to ensure clean state next time
+            error = result.get("error") if isinstance(result, dict) else None
+            if error and self._should_invalidate_sandbox(error):
+                logger.warning(
+                    "Invalidating sandbox for worldline %s due to error: %s",
+                    worldline_id,
+                    str(error)[:200],
+                )
+                await self._invalidate_handle(worldline_id, handle.sandbox_id)
+
             return result
+
+    def _should_invalidate_sandbox(self, error: str) -> bool:
+        """Check if an error warrants sandbox invalidation."""
+        if not error:
+            return False
+        error_lower = error.lower()
+        # Invalidate on timeouts, container errors, or resource exhaustion
+        indicators = [
+            "timed out",
+            "timeout",
+            "container",
+            "docker",
+            "resource",
+            "memory",
+            "killed",
+            "signal",
+        ]
+        return any(ind in error_lower for ind in indicators)
+
+    async def _invalidate_handle(self, worldline_id: str, sandbox_id: str) -> None:
+        """Remove a sandbox handle and stop the container."""
+        async with self._manager_lock:
+            self._handles.pop(worldline_id, None)
+        try:
+            await self._runner.stop(sandbox_id)
+        except Exception:
+            # Best effort - ignore cleanup errors
+            pass
 
     async def reap_idle(self, ttl_seconds: int) -> list[str]:
         now = time.monotonic()

@@ -88,4 +88,17 @@ describe("worldlineState", () => {
     expect(next).toHaveLength(1);
     expect(next[0].id).toBe("worldline_xyz");
   });
+
+  it("enriches existing placeholder worldline with hint metadata", () => {
+    const initial = withVisibleWorldline([], "worldline_child");
+    const next = withVisibleWorldline(initial, "worldline_child", {
+      parentWorldlineId: "worldline_parent",
+      suggestedName: "subagent-1",
+      createdAt: "2026-01-01T00:00:00Z",
+    });
+    expect(next).toHaveLength(1);
+    expect(next[0].parent_worldline_id).toBe("worldline_parent");
+    expect(next[0].name).toBe("subagent-1");
+    expect(next[0].created_at).toBe("2026-01-01T00:00:00Z");
+  });
 });

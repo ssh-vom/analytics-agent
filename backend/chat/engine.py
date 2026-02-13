@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from debug_log import debug_log as _debug_log
 from chat.event_store import (
     append_worldline_event,
+    append_worldline_event_with_parent,
     events_since_rowid,
     load_event_by_id,
     max_worldline_rowid,
@@ -56,6 +57,10 @@ from chat.report_fallback import (
 )
 from chat.state_machine import transition_state
 from chat.streaming_bridge import stream_llm_response
+from chat.subagents import (
+    resolve_fork_event_id_or_head,
+    spawn_subagents_blocking,
+)
 from chat.tooling import (
     normalize_tool_arguments,
     signature_for_dedup,
@@ -63,6 +68,7 @@ from chat.tooling import (
     tool_name_to_delta_type,
     tool_signature,
 )
+from chat.runtime.tool_dispatcher import ToolDispatcher
 from api.tools import (
     PythonToolRequest,
     SqlToolRequest,
@@ -72,14 +78,15 @@ from services.tool_executor import (
     execute_python_tool,
     execute_sql_tool,
 )
-from worldline_service import BranchOptions, WorldlineService
+from worldline_service import WorldlineService
 from semantic.executor import SemanticExecutor, should_use_semantic_lane
-from semantic.compiler import compile_query_spec, get_compilation_summary
 
 logger = logging.getLogger(__name__)
 
 _RECENT_SIGNATURE_WINDOW = 24  # turn-local repeated-call check (full signature)
-_RECENT_HISTORY_SIGNATURE_WINDOW = 5  # cross-turn "already ran recently" (dedup signature)
+_RECENT_HISTORY_SIGNATURE_WINDOW = (
+    5  # cross-turn "already ran recently" (dedup signature)
+)
 _MAX_INVALID_TOOL_PAYLOAD_RETRIES: dict[str, int] = {
     "run_sql": 2,
     "run_python": 3,
@@ -99,6 +106,7 @@ class ChatEngine:
     max_output_tokens: int | None = None
     worldline_service: WorldlineService = field(default_factory=WorldlineService)
     _semantic_executor: SemanticExecutor | None = field(default=None, repr=False)
+    _tool_dispatcher: ToolDispatcher | None = field(default=None, repr=False)
 
     def _get_semantic_executor(self) -> SemanticExecutor:
         """Lazily initialize semantic executor."""
@@ -106,13 +114,43 @@ class ChatEngine:
             self._semantic_executor = SemanticExecutor(llm_client=self.llm_client)
         return self._semantic_executor
 
+    def _get_tool_dispatcher(self) -> ToolDispatcher:
+        if self._tool_dispatcher is None:
+            self._tool_dispatcher = ToolDispatcher(
+                llm_client=self.llm_client,
+                worldline_service=self.worldline_service,
+                load_event_by_id=self._load_event_by_id,
+                run_child_turn=self._run_child_turn,
+                execute_sql_tool=execute_sql_tool,
+                execute_python_tool=execute_python_tool,
+                resolve_fork_event_id_or_head=resolve_fork_event_id_or_head,
+                spawn_subagents_blocking=spawn_subagents_blocking,
+                get_turn_coordinator=self._get_turn_coordinator,
+            )
+        return self._tool_dispatcher
+
+    @staticmethod
+    def _get_turn_coordinator():
+        from services.chat_runtime import get_turn_coordinator
+
+        return get_turn_coordinator()
+
     async def run_turn(
         self,
         worldline_id: str,
         message: str,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
         on_delta: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        skip_semantic_lane: bool = False,
+        allow_subagents: bool = True,
+        subagent_depth: int = 0,
     ) -> tuple[str, list[dict[str, Any]]]:
+        MAX_SUBAGENT_DEPTH = 2
+
+        effective_allow_subagents = (
+            allow_subagents and subagent_depth < MAX_SUBAGENT_DEPTH
+        )
+
         if not message or not message.strip():
             raise HTTPException(status_code=400, detail="message must not be empty")
 
@@ -128,6 +166,8 @@ class ChatEngine:
             data={
                 "worldline_id": worldline_id,
                 "message_preview": message[:200],
+                "allow_subagents": effective_allow_subagents,
+                "subagent_depth": subagent_depth,
             },
         )
         # #endregion
@@ -146,19 +186,20 @@ class ChatEngine:
 
         # === SEMANTIC LANE CHECK ===
         # Try deterministic SQL generation for high-confidence analytical queries
-        try:
-            semantic_result = await self._try_semantic_lane(
-                worldline_id=active_worldline_id,
-                message=message,
-                user_event=user_event,
-                starting_rowid=starting_rowid_by_worldline[active_worldline_id],
-                on_event=on_event,
-                on_delta=on_delta,
-            )
-            if semantic_result is not None:
-                return semantic_result
-        except Exception as e:
-            logger.debug(f"Semantic lane failed, using agentic: {e}")
+        if not skip_semantic_lane:
+            try:
+                semantic_result = await self._try_semantic_lane(
+                    worldline_id=active_worldline_id,
+                    message=message,
+                    user_event=user_event,
+                    starting_rowid=starting_rowid_by_worldline[active_worldline_id],
+                    on_event=on_event,
+                    on_delta=on_delta,
+                )
+                if semantic_result is not None:
+                    return semantic_result
+            except Exception as e:
+                logger.debug(f"Semantic lane failed, using agentic: {e}")
 
         history_events = await self._load_worldline_events(active_worldline_id)
         messages = build_llm_messages_from_events(list(history_events))
@@ -222,21 +263,27 @@ class ChatEngine:
             on_delta=on_delta,
         )
 
+        _include_spawn = effective_allow_subagents
+
         for _ in range(self.max_iterations):
             upsert_artifact_inventory_message(messages, artifact_inventory)
             upsert_data_intent_message(messages, data_intent_summary)
-            # ----- LLM call: stream when on_delta is available, else batch -----
+
+            turn_tools = self._tool_definitions(
+                include_python=True,
+                include_spawn_subagents=_include_spawn,
+            )
             if on_delta is not None:
                 response = await self._stream_llm_response(
                     worldline_id=active_worldline_id,
                     messages=messages,
-                    tools=self._tool_definitions(include_python=True),
+                    tools=turn_tools,
                     on_delta=on_delta,
                 )
             else:
                 response = await self.llm_client.generate(
                     messages=messages,
-                    tools=self._tool_definitions(include_python=True),
+                    tools=turn_tools,
                     max_output_tokens=self.max_output_tokens,
                 )
 
@@ -429,9 +476,7 @@ class ChatEngine:
                                         "reason": "recent_identical_successful_tool_call",
                                     },
                                 )
-                            final_text = (
-                                "Similar query ran recently; ask me to rerun if you need fresh results."
-                            )
+                            final_text = "Similar query ran recently; ask me to rerun if you need fresh results."
                             repeated_call_detected = True
                             break
 
@@ -485,7 +530,13 @@ class ChatEngine:
                         carried_user_message=message,
                         allowed_external_aliases=allowed_external_aliases,
                         on_event=on_event,
+                        on_delta=on_delta,
+                        subagent_depth=subagent_depth,
                     )
+
+                    if tool_name == "spawn_subagents" and _include_spawn:
+                        _include_spawn = False
+
                     if (
                         switched_worldline_id
                         and switched_worldline_id != active_worldline_id
@@ -524,13 +575,10 @@ class ChatEngine:
                             on_delta=on_delta,
                         )
 
-                    serialized = json.dumps(
-                        tool_result,
-                        ensure_ascii=True,
-                        default=str,
+                    serialized = self._serialize_tool_result_for_context(
+                        tool_name=tool_name,
+                        tool_result=tool_result,
                     )
-                    if len(serialized) > 12_000:
-                        serialized = serialized[:12_000] + "...(truncated)"
                     messages.append(
                         ChatMessage(
                             role="tool",
@@ -1013,8 +1061,37 @@ class ChatEngine:
     def _tool_name_to_delta_type(self, tool_name: str) -> str | None:
         return tool_name_to_delta_type(tool_name)
 
-    def _tool_definitions(self, *, include_python: bool = True) -> list[ToolDefinition]:
-        return tool_definitions(include_python=include_python)
+    def _tool_definitions(
+        self,
+        *,
+        include_python: bool = True,
+        include_spawn_subagents: bool = True,
+    ) -> list[ToolDefinition]:
+        return tool_definitions(
+            include_python=include_python,
+            include_spawn_subagents=include_spawn_subagents,
+        )
+
+    async def _run_child_turn(
+        self,
+        child_worldline_id: str,
+        child_message: str,
+        child_max_iterations: int,
+        subagent_depth: int,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        child_engine = ChatEngine(
+            llm_client=self.llm_client,
+            max_iterations=child_max_iterations,
+            max_output_tokens=self.max_output_tokens,
+            worldline_service=self.worldline_service,
+        )
+        return await child_engine.run_turn(
+            worldline_id=child_worldline_id,
+            message=child_message,
+            skip_semantic_lane=True,
+            allow_subagents=False,
+            subagent_depth=subagent_depth,
+        )
 
     # ---- tool execution -----------------------------------------------------
 
@@ -1025,125 +1102,18 @@ class ChatEngine:
         carried_user_message: str,
         allowed_external_aliases: list[str] | None,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        on_delta: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        subagent_depth: int = 0,
     ) -> tuple[dict[str, Any], str | None]:
-        name = (tool_call.name or "").strip()
-        args = tool_call.arguments or {}
-
-        if name == "run_sql":
-            sql = args.get("sql")
-            if not isinstance(sql, str) or not sql.strip():
-                return {"error": "run_sql requires a non-empty 'sql' string"}, None
-
-            raw_limit = args.get("limit", 100)
-            try:
-                limit = int(raw_limit)
-            except (TypeError, ValueError):
-                limit = 100
-            limit = max(1, min(limit, 10_000))
-
-            try:
-                result = await execute_sql_tool(
-                    SqlToolRequest(
-                        worldline_id=worldline_id,
-                        sql=sql,
-                        limit=limit,
-                        allowed_external_aliases=allowed_external_aliases,
-                        call_id=tool_call.id or None,
-                    ),
-                    on_event=(
-                        None
-                        if on_event is None
-                        else lambda event: on_event(worldline_id, event)
-                    ),
-                )
-                return result, None
-            except HTTPException as exc:
-                return {"error": str(exc.detail), "status_code": exc.status_code}, None
-            except Exception as exc:  # pragma: no cover
-                return {"error": str(exc)}, None
-
-        if name == "run_python":
-            code = args.get("code")
-            if not isinstance(code, str) or not code.strip():
-                # #region agent log
-                _debug_log(
-                    run_id="initial",
-                    hypothesis_id="H8",
-                    location="backend/chat/engine.py:_execute_tool_call:run_python_invalid_args",
-                    message="run_python call missing/invalid code argument",
-                    data={
-                        "worldline_id": worldline_id,
-                        "call_id": tool_call.id,
-                        "args_keys": sorted(list(args.keys())),
-                        "args_preview": json.dumps(
-                            args, ensure_ascii=True, default=str
-                        )[:220],
-                    },
-                )
-                # #endregion
-                return {"error": "run_python requires a non-empty 'code' string"}, None
-
-            raw_timeout = args.get("timeout", 30)
-            try:
-                timeout = int(raw_timeout)
-            except (TypeError, ValueError):
-                timeout = 30
-            timeout = max(1, min(timeout, 120))
-
-            try:
-                result = await execute_python_tool(
-                    PythonToolRequest(
-                        worldline_id=worldline_id,
-                        code=code,
-                        timeout=timeout,
-                        call_id=tool_call.id or None,
-                    ),
-                    on_event=(
-                        None
-                        if on_event is None
-                        else lambda event: on_event(worldline_id, event)
-                    ),
-                )
-                return result, None
-            except HTTPException as exc:
-                if isinstance(exc.detail, dict):
-                    result_payload: dict[str, Any] = dict(exc.detail)
-                    if "status_code" not in result_payload:
-                        result_payload["status_code"] = exc.status_code
-                    return result_payload, None
-                return {"error": str(exc.detail), "status_code": exc.status_code}, None
-            except Exception as exc:  # pragma: no cover
-                return {"error": str(exc)}, None
-
-        if name == "time_travel":
-            from_event_id = args.get("from_event_id")
-            if not isinstance(from_event_id, str) or not from_event_id.strip():
-                return {"error": "time_travel requires 'from_event_id'"}, None
-
-            name_arg = args.get("name")
-            branch_name = name_arg if isinstance(name_arg, str) and name_arg else None
-
-            try:
-                branch_result = self.worldline_service.branch_from_event(
-                    BranchOptions(
-                        source_worldline_id=worldline_id,
-                        from_event_id=from_event_id,
-                        name=branch_name,
-                        append_events=True,
-                        carried_user_message=carried_user_message,
-                    )
-                )
-                if on_event is not None:
-                    for event_id in branch_result.created_event_ids:
-                        event = self._load_event_by_id(event_id)
-                        await on_event(branch_result.new_worldline_id, event)
-                return branch_result.to_tool_result(), branch_result.new_worldline_id
-            except HTTPException as exc:
-                return {"error": str(exc.detail), "status_code": exc.status_code}, None
-            except Exception as exc:  # pragma: no cover
-                return {"error": str(exc)}, None
-
-        return {"error": f"unknown tool '{name}'"}, None
+        return await self._get_tool_dispatcher().execute_tool_call(
+            worldline_id=worldline_id,
+            tool_call=tool_call,
+            carried_user_message=carried_user_message,
+            allowed_external_aliases=allowed_external_aliases,
+            on_event=on_event,
+            on_delta=on_delta,
+            subagent_depth=subagent_depth,
+        )
 
     async def _ensure_report_pdf_artifact(
         self,
@@ -1344,6 +1314,56 @@ class ChatEngine:
             tool_call=tool_call,
         )
 
+    def _serialize_tool_result_for_context(
+        self,
+        *,
+        tool_name: str,
+        tool_result: dict[str, Any],
+    ) -> str:
+        payload = tool_result
+        if tool_name == "spawn_subagents":
+            payload = self._compact_subagent_result_payload(tool_result)
+
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=True,
+            default=str,
+        )
+        if len(serialized) > 12_000:
+            serialized = serialized[:12_000] + "...(truncated)"
+        return serialized
+
+    def _compact_subagent_result_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return payload
+
+        compact = dict(payload)
+        raw_tasks = payload.get("tasks")
+        if not isinstance(raw_tasks, list):
+            return compact
+
+        compact_tasks: list[dict[str, Any]] = []
+        for task in raw_tasks[:50]:
+            if not isinstance(task, dict):
+                continue
+            compact_tasks.append(
+                {
+                    "task_index": task.get("task_index"),
+                    "task_label": task.get("task_label"),
+                    "status": task.get("status"),
+                    "child_worldline_id": task.get("child_worldline_id"),
+                    "result_worldline_id": task.get("result_worldline_id"),
+                    "assistant_preview": str(task.get("assistant_preview") or "")[:220],
+                    "error": str(task.get("error") or "")[:500],
+                }
+            )
+
+        compact["tasks"] = compact_tasks
+        return compact
+
     def _append_worldline_event(
         self,
         *,
@@ -1359,6 +1379,21 @@ class ChatEngine:
 
     def _load_event_by_id(self, event_id: str) -> dict[str, Any]:
         return load_event_by_id(event_id)
+
+    def _append_worldline_event_with_parent(
+        self,
+        *,
+        worldline_id: str,
+        parent_event_id: str | None,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return append_worldline_event_with_parent(
+            worldline_id=worldline_id,
+            parent_event_id=parent_event_id,
+            event_type=event_type,
+            payload=payload,
+        )
 
     def _max_worldline_rowid(self, worldline_id: str) -> int:
         return max_worldline_rowid(worldline_id)

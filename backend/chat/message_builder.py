@@ -20,6 +20,12 @@ SYSTEM_PROMPT = """You are an AI assistant with access to tools for data analysi
    For plots: use matplotlib (e.g. plt.plot, plt.bar) and call plt.savefig('filename.png') 
    to persist the image. The working directory is /workspace; saved files become viewable artifacts.
 
+3. **spawn_subagents**: Fan out parallel child investigations across branched worldlines. Use this when:
+   - The user asks to investigate many independent slices in parallel
+   - You need separate task-specific analysis runs and then one consolidated report
+   - A parent turn should wait for all child results before synthesis
+   - Prefer `goal` for automatic intelligent task splitting; use explicit `tasks` only when needed
+
 **CRITICAL - You MUST execute tools:**
 - Execute tools first, then summarize. Never respond with only a plan or description of what you would do. You MUST actually call run_sql and/or run_python.
 - When the user asks for analysis, data exploration, or visualizations: call the tools first, then summarize the results.
@@ -30,6 +36,7 @@ SYSTEM_PROMPT = """You are an AI assistant with access to tools for data analysi
 
 **Guidelines:**
 - Call SQL first to retrieve the data, then use Python if you need to visualize or further analyze it
+- Use spawn_subagents only for parallelizable independent tasks; keep each task message specific and concise
 - After getting results, provide insights and context, not just raw data
 - If a query might be expensive or return many rows, add appropriate LIMIT clauses
 - For run_python tool calls, arguments MUST be valid JSON with a non-empty `code` string containing executable Python.
@@ -269,19 +276,28 @@ def build_llm_messages_from_events(events: list[dict[str, Any]]) -> list[ChatMes
                 messages.append(ChatMessage(role="assistant", content=str(text)))
             continue
 
-        if event_type in {"tool_call_sql", "tool_call_python"}:
+        if event_type in {"tool_call_sql", "tool_call_python", "tool_call_subagents"}:
             if assistant_emitted_for_turn:
                 pending_tool_calls = []
                 pending_plan = None
                 assistant_emitted_for_turn = False
-            name = "run_sql" if event_type == "tool_call_sql" else "run_python"
+            if event_type == "tool_call_sql":
+                name = "run_sql"
+            elif event_type == "tool_call_python":
+                name = "run_python"
+            else:
+                name = "spawn_subagents"
             args = dict(payload)
             args.pop("call_id", None)
             call_id = payload.get("call_id") or event.get("id", "")
             pending_tool_calls.append({"id": call_id, "name": name, "arguments": args})
             continue
 
-        if event_type in {"tool_result_sql", "tool_result_python"}:
+        if event_type in {
+            "tool_result_sql",
+            "tool_result_python",
+            "tool_result_subagents",
+        }:
             parent_id = event.get("parent_event_id") or ""
             parent = by_id.get(parent_id, {})
             call_id = (parent.get("payload") or {}).get("call_id") or parent_id

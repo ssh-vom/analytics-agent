@@ -36,8 +36,46 @@ TIME_TRAVEL_TOOL_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+SPAWN_SUBAGENTS_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "goal": {"type": "string"},
+        "tasks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                    "label": {"type": "string"},
+                    "branch_name": {"type": "string"},
+                },
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+        },
+        "from_event_id": {"type": "string"},
+        "timeout_s": {"type": "integer", "minimum": 1, "maximum": 1800},
+        "max_iterations": {"type": "integer", "minimum": 1, "maximum": 100},
+        "max_subagents": {"type": "integer", "minimum": 1, "maximum": 50},
+        "max_parallel_subagents": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+        },
+    },
+    "anyOf": [
+        {"required": ["goal"]},
+        {"required": ["tasks"]},
+    ],
+    "additionalProperties": False,
+}
 
-def tool_definitions(*, include_python: bool = True) -> list[ToolDefinition]:
+
+def tool_definitions(
+    *, include_python: bool = True, include_spawn_subagents: bool = True
+) -> list[ToolDefinition]:
     tools: list[ToolDefinition] = [
         ToolDefinition(
             name="run_sql",
@@ -55,6 +93,20 @@ def tool_definitions(*, include_python: bool = True) -> list[ToolDefinition]:
             input_schema=TIME_TRAVEL_TOOL_SCHEMA,
         ),
     ]
+
+    if include_spawn_subagents:
+        tools.append(
+            ToolDefinition(
+                name="spawn_subagents",
+                description=(
+                    "Fan out parallel child investigations by branching worldlines from a "
+                    "prior event. Prefer passing `goal` and let the system split work into "
+                    "tasks automatically; optionally pass explicit `tasks`. The parent turn "
+                    "blocks until child worldlines finish, then returns aggregated results."
+                ),
+                input_schema=SPAWN_SUBAGENTS_TOOL_SCHEMA,
+            ),
+        )
 
     if include_python:
         tools.insert(
@@ -78,6 +130,8 @@ def tool_name_to_delta_type(tool_name: str) -> str | None:
         return "tool_call_sql"
     if tool_name == "run_python":
         return "tool_call_python"
+    if tool_name == "spawn_subagents":
+        return "tool_call_subagents"
     return None
 
 
@@ -88,7 +142,12 @@ def looks_like_complete_tool_args(args_delta: str) -> bool:
         parsed = json.loads(args_delta)
         if not isinstance(parsed, dict):
             return False
-        return "sql" in parsed or "code" in parsed
+        return (
+            "sql" in parsed
+            or "code" in parsed
+            or "tasks" in parsed
+            or "goal" in parsed
+        )
     except json.JSONDecodeError:
         return False
 
@@ -112,7 +171,11 @@ def chunk_has_non_empty_code_or_sql(args_delta: str, tool_name: str) -> bool:
             parsed.get("code") or parsed.get("python") or parsed.get("script") or parsed.get("input")
         )
         return code is not None
-    return "sql" in parsed or "code" in parsed
+    if tool_name == "spawn_subagents":
+        tasks = parsed.get("tasks")
+        goal = _extract_text_field(parsed.get("goal"))
+        return goal is not None or (isinstance(tasks, list) and len(tasks) > 0)
+    return "sql" in parsed or "code" in parsed or "tasks" in parsed or "goal" in parsed
 
 
 def _extract_text_field(value: Any) -> str | None:
@@ -195,6 +258,34 @@ def _normalize_timeout_or_limit(
         except (TypeError, ValueError):
             timeout = 30
         result["timeout"] = max(1, min(timeout, 120))
+    elif tool_name == "spawn_subagents":
+        raw_timeout = result.get("timeout_s", 300)
+        try:
+            timeout_s = int(raw_timeout)
+        except (TypeError, ValueError):
+            timeout_s = 300
+        result["timeout_s"] = max(1, min(timeout_s, 1800))
+
+        raw_iterations = result.get("max_iterations", 8)
+        try:
+            max_iterations = int(raw_iterations)
+        except (TypeError, ValueError):
+            max_iterations = 8
+        result["max_iterations"] = max(1, min(max_iterations, 100))
+
+        raw_max_subagents = result.get("max_subagents", 8)
+        try:
+            max_subagents = int(raw_max_subagents)
+        except (TypeError, ValueError):
+            max_subagents = 8
+        result["max_subagents"] = max(1, min(max_subagents, 50))
+
+        raw_max_parallel = result.get("max_parallel_subagents", 3)
+        try:
+            max_parallel = int(raw_max_parallel)
+        except (TypeError, ValueError):
+            max_parallel = 3
+        result["max_parallel_subagents"] = max(1, min(max_parallel, 10))
     return result
 
 
