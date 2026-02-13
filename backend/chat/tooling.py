@@ -143,10 +143,7 @@ def looks_like_complete_tool_args(args_delta: str) -> bool:
         if not isinstance(parsed, dict):
             return False
         return (
-            "sql" in parsed
-            or "code" in parsed
-            or "tasks" in parsed
-            or "goal" in parsed
+            "sql" in parsed or "code" in parsed or "tasks" in parsed or "goal" in parsed
         )
     except json.JSONDecodeError:
         return False
@@ -164,11 +161,16 @@ def chunk_has_non_empty_code_or_sql(args_delta: str, tool_name: str) -> bool:
     if not isinstance(parsed, dict):
         return False
     if tool_name == "run_sql":
-        sql = _extract_text_field(parsed.get("sql") or parsed.get("query") or parsed.get("statement"))
+        sql = _extract_text_field(
+            parsed.get("sql") or parsed.get("query") or parsed.get("statement")
+        )
         return sql is not None
     if tool_name == "run_python":
         code = _extract_text_field(
-            parsed.get("code") or parsed.get("python") or parsed.get("script") or parsed.get("input")
+            parsed.get("code")
+            or parsed.get("python")
+            or parsed.get("script")
+            or parsed.get("input")
         )
         return code is not None
     if tool_name == "spawn_subagents":
@@ -393,33 +395,3 @@ def normalize_tool_arguments(
 
     result.pop("_raw", None)
     return _normalize_timeout_or_limit(tool_name=resolved_tool, arguments=result)
-
-
-def tool_signature(*, worldline_id: str, tool_call: ToolCall) -> str:
-    return json.dumps(
-        {
-            "worldline_id": worldline_id,
-            "name": tool_call.name,
-            "arguments": tool_call.arguments or {},
-        },
-        ensure_ascii=True,
-        sort_keys=True,
-        default=str,
-    )
-
-
-def signature_for_dedup(*, worldline_id: str, tool_call: ToolCall) -> str:
-    """Signature for cross-turn dedup, excluding limit/timeout so minor param changes don't block."""
-    args = dict(tool_call.arguments or {})
-    args.pop("limit", None)
-    args.pop("timeout", None)
-    return json.dumps(
-        {
-            "worldline_id": worldline_id,
-            "name": tool_call.name,
-            "arguments": args,
-        },
-        ensure_ascii=True,
-        sort_keys=True,
-        default=str,
-    )

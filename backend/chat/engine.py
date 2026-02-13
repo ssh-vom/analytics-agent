@@ -63,15 +63,12 @@ from chat.subagents import (
 )
 from chat.tooling import (
     normalize_tool_arguments,
-    signature_for_dedup,
     tool_definitions,
     tool_name_to_delta_type,
-    tool_signature,
 )
 from chat.runtime.tool_dispatcher import ToolDispatcher
 from api.tools import (
     PythonToolRequest,
-    SqlToolRequest,
 )
 from api.worldlines import get_worldline_events
 from services.tool_executor import (
@@ -82,10 +79,6 @@ from worldline_service import WorldlineService
 
 logger = logging.getLogger(__name__)
 
-_RECENT_SIGNATURE_WINDOW = 24  # turn-local repeated-call check (full signature)
-_RECENT_HISTORY_SIGNATURE_WINDOW = (
-    5  # cross-turn "already ran recently" (dedup signature)
-)
 _MAX_INVALID_TOOL_PAYLOAD_RETRIES: dict[str, int] = {
     "run_sql": 2,
     "run_python": 3,
@@ -101,7 +94,7 @@ _MAX_PYTHON_EXECUTION_ERROR_RETRIES = 2
 @dataclass
 class ChatEngine:
     llm_client: LlmClient
-    max_iterations: int = 20
+    max_iterations: int = 75
     max_output_tokens: int | None = None
     worldline_service: WorldlineService = field(default_factory=WorldlineService)
     _tool_dispatcher: ToolDispatcher | None = field(default=None, repr=False)
@@ -181,12 +174,6 @@ class ChatEngine:
         messages = build_llm_messages_from_events(list(history_events))
         artifact_inventory = artifact_inventory_from_events(history_events)
         data_intent_summary = data_intent_from_events(history_events)
-        recent_successful_tool_signatures = self._recent_successful_tool_signatures(
-            worldline_id=active_worldline_id,
-            events=history_events,
-            limit=_RECENT_HISTORY_SIGNATURE_WINDOW,
-            use_dedup_signature=True,
-        )
         recent_artifact_names = artifact_name_set(artifact_inventory)
         user_requested_rerun_flag = user_requested_rerun_hint(message)
         required_tools: set[str] = (
@@ -197,32 +184,9 @@ class ChatEngine:
             if allow_tools
             else set()
         )
-        # #region agent log
-        _debug_log(
-            run_id="initial",
-            hypothesis_id="H6_H7",
-            location="backend/chat/engine.py:run_turn:built_messages",
-            message="Built LLM messages for turn",
-            data={
-                "worldline_id": active_worldline_id,
-                "message_count": len(messages),
-                "tail": [
-                    {
-                        "role": msg.role,
-                        "content_preview": (msg.content or "")[:140],
-                        "has_tool_calls": bool(msg.tool_calls),
-                        "tool_call_count": len(msg.tool_calls or []),
-                    }
-                    for msg in messages[-6:]
-                ],
-            },
-        )
-        # #endregion
         final_text: str | None = None
         stopped_due_to_invalid_payload = False
         stopped_due_to_guard_stop = False
-        successful_tool_signatures: set[str] = set()
-        successful_tool_results: dict[str, dict[str, Any]] = {}
         turn_artifact_names: set[str] = set()
         sql_success_count = 0
         python_success_count = 0
@@ -300,24 +264,6 @@ class ChatEngine:
                     )
                     delta_type = self._tool_name_to_delta_type(tool_name)
                     # #region agent log
-                    _debug_log(
-                        run_id="initial",
-                        hypothesis_id="H3_H4",
-                        location="backend/chat/engine.py:run_turn:tool_call",
-                        message="Model emitted tool call",
-                        data={
-                            "worldline_id": active_worldline_id,
-                            "tool_name": tool_name,
-                            "tool_call_id": tool_call.id,
-                            "tool_args_preview": json.dumps(
-                                tool_call.arguments or {},
-                                ensure_ascii=True,
-                                default=str,
-                            )[:220],
-                        },
-                    )
-                    # #endregion
-
                     if tool_name == "run_sql":
                         turn_state = await self._transition_state_and_emit(
                             current_state=turn_state,
@@ -407,62 +353,6 @@ class ChatEngine:
                         repeated_call_detected = True
                         break
 
-                    signature = self._tool_signature(
-                        worldline_id=active_worldline_id,
-                        tool_call=tool_call,
-                    )
-                    if signature in successful_tool_signatures:
-                        if on_delta is not None and delta_type is not None:
-                            await on_delta(
-                                active_worldline_id,
-                                {
-                                    "type": delta_type,
-                                    "call_id": tool_call.id or None,
-                                    "skipped": True,
-                                    "reason": "repeated_identical_tool_call",
-                                },
-                            )
-                        if requested_output_type == "report":
-                            final_text = (
-                                "I stopped because the model repeated the same tool call in "
-                                "this turn. I can continue once it emits a different tool "
-                                "call or a final answer based on existing results."
-                            )
-                            repeated_call_detected = True
-                            break
-                        messages.append(
-                            ChatMessage(
-                                role="system",
-                                content=(
-                                    "You repeated an identical tool call in this turn. "
-                                    "Do not repeat it again. Either emit a different tool "
-                                    "call that advances the task or produce the final answer "
-                                    "using prior results."
-                                ),
-                            )
-                        )
-                        continue
-
-                    if not user_requested_rerun_flag:
-                        dedup_signature = signature_for_dedup(
-                            worldline_id=active_worldline_id,
-                            tool_call=tool_call,
-                        )
-                        if dedup_signature in recent_successful_tool_signatures:
-                            if on_delta is not None and delta_type is not None:
-                                await on_delta(
-                                    active_worldline_id,
-                                    {
-                                        "type": delta_type,
-                                        "call_id": tool_call.id or None,
-                                        "skipped": True,
-                                        "reason": "recent_identical_successful_tool_call",
-                                    },
-                                )
-                            final_text = "Similar query ran recently; ask me to rerun if you need fresh results."
-                            repeated_call_detected = True
-                            break
-
                     if tool_name == "run_python" and not user_requested_rerun_flag:
                         code = (tool_call.arguments or {}).get("code")
                         if isinstance(code, str) and code.strip():
@@ -505,7 +395,7 @@ class ChatEngine:
                     # For the non-streaming path (on_delta is None), no deltas are emitted.
 
                     # Small delay between tool calls to avoid burning through API requests too fast
-                    await asyncio.sleep(0.4)
+                    await asyncio.sleep(0.1)
 
                     tool_result, switched_worldline_id = await self._execute_tool_call(
                         worldline_id=active_worldline_id,
@@ -534,21 +424,12 @@ class ChatEngine:
                             history_events
                         )
                         data_intent_summary = data_intent_from_events(history_events)
-                        recent_successful_tool_signatures = (
-                            self._recent_successful_tool_signatures(
-                                worldline_id=active_worldline_id,
-                                events=history_events,
-                                limit=_RECENT_HISTORY_SIGNATURE_WINDOW,
-                                use_dedup_signature=True,
-                            )
-                        )
                         recent_artifact_names = artifact_name_set(artifact_inventory)
                         turn_artifact_names.clear()
                         # Reset per-turn state for the new worldline context
                         sql_success_count = 0
                         python_success_count = 0
                         python_execution_error_count = 0
-                        successful_tool_signatures.clear()
                         turn_state = await self._transition_state_and_emit(
                             current_state=turn_state,
                             to_state="planning",
@@ -614,14 +495,6 @@ class ChatEngine:
                             break
 
                     if not tool_result.get("error"):
-                        successful_tool_signatures.add(signature)
-                        recent_successful_tool_signatures.add(
-                            signature_for_dedup(
-                                worldline_id=active_worldline_id,
-                                tool_call=tool_call,
-                            )
-                        )
-                        successful_tool_results[signature] = tool_result
                         if tool_name == "run_sql":
                             sql_success_count += 1
                             turn_state = await self._transition_state_and_emit(
@@ -910,22 +783,6 @@ class ChatEngine:
             worldline_id=active_worldline_id,
             on_delta=on_delta,
         )
-        _debug_log(
-            run_id="initial",
-            hypothesis_id="STATE_MACHINE_PHASE2",
-            location="backend/chat/engine.py:run_turn:state_transitions",
-            message="Completed turn with explicit state transitions",
-            data={
-                "worldline_id": active_worldline_id,
-                "transitions": state_transitions,
-                "final_state": turn_state,
-                "sql_success_count": sql_success_count,
-                "python_success_count": python_success_count,
-                "required_tools": sorted(required_tools),
-                "required_tool_enforcement_failures": required_tool_enforcement_failures,
-                "invalid_tool_payload_failures": invalid_tool_payload_failures,
-            },
-        )
 
         assistant_payload = {
             "text": final_text,
@@ -1135,63 +992,6 @@ class ChatEngine:
 
         return next_state
 
-    def _recent_successful_tool_signatures(
-        self,
-        *,
-        worldline_id: str,
-        events: list[dict[str, Any]],
-        limit: int,
-        use_dedup_signature: bool = False,
-    ) -> set[str]:
-        if limit <= 0:
-            return set()
-
-        sig_fn = signature_for_dedup if use_dedup_signature else self._tool_signature
-        by_id = {event.get("id"): event for event in events}
-        signatures: set[str] = set()
-
-        for event in reversed(events):
-            event_type = event.get("type")
-            if event_type not in {"tool_result_sql", "tool_result_python"}:
-                continue
-
-            payload = event.get("payload")
-            if not isinstance(payload, dict) or payload.get("error"):
-                continue
-
-            parent = by_id.get(event.get("parent_event_id"))
-            if not isinstance(parent, dict):
-                continue
-
-            parent_type = parent.get("type")
-            if parent_type == "tool_call_sql":
-                tool_name = "run_sql"
-            elif parent_type == "tool_call_python":
-                tool_name = "run_python"
-            else:
-                continue
-
-            parent_payload = parent.get("payload")
-            if not isinstance(parent_payload, dict):
-                continue
-            if str(parent_payload.get("call_id") or "") == "auto_report_pdf":
-                continue
-
-            args = dict(parent_payload)
-            args.pop("call_id", None)
-            normalized_args = normalize_tool_arguments(tool_name, args)
-            tc = ToolCall(
-                id=str(parent.get("id") or ""),
-                name=tool_name,
-                arguments=normalized_args,
-            )
-            signature = sig_fn(worldline_id=worldline_id, tool_call=tc)
-            signatures.add(signature)
-            if len(signatures) >= limit:
-                break
-
-        return signatures
-
     def _extract_artifact_names_from_python_code(self, code: str) -> set[str]:
         if not isinstance(code, str) or not code.strip():
             return set()
@@ -1226,12 +1026,6 @@ class ChatEngine:
         )
 
     # ---- helpers ------------------------------------------------------------
-
-    def _tool_signature(self, *, worldline_id: str, tool_call: ToolCall) -> str:
-        return tool_signature(
-            worldline_id=worldline_id,
-            tool_call=tool_call,
-        )
 
     def _serialize_tool_result_for_context(
         self,
