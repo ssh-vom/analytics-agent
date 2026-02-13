@@ -79,7 +79,6 @@ from services.tool_executor import (
     execute_sql_tool,
 )
 from worldline_service import WorldlineService
-from semantic.executor import SemanticExecutor, should_use_semantic_lane
 
 logger = logging.getLogger(__name__)
 
@@ -105,14 +104,7 @@ class ChatEngine:
     max_iterations: int = 20
     max_output_tokens: int | None = None
     worldline_service: WorldlineService = field(default_factory=WorldlineService)
-    _semantic_executor: SemanticExecutor | None = field(default=None, repr=False)
     _tool_dispatcher: ToolDispatcher | None = field(default=None, repr=False)
-
-    def _get_semantic_executor(self) -> SemanticExecutor:
-        """Lazily initialize semantic executor."""
-        if self._semantic_executor is None:
-            self._semantic_executor = SemanticExecutor(llm_client=self.llm_client)
-        return self._semantic_executor
 
     def _get_tool_dispatcher(self) -> ToolDispatcher:
         if self._tool_dispatcher is None:
@@ -141,7 +133,6 @@ class ChatEngine:
         message: str,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
         on_delta: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
-        skip_semantic_lane: bool = False,
         allow_subagents: bool = True,
         subagent_depth: int = 0,
         allow_tools: bool = True,
@@ -185,23 +176,6 @@ class ChatEngine:
         )
         if on_event is not None:
             await on_event(active_worldline_id, user_event)
-
-        # === SEMANTIC LANE CHECK ===
-        # Try deterministic SQL generation for high-confidence analytical queries
-        if not skip_semantic_lane:
-            try:
-                semantic_result = await self._try_semantic_lane(
-                    worldline_id=active_worldline_id,
-                    message=message,
-                    user_event=user_event,
-                    starting_rowid=starting_rowid_by_worldline[active_worldline_id],
-                    on_event=on_event,
-                    on_delta=on_delta,
-                )
-                if semantic_result is not None:
-                    return semantic_result
-            except Exception as e:
-                logger.debug(f"Semantic lane failed, using agentic: {e}")
 
         history_events = await self._load_worldline_events(active_worldline_id)
         messages = build_llm_messages_from_events(list(history_events))
@@ -983,85 +957,6 @@ class ChatEngine:
             events,
         )
 
-    # ---- semantic lane --------------------------------------------------------
-
-    async def _try_semantic_lane(
-        self,
-        *,
-        worldline_id: str,
-        message: str,
-        user_event: dict[str, Any],
-        starting_rowid: int,
-        on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
-        on_delta: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
-    ) -> tuple[str, list[dict[str, Any]]] | None:
-        """Try deterministic SQL via semantic layer. Returns None to fall back to agentic."""
-        executor = self._get_semantic_executor()
-        can_handle, resolution = await should_use_semantic_lane(
-            user_message=message,
-            executor=executor,
-            worldline_id=worldline_id,
-        )
-
-        if not can_handle or not resolution:
-            return None
-
-        # Compile to SQL
-        compiled = executor.compile_resolution(resolution, worldline_id)
-        if not compiled:
-            return None
-
-        sql = compiled["sql"]
-        summary = compiled["summary"]
-        confidence = compiled["confidence"]
-
-        logger.info(f"Semantic lane: confidence={confidence:.2f}, sql={sql[:80]}...")
-
-        # Execute SQL using existing tool infrastructure
-        try:
-            result = await execute_sql_tool(
-                SqlToolRequest(
-                    worldline_id=worldline_id,
-                    sql=sql,
-                    limit=resolution.query_spec.limit or 1000,
-                ),
-                on_event=(
-                    None
-                    if on_event is None
-                    else lambda event: on_event(worldline_id, event)
-                ),
-            )
-        except Exception as e:
-            logger.warning(f"Semantic SQL execution failed: {e}")
-            return None  # Fall back to agentic
-
-        # Build response text
-        row_count = result.get("row_count", 0)
-        what = ", ".join(summary.get("what", [])) or "the requested data"
-        by = summary.get("by", [])
-        response = f"Here are the results showing {what}"
-        if by:
-            response += f" by {', '.join(by)}"
-        response += f". Found {row_count:,} rows."
-
-        # Persist assistant message
-        assistant_event = self._append_worldline_event(
-            worldline_id=worldline_id,
-            event_type="assistant_message",
-            payload={
-                "text": response,
-                "via": "semantic_lane",
-                "confidence": confidence,
-            },
-        )
-        if on_event:
-            await on_event(worldline_id, assistant_event)
-
-        events = self._events_since_rowid(
-            worldline_id=worldline_id, rowid=starting_rowid
-        )
-        return worldline_id, events
-
     # ---- real-time streaming bridge -----------------------------------------
 
     async def _stream_llm_response(
@@ -1112,7 +1007,6 @@ class ChatEngine:
         return await child_engine.run_turn(
             worldline_id=child_worldline_id,
             message=child_message,
-            skip_semantic_lane=True,
             allow_subagents=False,
             subagent_depth=subagent_depth,
             allow_tools=allow_tools,
@@ -1457,9 +1351,7 @@ class ChatEngine:
             )
 
         successful_summary = (
-            " | ".join(completed_slices[:8])
-            if completed_slices
-            else "none"
+            " | ".join(completed_slices[:8]) if completed_slices else "none"
         )
         failed_summary = (
             " | ".join(failed_or_missing_slices[:8])

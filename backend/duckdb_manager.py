@@ -1,4 +1,5 @@
 import duckdb
+import math
 import shutil
 from pathlib import Path
 from typing import Any
@@ -178,6 +179,18 @@ def capture_worldline_snapshot(worldline_id: str, event_id: str) -> Path:
     return target_snapshot_path
 
 
+def _normalize_value(val: Any) -> Any:
+    if val is None:
+        return None
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    return val
+
+
+def _normalize_row(row: tuple) -> list:
+    return [_normalize_value(v) for v in row]
+
+
 def execute_read_query(
     worldline_id: str,
     sql: str,
@@ -194,7 +207,7 @@ def execute_read_query(
         cur = conn.execute(sql)
         rows_all = cur.fetchall()
         columns = [{"name": d[0], "type": str(d[1])} for d in cur.description]
-        rows_preview = [list(row) for row in rows_all[:limit]]
+        rows_preview = [_normalize_row(row) for row in rows_all[:limit]]
         return {
             "columns": columns,
             "rows": rows_preview,

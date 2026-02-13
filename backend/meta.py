@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import sqlite3
 import json
+import math
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -160,12 +161,26 @@ def _ensure_chat_turn_jobs_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _sanitize_payload(obj: Any) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_payload(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_payload(v) for v in obj]
+    return obj
+
+
 def event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    payload = json.loads(row["payload_json"])
+    payload = _sanitize_payload(payload)
     return {
         "id": row["id"],
         "parent_event_id": row["parent_event_id"],
         "type": row["type"],
-        "payload": json.loads(row["payload_json"]),
+        "payload": payload,
         "created_at": row["created_at"],
     }
 

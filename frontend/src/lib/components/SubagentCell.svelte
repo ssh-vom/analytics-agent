@@ -243,7 +243,7 @@
       completedCount === 0 &&
       failedCount === 0 &&
       timedOutCount === 0);
-  $: lifecycleStatus: LifecycleStatus = !hasResult
+  $: lifecycleStatus = !hasResult
     ? "queued"
     : isStreamingResult
       ? isRetrying
