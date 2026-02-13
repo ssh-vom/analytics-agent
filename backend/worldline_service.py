@@ -13,6 +13,7 @@ from meta import (
 )
 from duckdb_manager import (
     clone_worldline_db_from_file,
+    copy_external_sources_to_worldline,
     ensure_worldline_db,
     worldline_db_path,
 )
@@ -177,6 +178,10 @@ class WorldlineService:
                 _ = ensure_worldline_db(new_worldline_id)
             else:
                 _ = clone_worldline_db_from_file(source_state_path, new_worldline_id)
+
+            copy_external_sources_to_worldline(
+                options.source_worldline_id, new_worldline_id
+            )
 
             try:
                 worldline_created_event_id = append_event_and_advance_head(

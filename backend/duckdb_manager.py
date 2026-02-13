@@ -167,6 +167,42 @@ def clone_worldline_db_from_file(source_path: Path, target_worldline_id: str) ->
     return ensure_worldline_db(target_worldline_id)
 
 
+def copy_external_sources_to_worldline(
+    source_worldline_id: str, target_worldline_id: str
+) -> None:
+    source_path = worldline_db_path(source_worldline_id)
+    if not source_path.exists():
+        return
+
+    source_conn = duckdb.connect(str(source_path))
+    try:
+        sources = _load_external_sources(source_conn)
+    finally:
+        source_conn.close()
+
+    if not sources:
+        return
+
+    target_conn = duckdb.connect(str(worldline_db_path(target_worldline_id)))
+    try:
+        target_conn.execute(
+            "CREATE TABLE IF NOT EXISTS _external_sources ("
+            "alias VARCHAR PRIMARY KEY, db_path VARCHAR, db_type VARCHAR, attached_at TIMESTAMP)"
+        )
+        for source in sources:
+            target_conn.execute(
+                "INSERT OR REPLACE INTO _external_sources (alias, db_path, db_type, attached_at) "
+                "VALUES (?, ?, 'duckdb', CURRENT_TIMESTAMP)",
+                [source["alias"], source["db_path"]],
+            )
+            if Path(source["db_path"]).exists():
+                target_conn.execute(
+                    f"ATTACH '{source['db_path']}' AS {source['alias']} (READ_ONLY)"
+                )
+    finally:
+        target_conn.close()
+
+
 def snapshot_db_path(worldline_id: str, event_id: str) -> Path:
     return meta.DB_DIR / "snapshots" / worldline_id / f"{event_id}.duckdb"
 

@@ -58,3 +58,23 @@ Set at least one LLM API key:
 - `GET /api/chat/jobs`: list background chat jobs (optionally filtered).
 - `POST /api/chat/jobs/{job_id}/ack`: acknowledge a completed/failed job.
 - `GET /api/threads/{thread_id}/worldline-summaries`: fetch worldline metadata (message counts, activity, and job summary) in one request.
+
+## Multi-Branch Subagent Fan-Out
+
+The chat engine supports a `spawn_subagents` tool for parallel branch exploration:
+
+- Parent turn calls `spawn_subagents` with a high-level `goal` (or explicit `tasks`).
+- Backend branches one child worldline per task from `from_event_id` (or current head).
+- Each child runs as a parallel child turn in its own worldline.
+- Parent turn blocks for fan-in and receives one aggregated result payload, then produces a final consolidated report.
+
+Tool payload shape:
+
+```json
+{
+  "goal": "Investigate anomalies across key states and summarize risks",
+  "from_event_id": "event_...",
+  "timeout_s": 300,
+  "max_iterations": 8
+}
+```
