@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -9,7 +8,6 @@ from fastapi import HTTPException
 from api.tools import PythonToolRequest, SqlToolRequest
 from chat.llm_client import ToolCall
 from chat.runtime.subagent_runner import SubagentRunner
-from debug_log import debug_log as _debug_log
 from worldline_service import BranchOptions, WorldlineService
 
 
@@ -58,7 +56,9 @@ class ToolDispatcher:
             if not isinstance(sql, str) or not sql.strip():
                 return {"error": "run_sql requires a non-empty 'sql' string"}, None
 
-            limit = self._coerce_int_arg(args.get("limit"), default=100, minimum=1, maximum=10_000)
+            limit = self._coerce_int_arg(
+                args.get("limit"), default=100, minimum=1, maximum=10_000
+            )
 
             try:
                 result = await self._execute_sql_tool(
@@ -84,21 +84,11 @@ class ToolDispatcher:
         if name == "run_python":
             code = args.get("code")
             if not isinstance(code, str) or not code.strip():
-                _debug_log(
-                    run_id="initial",
-                    hypothesis_id="H8",
-                    location="backend/chat/runtime/tool_dispatcher.py:run_python_invalid_args",
-                    message="run_python call missing/invalid code argument",
-                    data={
-                        "worldline_id": worldline_id,
-                        "call_id": tool_call.id,
-                        "args_keys": sorted(list(args.keys())),
-                        "args_preview": json.dumps(args, ensure_ascii=True, default=str)[:220],
-                    },
-                )
                 return {"error": "run_python requires a non-empty 'code' string"}, None
 
-            timeout = self._coerce_int_arg(args.get("timeout"), default=30, minimum=1, maximum=120)
+            timeout = self._coerce_int_arg(
+                args.get("timeout"), default=30, minimum=1, maximum=120
+            )
 
             try:
                 result = await self._execute_python_tool(
@@ -176,9 +166,11 @@ class ToolDispatcher:
                 else None
             )
             try:
-                from_event_id, from_event_resolution = self._resolve_fork_event_id_or_head(
-                    source_worldline_id=worldline_id,
-                    requested_from_event_id=requested_from_event_id,
+                from_event_id, from_event_resolution = (
+                    self._resolve_fork_event_id_or_head(
+                        source_worldline_id=worldline_id,
+                        requested_from_event_id=requested_from_event_id,
+                    )
                 )
             except HTTPException as exc:
                 return {"error": str(exc.detail), "status_code": exc.status_code}, None
@@ -213,12 +205,14 @@ class ToolDispatcher:
                 worldline_service=self._worldline_service,
                 spawn_subagents_blocking=self._spawn_subagents_blocking,
                 get_turn_coordinator=self._get_turn_coordinator,
-                run_child_turn=lambda child_worldline_id, child_message, child_max_iterations, allow_tools=True: self._run_child_turn(
-                    child_worldline_id,
-                    child_message,
-                    child_max_iterations,
-                    subagent_depth + 1,
-                    allow_tools,
+                run_child_turn=lambda child_worldline_id, child_message, child_max_iterations, allow_tools=True: (
+                    self._run_child_turn(
+                        child_worldline_id,
+                        child_message,
+                        child_max_iterations,
+                        subagent_depth + 1,
+                        allow_tools,
+                    )
                 ),
             )
             result = await runner.run(
@@ -250,6 +244,6 @@ class ToolDispatcher:
     ) -> int:
         try:
             parsed = int(raw_value if raw_value is not None else default)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             parsed = default
         return max(minimum, min(parsed, maximum))

@@ -85,6 +85,12 @@ class _CapacityPool:
 
 
 class CapacityController:
+    """Controls capacity for LLM API operations (turns and subagents).
+
+    Note: Python/sandbox execution capacity is now managed by SandboxManager
+    with its own pool limiting. This controller only handles LLM API rate limiting.
+    """
+
     def __init__(
         self,
         *,
@@ -92,8 +98,6 @@ class CapacityController:
         max_turn_queue: int,
         max_subagent_concurrency: int,
         max_subagent_queue: int,
-        max_python_concurrency: int,
-        max_python_queue: int,
     ) -> None:
         self._turn_pool = _CapacityPool(
             name="turn",
@@ -104,11 +108,6 @@ class CapacityController:
             name="subagent",
             max_concurrency=max_subagent_concurrency,
             max_queue=max_subagent_queue,
-        )
-        self._python_pool = _CapacityPool(
-            name="python",
-            max_concurrency=max_python_concurrency,
-            max_queue=max_python_queue,
         )
 
     @asynccontextmanager
@@ -121,16 +120,10 @@ class CapacityController:
         async with self._subagent_pool.lease() as lease:
             yield lease
 
-    @asynccontextmanager
-    async def lease_python(self) -> AsyncIterator[CapacityLease]:
-        async with self._python_pool.lease() as lease:
-            yield lease
-
     async def snapshot(self) -> dict[str, dict[str, int]]:
         return {
             "turn": await self._turn_pool.snapshot(),
             "subagent": await self._subagent_pool.snapshot(),
-            "python": await self._python_pool.snapshot(),
         }
 
 
@@ -158,9 +151,8 @@ def get_capacity_controller() -> CapacityController:
         _capacity_controller = CapacityController(
             max_turn_concurrency=_from_env("CHAT_TURN_MAX_CONCURRENCY", 64),
             max_turn_queue=_from_env("CHAT_TURN_MAX_QUEUE", 512),
-            max_subagent_concurrency=_from_env("CHAT_SUBAGENT_MAX_CONCURRENCY", 12),
-            max_subagent_queue=_from_env("CHAT_SUBAGENT_MAX_QUEUE", 256),
-            max_python_concurrency=_from_env("CHAT_PYTHON_MAX_CONCURRENCY", 16),
-            max_python_queue=_from_env("CHAT_PYTHON_MAX_QUEUE", 256),
+            # Conservative subagent limits for demo
+            max_subagent_concurrency=_from_env("CHAT_SUBAGENT_MAX_CONCURRENCY", 6),
+            max_subagent_queue=_from_env("CHAT_SUBAGENT_MAX_QUEUE", 32),
         )
         return _capacity_controller

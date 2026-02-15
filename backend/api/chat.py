@@ -31,6 +31,7 @@ from services.chat_runtime import (
     _ensure_chat_runtime,
     get_turn_coordinator,
 )
+from services.tool_executor import get_sandbox_manager
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -119,7 +120,9 @@ def _job_row_to_dict(row) -> dict[str, Any]:
         "id": row["id"],
         "thread_id": row["thread_id"],
         "worldline_id": row["worldline_id"],
-        "parent_job_id": row["parent_job_id"] if "parent_job_id" in row.keys() else None,
+        "parent_job_id": row["parent_job_id"]
+        if "parent_job_id" in row.keys()
+        else None,
         "fanout_group_id": (
             row["fanout_group_id"] if "fanout_group_id" in row.keys() else None
         ),
@@ -608,9 +611,7 @@ async def get_chat_session(thread_id: str):
     jobs = [_job_row_to_dict(row) for row in job_rows]
     preferred_worldline_id: str | None = None
     active_jobs = [
-        job
-        for job in jobs
-        if job["status"] in {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}
+        job for job in jobs if job["status"] in {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}
     ]
     if active_jobs:
         active_jobs.sort(
@@ -643,6 +644,7 @@ async def get_chat_session(thread_id: str):
 async def get_chat_runtime_snapshot():
     return {
         "capacity": await get_capacity_controller().snapshot(),
+        "sandbox_pool": get_sandbox_manager().pool_status(),
     }
 
 

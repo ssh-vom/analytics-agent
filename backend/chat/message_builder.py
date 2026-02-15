@@ -41,7 +41,7 @@ SYSTEM_PROMPT = """You are an AI assistant with access to tools for data analysi
 - If a query might be expensive or return many rows, add appropriate LIMIT clauses
 - For run_python tool calls, arguments MUST be valid JSON with a non-empty `code` string containing executable Python.
 - Never emit empty `{}` tool arguments, empty `code`, nested JSON-in-`code`, or comments-only placeholder code.
-- Never write Python code that calls backend tools such as run_sql(), run_python(), or time_travel().
+- Never write Python code that calls backend tools such as run_sql() or run_python().
 - Tools must be invoked as tool calls only. Python code must be standard Python (pandas/numpy/matplotlib/etc.) and must not reference tool functions.
 - In Python, use `LATEST_SQL_RESULT` (dict) and `LATEST_SQL_DF` (pandas DataFrame, when available), which are auto-injected from the latest successful SQL result.
 - Do not invent or simulate dataset rows in Python. If more fields are needed, call run_sql again to fetch exactly those columns.

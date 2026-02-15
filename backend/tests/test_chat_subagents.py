@@ -110,8 +110,10 @@ class ChatSubagentTests(unittest.TestCase):
         self.assertEqual(result["requested_task_count"], 2)
         self.assertEqual(result["accepted_task_count"], 2)
         self.assertEqual(result["truncated_task_count"], 0)
-        self.assertEqual(result["max_subagents"], 8)
-        self.assertEqual(result["max_parallel_subagents"], 3)
+        self.assertEqual(result["max_subagents"], 6)  # Conservative default for demo
+        self.assertEqual(
+            result["max_parallel_subagents"], 2
+        )  # Conservative default for demo
         self.assertEqual(result["completed_count"], 2)
         self.assertEqual(result["failed_count"], 0)
         self.assertEqual(result["timed_out_count"], 0)
@@ -128,7 +130,9 @@ class ChatSubagentTests(unittest.TestCase):
             self.assertEqual(task["retry_count"], 0)
             self.assertFalse(task["recovered"])
             self.assertIn("terminal_reason", task)
-            self.assertTrue(str(task["assistant_preview"]).startswith("child complete:"))
+            self.assertTrue(
+                str(task["assistant_preview"]).startswith("child complete:")
+            )
             self.assertTrue(str(task["assistant_text"]).startswith("child complete:"))
 
         with meta.get_conn() as conn:
@@ -341,7 +345,7 @@ class ChatSubagentTests(unittest.TestCase):
                 timeout_s=10,
                 max_iterations=4,
                 max_subagents=10,
-                max_parallel_subagents=4,
+                max_parallel_subagents=3,  # Capped at _MAX_PARALLEL_SUBAGENTS (3)
             )
         )
 
@@ -350,7 +354,7 @@ class ChatSubagentTests(unittest.TestCase):
         self.assertEqual(result["truncated_task_count"], 2)
         self.assertEqual(result["task_count"], 10)
         self.assertEqual(result["max_subagents"], 10)
-        self.assertEqual(result["max_parallel_subagents"], 4)
+        self.assertEqual(result["max_parallel_subagents"], 3)  # Capped at hard limit
         self.assertEqual(len(result["tasks"]), 10)
 
     def test_spawn_subagents_blocking_retries_loop_limit_and_recovers(self) -> None:
@@ -445,7 +449,9 @@ class ChatSubagentTests(unittest.TestCase):
         self.assertEqual(len(retrying_updates), 1)
         self.assertEqual(retrying_updates[0]["retry_count"], 1)
 
-    def test_spawn_subagents_blocking_marks_unrecovered_loop_limit_as_failed(self) -> None:
+    def test_spawn_subagents_blocking_marks_unrecovered_loop_limit_as_failed(
+        self,
+    ) -> None:
         thread_id = self._create_thread()
         source_worldline_id = self._create_worldline(thread_id)
         anchor_event_id = self._append_anchor_event(source_worldline_id)

@@ -142,22 +142,6 @@ class ChatEngine:
         allowed_external_aliases = extract_selected_external_aliases(message)
         requested_output_type = extract_output_type(message)
 
-        # #region agent log
-        _debug_log(
-            run_id="initial",
-            hypothesis_id="H3_H4",
-            location="backend/chat/engine.py:run_turn:start",
-            message="Starting chat turn",
-            data={
-                "worldline_id": worldline_id,
-                "message_preview": message[:200],
-                "allow_tools": allow_tools,
-                "allow_subagents": effective_allow_subagents,
-                "subagent_depth": subagent_depth,
-            },
-        )
-        # #endregion
-
         active_worldline_id = worldline_id
         starting_rowid_by_worldline = {
             active_worldline_id: self._max_worldline_rowid(active_worldline_id)
@@ -461,6 +445,31 @@ class ChatEngine:
                                     content=partial_failure_nudge,
                                 )
                             )
+                        # Merge artifacts from subagents into parent inventory
+                        merged_artifacts = tool_result.get("merged_artifacts", [])
+                        if merged_artifacts:
+                            new_entries = [
+                                {
+                                    "artifact_id": a.get("artifact_id", ""),
+                                    "name": a.get("name", ""),
+                                    "type": a.get("type", "file"),
+                                    "created_at": "",
+                                    "source_call_id": tool_call.id,
+                                    "source_event_id": "",
+                                    "producer": "spawn_subagents",
+                                }
+                                for a in merged_artifacts
+                                if isinstance(a, dict) and a.get("name")
+                            ]
+                            artifact_inventory = merge_artifact_inventory(
+                                artifact_inventory,
+                                new_entries,
+                            )
+                            for entry in new_entries:
+                                name = str(entry.get("name") or "").strip().lower()
+                                if name:
+                                    recent_artifact_names.add(name)
+                                    turn_artifact_names.add(name)
 
                     if tool_name == "run_python" and is_empty_python_payload_error(
                         tool_result
@@ -1062,6 +1071,13 @@ class ChatEngine:
         for task in raw_tasks[:50]:
             if not isinstance(task, dict):
                 continue
+            # Include artifact references for each task
+            task_artifacts = task.get("child_artifacts", [])
+            compact_artifact_refs = [
+                {"name": a.get("name"), "type": a.get("type")}
+                for a in task_artifacts
+                if isinstance(a, dict) and a.get("name")
+            ][:10]  # Limit to 10 artifacts per task
             compact_tasks.append(
                 {
                     "task_index": task.get("task_index"),
@@ -1071,6 +1087,8 @@ class ChatEngine:
                     "result_worldline_id": task.get("result_worldline_id"),
                     "assistant_preview": str(task.get("assistant_preview") or "")[:220],
                     "error": str(task.get("error") or "")[:500],
+                    "anchor_context": str(task.get("anchor_context") or "")[:220],
+                    "artifacts": compact_artifact_refs,
                 }
             )
 

@@ -85,13 +85,6 @@ def tool_definitions(
             ),
             input_schema=SQL_TOOL_SCHEMA,
         ),
-        ToolDefinition(
-            name="time_travel",
-            description=(
-                "Create a new worldline from a prior event and continue execution there."
-            ),
-            input_schema=TIME_TRAVEL_TOOL_SCHEMA,
-        ),
     ]
 
     if include_spawn_subagents:

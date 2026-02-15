@@ -5,6 +5,7 @@ Tool execution services - SQL and Python execution logic.
 from __future__ import annotations
 
 import json
+import os
 import re
 import textwrap
 import time
@@ -12,9 +13,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from fastapi import HTTPException
 
-from debug_log import debug_log as _debug_log
 from duckdb_manager import execute_read_query
-from chat.runtime.capacity import CapacityLimitError, get_capacity_controller
 from meta import (
     EventStoreConflictError,
     append_event_and_advance_head,
@@ -24,13 +23,29 @@ from meta import (
     new_id,
 )
 from sandbox.docker_runner import DockerSandboxRunner
-from sandbox.manager import SandboxManager
+from sandbox.manager import DEFAULT_MAX_SANDBOXES, SandboxCapacityError, SandboxManager
 
 if TYPE_CHECKING:
     from api.tools import SqlToolRequest, PythonToolRequest
 
-# Singleton sandbox manager
-_sandbox_manager = SandboxManager(DockerSandboxRunner())
+
+def _from_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# Singleton sandbox manager with configurable pool size
+# Conservative defaults for demo - max 3 sandboxes, max 8 queued
+_sandbox_manager = SandboxManager(
+    DockerSandboxRunner(),
+    max_sandboxes=_from_env("MAX_SANDBOXES", DEFAULT_MAX_SANDBOXES),
+    max_queue=_from_env("MAX_SANDBOX_QUEUE", 8),
+)
 
 READ_ONLY_PREFIXES = ("select", "with", "show", "describe", "explain")
 ToolEventCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -429,38 +444,9 @@ async def execute_python_tool(
         )
         sandbox_warm = worldline_id in set(active_worldlines)
         replay_python_codes = [] if sandbox_warm else prior_python_codes
-        _debug_log(
-            run_id="initial",
-            hypothesis_id="H1_H2",
-            location="services/tool_executor.py:execute_python_tool:prior_history",
-            message="Loaded prior python execution history",
-            data={
-                "worldline_id": worldline_id,
-                "parent_event_id": parent_event_id,
-                "prior_events_count": len(prior_events),
-                "prior_python_code_count": len(prior_python_codes),
-                "sandbox_warm": sandbox_warm,
-                "replay_python_code_count_applied": len(replay_python_codes),
-                "has_sql_context": latest_sql_result is not None,
-                "current_code_preview": code[:180],
-            },
-        )
         execution_code = _build_replay_code(replay_python_codes, code)
         if sql_context_code:
             execution_code = f"{sql_context_code}\n\n{execution_code}"
-        _debug_log(
-            run_id="initial",
-            hypothesis_id="H1",
-            location="services/tool_executor.py:execute_python_tool:execution_code",
-            message="Built python execution payload for sandbox",
-            data={
-                "worldline_id": worldline_id,
-                "prior_replay_steps": len(replay_python_codes),
-                "has_sql_context": bool(sql_context_code),
-                "execution_code_len": len(execution_code),
-                "execution_code_preview": execution_code[:220],
-            },
-        )
 
         call_payload: dict[str, Any] = {"code": code, "timeout": timeout}
         if call_id:
@@ -482,48 +468,21 @@ async def execute_python_tool(
                 execution_code=execution_code,
             )
             if preflight_error_payload is not None:
-                _debug_log(
-                    run_id="initial",
-                    hypothesis_id="H9",
-                    location="services/tool_executor.py:execute_python_tool:preflight_error",
-                    message="Python preflight blocked sandbox execution",
-                    data={
-                        "worldline_id": worldline_id,
-                        "call_id": call_id,
-                        "error_code": preflight_error_payload.get("error_code"),
-                        "error": preflight_error_payload.get("error"),
-                    },
-                )
                 raise PythonPreflightError(preflight_error_payload)
 
-            _debug_log(
-                run_id="initial",
-                hypothesis_id="H1_H5",
-                location="services/tool_executor.py:execute_python_tool:before_execute",
-                message="Dispatching code to sandbox manager",
-                data={
-                    "worldline_id": worldline_id,
-                    "timeout": timeout,
-                    "call_id": call_id,
-                },
-            )
-            capacity_wait_ms = 0
-            queue_reason: str | None = None
             try:
-                async with get_capacity_controller().lease_python() as python_lease:
-                    capacity_wait_ms = python_lease.wait_ms
-                    queue_reason = python_lease.queue_reason
-                    raw_result = await _sandbox_manager.execute(
-                        worldline_id=worldline_id,
-                        code=execution_code,
-                        timeout_s=timeout,
-                    )
-            except CapacityLimitError as exc:
+                # Sandbox capacity is now managed by SandboxManager's pool
+                raw_result = await _sandbox_manager.execute(
+                    worldline_id=worldline_id,
+                    code=execution_code,
+                    timeout_s=timeout,
+                )
+            except SandboxCapacityError as exc:
                 raise HTTPException(
                     status_code=429,
                     detail={
                         "error": str(exc),
-                        "error_code": "python_capacity_limit_reached",
+                        "error_code": "sandbox_capacity_limit_reached",
                         "retryable": True,
                     },
                 ) from exc
@@ -555,8 +514,6 @@ async def execute_python_tool(
                 "artifacts": api_artifacts,
                 "previews": raw_result.get("previews", {"dataframes": []}),
                 "execution_ms": int((time.perf_counter() - started) * 1000),
-                "capacity_wait_ms": capacity_wait_ms,
-                "queue_reason": queue_reason,
             }
 
             result_event_id = append_event_and_advance_head(
@@ -588,19 +545,6 @@ async def execute_python_tool(
             conn.commit()
             if on_event is not None:
                 await on_event(_load_event_by_id(conn, result_event_id))
-            _debug_log(
-                run_id="initial",
-                hypothesis_id="H1_H5",
-                location="services/tool_executor.py:execute_python_tool:result",
-                message="Python tool execution completed",
-                data={
-                    "worldline_id": worldline_id,
-                    "result_error": api_result.get("error"),
-                    "stdout_len": len(str(api_result.get("stdout", ""))),
-                    "stderr_len": len(str(api_result.get("stderr", ""))),
-                    "artifact_count": len(api_result.get("artifacts", [])),
-                },
-            )
             return api_result
         except PythonPreflightError as exc:
             await _append_worldline_event(
@@ -624,17 +568,6 @@ async def execute_python_tool(
         except HTTPException:
             raise
         except Exception as exc:
-            _debug_log(
-                run_id="initial",
-                hypothesis_id="H5",
-                location="services/tool_executor.py:execute_python_tool:error",
-                message="Python tool execution raised exception",
-                data={
-                    "worldline_id": worldline_id,
-                    "call_id": call_id,
-                    "error": str(exc),
-                },
-            )
             await _append_worldline_event(
                 conn,
                 worldline_id=worldline_id,

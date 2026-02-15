@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
 
+from chat.artifact_merger import copy_artifacts_to_parent
 from chat.jobs import WorldlineTurnCoordinator
 from chat.llm_client import ChatMessage, LlmClient
 from chat.runtime.capacity import CapacityLimitError, get_capacity_controller
@@ -19,10 +20,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_S = 300
 _DEFAULT_MAX_ITERATIONS = 8
-_DEFAULT_MAX_SUBAGENTS = 8
-_DEFAULT_MAX_PARALLEL_SUBAGENTS = 3
-_MAX_SUBAGENTS = 50
-_MAX_PARALLEL_SUBAGENTS = 10
+_DEFAULT_MAX_SUBAGENTS = 6  # Conservative for demo
+_DEFAULT_MAX_PARALLEL_SUBAGENTS = 2  # Conservative - matches sandbox pool size
+_MAX_SUBAGENTS = 12  # Hard cap - prevent runaway fanouts
+_MAX_PARALLEL_SUBAGENTS = 3  # Hard cap - limited by sandbox pool (3 max)
+_MAX_TASK_MESSAGE_CHARS = 4000
+_ANCHOR_CONTEXT_MAX_CHARS = 1400
 _MAX_RETRIES_PER_SUBAGENT = 3
 _RETRY_DELAY_BASE_SECONDS = 1.0
 _RETRY_DELAY_MAX_SECONDS = 8.0
@@ -129,7 +132,38 @@ def _assistant_text_from_events(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _assistant_payload_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _artifacts_from_child_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract artifact metadata from child worldline events."""
+    artifacts: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("type") != "tool_result_python":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        event_artifacts = payload.get("artifacts")
+        if not isinstance(event_artifacts, list):
+            continue
+        for artifact in event_artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            name = str(artifact.get("name") or "").strip()
+            if not name:
+                continue
+            artifacts.append(
+                {
+                    "artifact_id": artifact.get("artifact_id"),
+                    "name": name,
+                    "type": str(artifact.get("type") or "file"),
+                    "path": str(artifact.get("path") or ""),
+                }
+            )
+    return artifacts
+
+
+def _assistant_payload_from_events(
+    events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
     for event in reversed(events):
         if event.get("type") != "assistant_message":
             continue
@@ -173,7 +207,11 @@ def _is_loop_limit_outcome(
     *,
     assistant_text: str | None = None,
 ) -> bool:
-    text = assistant_text if assistant_text is not None else _assistant_text_from_events(events)
+    text = (
+        assistant_text
+        if assistant_text is not None
+        else _assistant_text_from_events(events)
+    )
     if isinstance(text, str) and _LOOP_LIMIT_TEXT_MARKER in text.lower():
         return True
     payload = _assistant_payload_from_events(events)
@@ -188,24 +226,24 @@ def _fallback_task_split(goal: str, *, max_tasks: int) -> list[dict[str, str]]:
         return []
     base = [
         {
-            "label": "schema-scout",
+            "label": "anchor",
             "message": (
-                f"Investigate schema and relevant tables for this goal: {clean_goal}. "
-                "Return only the key tables/columns needed."
+                "Compute the canonical anchor dataset (entities + core metrics) for this "
+                f"goal: {clean_goal}. Return a D-Message JSON under key 'anchor'."
             ),
         },
         {
             "label": "metrics-core",
             "message": (
                 f"Compute the core metrics and primary findings for this goal: {clean_goal}. "
-                "Focus on concise, high-signal results."
+                "Use the anchor dataset; do not recompute it."
             ),
         },
         {
             "label": "quality-checks",
             "message": (
                 f"Investigate anomalies, edge-cases, and caveats for this goal: {clean_goal}. "
-                "Return risks, outliers, and confidence notes."
+                "Use the anchor dataset; return risks, outliers, and confidence notes."
             ),
         },
     ]
@@ -227,6 +265,8 @@ async def derive_tasks_from_goal(
         "Return strict JSON with shape: "
         '{"tasks":[{"label":"short-id","message":"task prompt"}]}. '
         f"Create between 2 and {max(2, min(max_tasks, 10))} tasks. "
+        "The first task MUST be labeled 'anchor' and produce the canonical anchor dataset; "
+        "other tasks must reference the anchor and MUST NOT recompute it. "
         "Each message must be concrete and self-contained. No markdown."
     )
     response = await llm_client.generate(
@@ -273,6 +313,97 @@ def _is_retryable_error(error_str: str) -> bool:
         return False
     error_lower = error_str.lower()
     return any(substr in error_lower for substr in _RETRYABLE_ERROR_SUBSTRINGS)
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + "...(truncated)"
+
+
+def _summarize_tasks_for_anchor(tasks: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for entry in tasks[:8]:
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "").strip()
+        message = str(entry.get("message") or "").strip()
+        if label and message:
+            parts.append(f"{label}: {message[:120]}")
+        elif message:
+            parts.append(message[:120])
+        elif label:
+            parts.append(label)
+    summary = "; ".join(parts) or "unspecified"
+    return _truncate_text(summary, 800)
+
+
+def _build_anchor_task_message(
+    *,
+    original_message: str,
+    goal: str | None,
+    tasks: list[dict[str, Any]],
+) -> str:
+    goal_text = (goal or "").strip() or "unspecified"
+    task_summary = _summarize_tasks_for_anchor(tasks)
+    anchor_instructions = (
+        "ANCHOR TASK: First compute the shared anchor dataset (canonical entities "
+        "and core metrics) that all other tasks must reuse. "
+        "Use run_sql/run_python as needed. "
+        'Return a D-Message with strict JSON (no markdown) under key "anchor". '
+        "Then complete your assigned task.\n"
+    )
+    message = (
+        f"{anchor_instructions}"
+        f"Goal: {goal_text}\n"
+        f"Planned tasks: {task_summary}\n"
+        f"Assigned task: {original_message}"
+    )
+    return _truncate_text(message, _MAX_TASK_MESSAGE_CHARS)
+
+
+def _build_anchor_context(anchor_text: str | None) -> str | None:
+    if not isinstance(anchor_text, str) or not anchor_text.strip():
+        return None
+    raw = anchor_text.strip()
+    payload = raw
+    candidate = raw
+    if "{" in raw and "}" in raw:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if 0 <= start < end:
+            candidate = raw[start : end + 1]
+    if candidate.startswith("{"):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and "anchor" in parsed:
+            payload = json.dumps(parsed.get("anchor"), ensure_ascii=True, default=str)
+        else:
+            payload = candidate
+    trimmed = _truncate_text(payload.strip(), _ANCHOR_CONTEXT_MAX_CHARS)
+    return (
+        "Shared anchor context (authoritative; do not recompute):\n"
+        + trimmed
+        + "\nUse this anchor list as the source of truth."
+    )
+
+
+def _inject_anchor_context(task_message: str, anchor_context: str) -> str:
+    base = str(task_message or "").strip()
+    context = str(anchor_context or "").strip()
+    if not context:
+        return base
+    suffix = "\n\nAssigned task:\n"
+    combined = f"{context}{suffix}{base}"
+    if len(combined) <= _MAX_TASK_MESSAGE_CHARS:
+        return combined
+    available = _MAX_TASK_MESSAGE_CHARS - len(suffix) - len(base)
+    if available <= 0:
+        return _truncate_text(f"Assigned task:\n{base}", _MAX_TASK_MESSAGE_CHARS)
+    trimmed_context = _truncate_text(context, available)
+    return f"{trimmed_context}{suffix}{base}"
 
 
 async def _run_with_retry(
@@ -349,6 +480,7 @@ async def spawn_subagents_blocking(
 
     resolved_tasks: list[dict[str, Any]] = []
     requested_task_count = 0
+    tasks_derived = False
     if isinstance(tasks, list):
         requested_task_count = len(tasks)
         for item in tasks:
@@ -365,6 +497,7 @@ async def spawn_subagents_blocking(
         resolved_tasks = [
             {"label": t["label"], "message": t["message"]} for t in derived
         ]
+        tasks_derived = True
     if not resolved_tasks:
         raise HTTPException(
             status_code=400,
@@ -374,6 +507,13 @@ async def spawn_subagents_blocking(
         requested_task_count = len(resolved_tasks)
     accepted_task_count = len(resolved_tasks)
     truncated_task_count = max(0, requested_task_count - accepted_task_count)
+
+    anchor_index = 0
+    if accepted_task_count > 0 and tasks_derived:
+        resolved_tasks[0] = {
+            **resolved_tasks[0],
+            "label": "anchor",
+        }
 
     logger.info(
         "spawn_subagents_blocking: %d tasks, timeout=%ds, max_iter=%d, source=%s",
@@ -394,6 +534,8 @@ async def spawn_subagents_blocking(
             )
         task_label_raw = str(task.get("label") or "").strip()
         task_label = task_label_raw or f"task-{idx + 1}"
+        if tasks_derived and idx == anchor_index:
+            task_label = "anchor"
         branch_name_raw = str(task.get("branch_name") or "").strip()
         branch_name = branch_name_raw or f"subagent-{idx + 1}"
         ordering_key = f"{fanout_group_id}:{idx}"
@@ -408,11 +550,19 @@ async def spawn_subagents_blocking(
             )
         )
 
+        prepared_message = task_message
+        if tasks_derived and idx == anchor_index:
+            prepared_message = _build_anchor_task_message(
+                original_message=task_message,
+                goal=goal,
+                tasks=resolved_tasks,
+            )
+
         child_runs.append(
             {
                 "task_index": idx,
                 "task_label": task_label,
-                "task_message": task_message,
+                "task_message": prepared_message,
                 "child_run_id": new_id("childrun"),
                 "child_worldline_id": branch.new_worldline_id,
                 "branch_name": branch.name,
@@ -449,10 +599,7 @@ async def spawn_subagents_blocking(
     # Semaphore for bounded parallelism to avoid rate limits
     semaphore = asyncio.Semaphore(normalized_max_parallel)
     status_lock = asyncio.Lock()
-    status_by_task_index = {
-        int(run["task_index"]): "queued"
-        for run in child_runs
-    }
+    status_by_task_index = {int(run["task_index"]): "queued" for run in child_runs}
     progress_sequence = 0
     capacity_wait_total_ms = 0
 
@@ -545,6 +692,7 @@ async def spawn_subagents_blocking(
         nonlocal capacity_wait_total_ms
         child_wid = str(run["child_worldline_id"])
         task_label = str(run.get("task_label", ""))
+        task_index = int(run.get("task_index", 0))
         retry_count = 0
 
         async def _run_attempt(
@@ -563,6 +711,7 @@ async def spawn_subagents_blocking(
                 lambda: turn_coordinator.run(child_wid, _factory),
             )
             assistant_text = _assistant_text_from_events(child_events)
+            child_artifacts = _artifacts_from_child_events(child_events)
             return {
                 "result_worldline_id": active_worldline_id,
                 "assistant_text": assistant_text,
@@ -572,6 +721,10 @@ async def spawn_subagents_blocking(
                     child_events, assistant_text=assistant_text
                 ),
                 "events_count": len(child_events),
+                "child_artifacts": child_artifacts,
+                "anchor_payload": (
+                    assistant_text if task_index == anchor_index else None
+                ),
             }
 
         try:
@@ -617,9 +770,7 @@ async def spawn_subagents_blocking(
                                 recovered = not bool(final_attempt["is_loop_limit"])
 
                             if not recovered and retry_count == 1:
-                                error_str = (
-                                    "subagent reached tool-loop limit after synthesis-only retry"
-                                )
+                                error_str = "subagent reached tool-loop limit after synthesis-only retry"
                                 await _emit_progress(
                                     run=run,
                                     status="failed",
@@ -659,7 +810,9 @@ async def spawn_subagents_blocking(
                                 run=run,
                                 status="completed",
                                 phase="finished",
-                                result_worldline_id=final_attempt["result_worldline_id"],
+                                result_worldline_id=final_attempt[
+                                    "result_worldline_id"
+                                ],
                                 assistant_preview=final_attempt["assistant_preview"],
                                 retry_count=retry_count,
                             )
@@ -682,10 +835,12 @@ async def spawn_subagents_blocking(
                                 "result_worldline_id": final_attempt[
                                     "result_worldline_id"
                                 ],
-                                "assistant_preview": final_attempt[
-                                    "assistant_preview"
-                                ],
+                                "assistant_preview": final_attempt["assistant_preview"],
                                 "assistant_text": final_attempt["assistant_text"],
+                                "child_artifacts": final_attempt.get(
+                                    "child_artifacts", []
+                                ),
+                                "anchor_payload": final_attempt.get("anchor_payload"),
                             }
                         except asyncio.CancelledError:
                             logger.warning(
@@ -701,7 +856,8 @@ async def spawn_subagents_blocking(
                                 status="timeout",
                                 phase="finished",
                                 result_worldline_id=str(
-                                    timeout_result.get("result_worldline_id") or child_wid
+                                    timeout_result.get("result_worldline_id")
+                                    or child_wid
                                 ),
                                 error=str(timeout_result.get("error") or ""),
                                 retry_count=retry_count,
@@ -765,7 +921,9 @@ async def spawn_subagents_blocking(
                 run=run,
                 status="timeout",
                 phase="finished",
-                result_worldline_id=str(timeout_result.get("result_worldline_id") or child_wid),
+                result_worldline_id=str(
+                    timeout_result.get("result_worldline_id") or child_wid
+                ),
                 error=str(timeout_result.get("error") or ""),
                 retry_count=retry_count,
             )
@@ -780,68 +938,116 @@ async def spawn_subagents_blocking(
             force=True,
         )
 
-    # Create all tasks but they will respect the semaphore
-    task_to_run: dict[asyncio.Task[dict[str, Any]], dict[str, Any]] = {
-        asyncio.create_task(_run_one_with_semaphore(run)): run for run in child_runs
-    }
+    anchor_result: dict[str, Any] | None = None
+    for run in child_runs:
+        if int(run.get("task_index", 0)) == anchor_index:
+            anchor_result = await _run_one_with_semaphore(run)
+            break
 
-    # Wait for all tasks with global timeout
-    done, pending = await asyncio.wait(
-        set(task_to_run.keys()), timeout=normalized_timeout_s
-    )
+    if anchor_result is None:
+        raise HTTPException(status_code=500, detail="anchor task could not be executed")
 
-    # Cancel stragglers and wait for them to finish
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
+    if anchor_result["status"] == "completed":
+        completed_count += 1
+    elif anchor_result["status"] == "timeout":
+        timed_out_count += 1
+    else:
+        failed_count += 1
+    task_results.append(anchor_result)
 
-    # Collect results from ALL tasks (done + formerly-pending)
-    all_tasks = list(done) + list(pending)
-    for task in all_tasks:
-        run = task_to_run[task]
-        try:
-            result = task.result()
-        except asyncio.CancelledError:
-            result = _timeout_result(run, retry_count=0)
-            await _emit_progress(
-                run=run,
-                status="timeout",
-                phase="finished",
-                result_worldline_id=str(result.get("result_worldline_id") or ""),
-                error=str(result.get("error") or ""),
-                retry_count=int(result.get("retry_count") or 0),
-            )
-        except Exception as exc:
-            result = {
-                **run,
-                "status": "failed",
-                "error": str(exc)[:4000],
-                "failure_code": "subagent_error",
-                "retry_count": 0,
-                "recovered": False,
-                "terminal_reason": "error",
-                "result_worldline_id": run["child_worldline_id"],
-                "assistant_preview": "",
-                "assistant_text": None,
-            }
-            await _emit_progress(
-                run=run,
-                status="failed",
-                phase="finished",
-                result_worldline_id=str(result.get("result_worldline_id") or ""),
-                error=str(result.get("error") or ""),
-                retry_count=int(result.get("retry_count") or 0),
-            )
-        if result["status"] == "completed":
-            completed_count += 1
-        elif result["status"] == "timeout":
-            timed_out_count += 1
-        else:
-            failed_count += 1
-        task_results.append(result)
+    if anchor_result.get("status") != "completed":
+        logger.warning(
+            "anchor task failed; continuing without shared anchor context: status=%s",
+            anchor_result.get("status"),
+        )
+
+    anchor_context = None
+    anchor_source_worldline_id = None
+    anchor_payload = anchor_result.get("anchor_payload")
+    if isinstance(anchor_payload, str) and anchor_payload.strip():
+        anchor_context = _build_anchor_context(anchor_payload)
+        anchor_source_worldline_id = str(anchor_result.get("result_worldline_id") or "")
+
+    remaining_runs = [
+        run for run in child_runs if int(run.get("task_index", 0)) != anchor_index
+    ]
+    if anchor_context and anchor_source_worldline_id:
+        for run in remaining_runs:
+            base_message = str(run.get("task_message") or "").strip()
+            run["task_message"] = _inject_anchor_context(base_message, anchor_context)
+
+    if remaining_runs:
+        # Create all remaining tasks but they will respect the semaphore
+        task_to_run: dict[asyncio.Task[dict[str, Any]], dict[str, Any]] = {
+            asyncio.create_task(_run_one_with_semaphore(run)): run
+            for run in remaining_runs
+        }
+
+        # Wait for all remaining tasks with global timeout
+        timeout_budget = max(1, normalized_timeout_s)
+        if anchor_result.get("status") == "timeout":
+            timeout_budget = max(1, normalized_timeout_s // 2)
+        done, pending = await asyncio.wait(
+            set(task_to_run.keys()), timeout=timeout_budget
+        )
+
+        # Cancel stragglers and wait for them to finish
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        # Collect results from ALL remaining tasks (done + formerly-pending)
+        all_tasks = list(done) + list(pending)
+        for task in all_tasks:
+            run = task_to_run[task]
+            try:
+                result = task.result()
+            except asyncio.CancelledError:
+                result = _timeout_result(run, retry_count=0)
+                await _emit_progress(
+                    run=run,
+                    status="timeout",
+                    phase="finished",
+                    result_worldline_id=str(result.get("result_worldline_id") or ""),
+                    error=str(result.get("error") or ""),
+                    retry_count=int(result.get("retry_count") or 0),
+                )
+            except Exception as exc:
+                result = {
+                    **run,
+                    "status": "failed",
+                    "error": str(exc)[:4000],
+                    "failure_code": "subagent_error",
+                    "retry_count": 0,
+                    "recovered": False,
+                    "terminal_reason": "error",
+                    "result_worldline_id": run["child_worldline_id"],
+                    "assistant_preview": "",
+                    "assistant_text": None,
+                }
+                await _emit_progress(
+                    run=run,
+                    status="failed",
+                    phase="finished",
+                    result_worldline_id=str(result.get("result_worldline_id") or ""),
+                    error=str(result.get("error") or ""),
+                    retry_count=int(result.get("retry_count") or 0),
+                )
+            if result["status"] == "completed":
+                completed_count += 1
+            elif result["status"] == "timeout":
+                timed_out_count += 1
+            else:
+                failed_count += 1
+            task_results.append(result)
 
     sorted_tasks = sorted(task_results, key=lambda item: int(item.get("task_index", 0)))
+    if anchor_context and anchor_source_worldline_id:
+        for task in sorted_tasks:
+            if int(task.get("task_index", -1)) == anchor_index:
+                continue
+            task["anchor_context"] = anchor_context
     loop_limit_failure_count = sum(
         1
         for task in sorted_tasks
@@ -850,7 +1056,9 @@ async def spawn_subagents_blocking(
     retried_task_count = sum(
         1 for task in sorted_tasks if int(task.get("retry_count") or 0) > 0
     )
-    recovered_task_count = sum(1 for task in sorted_tasks if bool(task.get("recovered")))
+    recovered_task_count = sum(
+        1 for task in sorted_tasks if bool(task.get("recovered"))
+    )
     failure_summary: dict[str, int] = {}
     for task in sorted_tasks:
         failure_code = str(task.get("failure_code") or "").strip()
@@ -859,11 +1067,43 @@ async def spawn_subagents_blocking(
         failure_summary[failure_code] = failure_summary.get(failure_code, 0) + 1
 
     partial_failure = failed_count > 0 or timed_out_count > 0
+
+    # Merge artifacts from completed child worldlines to parent
+    merged_artifacts: list[dict[str, Any]] = []
+    for task in sorted_tasks:
+        if task.get("status") != "completed":
+            continue
+        child_artifacts = task.get("child_artifacts", [])
+        if not child_artifacts:
+            continue
+        child_wid = str(task.get("child_worldline_id") or "")
+        if not child_wid:
+            continue
+        try:
+            copied = copy_artifacts_to_parent(
+                source_worldline_id=child_wid,
+                target_worldline_id=source_worldline_id,
+                artifacts=child_artifacts,
+                task_label=str(task.get("task_label") or ""),
+                task_index=int(task.get("task_index") or 0),
+                target_event_id=tool_call_id or fanout_group_id,
+            )
+            merged_artifacts.extend(copied)
+        except Exception as exc:
+            logger.warning(
+                "Failed to merge artifacts from child %s: %s",
+                child_wid[:8],
+                exc,
+            )
+
     return {
         "fanout_group_id": fanout_group_id,
         "parent_tool_call_id": tool_call_id,
         "source_worldline_id": source_worldline_id,
         "from_event_id": from_event_id,
+        "anchor_task_index": anchor_index,
+        "anchor_context": anchor_context,
+        "anchor_source_worldline_id": anchor_source_worldline_id,
         "task_count": accepted_task_count,
         "requested_task_count": requested_task_count,
         "accepted_task_count": accepted_task_count,
@@ -882,4 +1122,5 @@ async def spawn_subagents_blocking(
         "all_completed": not partial_failure,
         "partial_failure": partial_failure,
         "tasks": sorted_tasks,
+        "merged_artifacts": merged_artifacts,
     }

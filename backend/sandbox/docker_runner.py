@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,10 @@ try:
     from backend import meta
 except ModuleNotFoundError:
     import meta
+
+# Bounded thread pool for Docker operations - prevents unbounded thread creation
+# Set to 2x max sandboxes for headroom (start/stop/execute operations)
+DEFAULT_THREAD_POOL_SIZE = 6
 
 
 @dataclass(frozen=True)
@@ -27,9 +32,14 @@ class DockerSandboxRunner:
         self,
         image: str | None = None,
         limits: SandboxLimits | None = None,
+        thread_pool_size: int = DEFAULT_THREAD_POOL_SIZE,
     ) -> None:
         self.image = image or os.getenv("SANDBOX_IMAGE", "textql-sandbox:py311")
         self.limits = limits or SandboxLimits()
+        self._thread_pool = ThreadPoolExecutor(
+            max_workers=thread_pool_size,
+            thread_name_prefix="sandbox_docker",
+        )
 
     async def execute(
         self,
@@ -38,7 +48,9 @@ class DockerSandboxRunner:
         code: str,
         timeout_s: int,
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._thread_pool,
             self._execute_sync,
             sandbox_id,
             worldline_id,
@@ -47,10 +59,24 @@ class DockerSandboxRunner:
         )
 
     async def start(self, worldline_id: str) -> str:
-        return await asyncio.to_thread(self._start_sync, worldline_id)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._thread_pool,
+            self._start_sync,
+            worldline_id,
+        )
 
     async def stop(self, sandbox_id: str) -> None:
-        await asyncio.to_thread(self._stop_sync, sandbox_id)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            self._thread_pool,
+            self._stop_sync,
+            sandbox_id,
+        )
+
+    def shutdown(self) -> None:
+        """Shutdown the thread pool. Call during application shutdown."""
+        self._thread_pool.shutdown(wait=False)
 
     def _workspace_dir(self, worldline_id: str) -> Path:
         return meta.DB_DIR / "worldlines" / worldline_id / "workspace"
